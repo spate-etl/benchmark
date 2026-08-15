@@ -236,7 +236,10 @@ mod tests {
 
     fn decode(batch_id: u64, send_ts_us: i64) -> AvroValue {
         let datum = encode_batch(batch_id, send_ts_us);
-        apache_avro::from_avro_datum(schema(), &mut datum.as_slice(), None).expect("decode")
+        #[expect(deprecated, reason = "a test fixture decodes with the free function")]
+        let value =
+            apache_avro::from_avro_datum(schema(), &mut datum.as_slice(), None).expect("decode");
+        value
     }
 
     /// The positional indexing in `flatten_value` is only safe if the decoder
