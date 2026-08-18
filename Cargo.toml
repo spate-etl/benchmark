@@ -36,7 +36,7 @@ spate-avro = "0.1.0"
 spate-kafka = "0.1.0"
 spate-clickhouse = "0.1.0"
 
-apache-avro = "0.21"
+apache-avro = "0.22"
 bytes = "1.11.1"
 rdkafka = "0.39"
 serde = { version = "1.0.228", features = ["derive"] }
