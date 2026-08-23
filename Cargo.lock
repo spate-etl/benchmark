@@ -2464,7 +2464,6 @@ dependencies = [
 name = "spate-arm"
 version = "0.1.0"
 dependencies = [
- "apache-avro",
  "bytes",
  "serde",
  "spate-avro",
@@ -2472,6 +2471,7 @@ dependencies = [
  "spate-clickhouse",
  "spate-core",
  "spate-kafka",
+ "tokio",
  "yaml_serde",
 ]
 
