@@ -50,6 +50,12 @@
 //! opposite failure and just as expensive: it splits published records from the
 //! tree for a change that moved no byte.
 
+#![expect(
+    deprecated,
+    reason = "apache-avro 0.22 deprecates the datum free functions; the corpus \
+              generator and its tests call them directly"
+)]
+
 use apache_avro::types::Value as AvroValue;
 use apache_avro::{Schema, to_avro_datum};
 use serde::Deserialize;
@@ -1757,7 +1763,7 @@ mod tests {
     fn the_committed_schema_parses() {
         let s = schema();
         assert!(
-            matches!(s, Schema::Record(r) if r.name.name == "SensorBatch"),
+            matches!(s, Schema::Record(r) if r.name.name() == "SensorBatch"),
             "expected a SensorBatch record schema"
         );
     }

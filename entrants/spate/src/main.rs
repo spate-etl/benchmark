@@ -27,16 +27,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use apache_avro::types::Value as AvroValue;
 use bytes::BytesMut;
 use serde::Serialize;
-use spate_arm::rows::{self, Row};
+use spate_arm::rows;
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
 use spate_benchmark_harness::corpus;
 use spate_benchmark_harness::{env_str, env_u64};
 use spate_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
 use spate_core::config::{ComponentConfig, PipelineConfig};
-use spate_core::deser::{Owned, RecFamily};
+use spate_core::deser::RecFamily;
 use spate_core::error::SinkError;
 use spate_core::ops::chain;
 use spate_core::pipeline::Pipeline;
@@ -97,26 +96,27 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
 }
 
 fn kafka_source() -> spate_kafka::KafkaSource {
-    spate_kafka::KafkaSource::new(spate_kafka::KafkaSourceConfig {
-        brokers: env_str("BOOTSTRAP", "spate-bench-redpanda:29092"),
-        topic: env_str("TOPIC", "comparison-sensor-batches"),
-        group_id: env_str("GROUP_ID", "comparison-spate"),
-        // Matched to Flink's checkpoint interval so the arms pay for the same
-        // at-least-once guarantee at the same cadence.
-        commit_interval: Duration::from_secs(5),
-        startup_timeout: Duration::from_secs(60),
-        statistics_interval: Duration::from_secs(5),
-        rdkafka: BTreeMap::from([(
-            // `earliest` replays a prefilled corpus from the beginning (drain
-            // mode). `latest` starts at the tail, which sustained mode requires:
-            // with a backlog present the consumer runs flat out draining it, so
-            // the measured throughput would be catch-up speed rather than the
-            // rate we offered — and would read as *higher* than the offered rate,
-            // which is how the mistake announces itself.
-            "auto.offset.reset".to_owned(),
-            env_str("OFFSET_RESET", "earliest"),
-        )]),
-    })
+    let mut cfg = spate_kafka::KafkaSourceConfig::new(
+        env_str("BOOTSTRAP", "spate-bench-redpanda:29092"),
+        env_str("TOPIC", "comparison-sensor-batches"),
+        env_str("GROUP_ID", "comparison-spate"),
+    );
+    // Matched to Flink's checkpoint interval so the arms pay for the same
+    // at-least-once guarantee at the same cadence.
+    cfg.commit_interval = Duration::from_secs(5);
+    cfg.startup_timeout = Duration::from_secs(60);
+    cfg.statistics_interval = Duration::from_secs(5);
+    cfg.rdkafka = BTreeMap::from([(
+        // `earliest` replays a prefilled corpus from the beginning (drain
+        // mode). `latest` starts at the tail, which sustained mode requires:
+        // with a backlog present the consumer runs flat out draining it, so
+        // the measured throughput would be catch-up speed rather than the
+        // rate we offered — and would read as *higher* than the offered rate,
+        // which is how the mistake announces itself.
+        "auto.offset.reset".to_owned(),
+        env_str("OFFSET_RESET", "earliest"),
+    )]);
+    spate_kafka::KafkaSource::new(cfg)
 }
 
 /// The egress shape the driver's sweep varies.
@@ -167,6 +167,7 @@ fn sink_section(format: Format) -> ComponentConfig {
     let format_key = match format {
         Format::Native => "native",
         Format::RowBinary => "rowbinary",
+        other => panic!("{}", unsupported(other)),
     };
     // Egress shape is driver-controlled, not hardcoded. These are the knobs the
     // sweep varies to find out what the arm is actually bound by; if they were
@@ -237,23 +238,12 @@ fn run(format: Format) {
                 .expect("native schema"),
         ),
         Format::RowBinary => None,
+        other => panic!("{}", unsupported(other)),
     };
 
-    // `Emitter::emit` returns a `Flow`, and every site below discards it. That
-    // is deliberate, and the opposite of what it looks like:
-    //
-    // * No backpressure is lost. The emitter latches the signal internally
-    //   (sticky once blocked) and the chain reads it after the closure returns;
-    //   the return value is only an early-exit *hint*.
-    // * Acting on the hint here would be a data-loss bug. A `flat_map` must emit
-    //   every output of the input record it was given — the chain's resume
-    //   cursor is per input record, not per fan-out element, so breaking out
-    //   mid-batch would silently discard the remaining events of that message.
-    //
-    // One chain: `build_value` is the documented throughput path of the shipped
-    // Avro deserializer, and the flatten applies the workload's filters and
-    // derivations before the format-generic encoder sees a row.
-    let d = avro.build_value().expect("value deserializer");
+    let d = avro
+        .build_datum::<rows::BatchFam>()
+        .expect("datum deserializer");
     let enc = encoder(format, native_schema);
     let report = pipeline
         .sink(sink)
@@ -261,13 +251,11 @@ fn run(format: Format) {
         .chains(move |ctx| {
             let (d, enc) = (d.clone(), enc.clone());
             let chunk = ctx.chunk();
-            chain::<Owned<AvroValue>, _>(d)
+            chain::<rows::BatchFam, _>(d)
                 .with_metrics(ctx.pipeline, "main")
-                .flat_map::<Owned<Row>, _>(|v, out| {
-                    rows::flatten_value(&v, |row| {
-                        out.emit(row);
-                    });
-                })
+                // A borrowing record family needs a `fn` item here, not a
+                // closure. `rows::explode` carries the `Flow`-discard rules.
+                .flat_map::<rows::RowFam, _>(rows::explode)
                 .sink(enc, KeyHashRouter, chunk, ctx.queues, ctx.budget)
                 .build()
         })
@@ -286,7 +274,13 @@ fn encoder<F: RecFamily>(
     match format {
         Format::Native => EitherEncoder::Native(NativeEncoder::new(native.expect("native schema"))),
         Format::RowBinary => EitherEncoder::RowBinary(ClickHouseEncoder::new()),
+        other => panic!("{}", unsupported(other)),
     }
+}
+
+/// The refusal for a wire format this arm does not publish.
+fn unsupported(format: Format) -> String {
+    format!("unsupported wire format {format:?} (native|rowbinary)")
 }
 
 /// One encoder type covering both wire formats.

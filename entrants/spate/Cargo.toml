@@ -20,7 +20,6 @@ repository.workspace = true
 [dependencies]
 spate-benchmark-harness = { workspace = true }
 
-apache-avro = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 bytes = { workspace = true }
@@ -32,6 +31,9 @@ spate-avro = { workspace = true }
 spate-clickhouse = { workspace = true }
 spate-core = { workspace = true }
 spate-kafka = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true
