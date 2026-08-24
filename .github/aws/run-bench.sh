@@ -11,6 +11,11 @@
 #   - overrun: the `timeout` below kills the payload two hours before the
 #     reaper's TTL would, so the box still ships its logs and self-terminates
 #     rather than being reaped.
+#
+# MODE=tuning is the infrastructure search (.github/aws/tune.sh). It edits the
+# environment profile on the box and writes nothing to results/: what it
+# produces is a ladder of measurements a maintainer reads, not a published
+# number.
 set -euo pipefail
 
 : "${RUN_ID:?}" "${SHA:?}" "${ENV_ID:?}" "${SELECTOR:?}" "${REPS:?}"
@@ -70,6 +75,14 @@ payload() {
   run_step build-harness cargo build --release --locked \
     -p spate-benchmark-harness --bin bench
   local bench="$REPO/target/release/bench"
+
+  # The infrastructure search. No arm images: it measures what the broker and
+  # ClickHouse absorb at a ladder of caps, and none of that runs an entrant.
+  # Building six of them would be most of the box time for nothing.
+  if [ "$MODE" = tuning ]; then
+    run_step tune bash "$REPO/.github/aws/tune.sh"
+    return 0
+  fi
 
   # The selector may be several selectors ('spate flink'); split on purpose.
   local -a sel
