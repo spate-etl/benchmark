@@ -798,6 +798,9 @@ struct Measurement {
     rows_per_s: f64,
     /// Duplicate rows the correctness gate counted in its window.
     duplicates: u64,
+    /// Seconds the target needed to have no active parts and no running merges
+    /// after this repetition's truncate, before the window opened.
+    settle_s: f64,
     /// `Ok`, or `InfraBound` when the arm outran a proven ceiling.
     status: Status,
     /// What the record's `note` should say about how it was measured.
@@ -1282,6 +1285,10 @@ fn measure(
                 report = report.metric(key, metric);
             }
         }
+        // How long the target took to go quiet before this window opened.
+        // Minimised: it is merge work the previous repetition left, and a rising
+        // figure across a sweep is the drift `ch_rows_merged` exists to expose.
+        report = report.metric("ch_settle_us", Metric::minimize(d.settle_s * 1e6, "us"));
         // GC pauses and heap, for the JVM arms and no others. Emitted only
         // where the quantity exists: a Rust binary has no collector, and a bar
         // of length zero would say it paused for 0 ms, which is a claim about a
@@ -1542,6 +1549,25 @@ fn run_arm(
         &format!("TRUNCATE TABLE {}", corpus::TABLE),
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
+
+    // Wait for the server to finish acting on that truncate before the window
+    // opens. `TRUNCATE` drops parts asynchronously and leaves a merge queue, and
+    // `system.part_log` records a merge at COMPLETION — so merges started by one
+    // repetition and finishing inside the next are charged to the next. The loop
+    // is `for rep { for arm }`, so the debt lands on whichever arm runs first in
+    // each repetition, every time.
+    //
+    // Here rather than at the top of the sweep: this truncate is the largest
+    // single source of the churn, and no arm container exists yet, so the wait is
+    // outside the window at both ends.
+    let settle_s = crate::serverside::wait_until_settled(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        corpus::TABLE,
+    );
+    eprintln!("  settled in {settle_s:.1}s");
 
     // The arm's objects, recreated from the committed file every repetition so
     // no state — not a stale view definition, not an implicitly kept setting —
@@ -1987,6 +2013,7 @@ fn run_arm(
         rows: rows_f,
         rows_per_s,
         duplicates: gates.duplicates,
+        settle_s,
         status,
         note,
         flags,

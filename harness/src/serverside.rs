@@ -1136,6 +1136,65 @@ pub fn measure(
     summarise(&rows, tables, window)
 }
 
+// ---------------------------------------------------------------------------
+// Settling
+// ---------------------------------------------------------------------------
+
+/// Additional quiet imposed after the server reports no parts and no merges,
+/// in milliseconds.
+///
+/// A part that has just become inactive is still being unlinked, and the
+/// measurement about to start should not pay for that.
+pub const SETTLE_QUIET_MS: u64 = 2_000;
+
+/// Seconds [`wait_until_settled`] waits before giving up on the wait.
+///
+/// Bounded because the alternative is a pass that hangs, and generous because
+/// the alternative to that is a measurement charged for its predecessor.
+/// Exceeding it is recorded rather than swallowed: a target that cannot clear
+/// its own merge queue inside this is a finding about the target.
+pub const SETTLE_MAX_S: u64 = 120;
+
+/// Milliseconds between polls while waiting.
+pub const SETTLE_POLL_MS: u64 = 250;
+
+/// Waits until `table` has no active parts and no running merges, and returns
+/// the seconds waited.
+///
+/// The wait is on the server's own `system.parts` and `system.merges` rather
+/// than on a clock. A `TRUNCATE` drops parts asynchronously and leaves a merge
+/// queue, so a fixed sleep is a guess about work whose size is not known.
+///
+/// Returning past [`SETTLE_MAX_S`] is not an error, and an unreadable answer
+/// ends the wait rather than extending it: the system tables are a diagnostic,
+/// and a pass that hung because one stopped answering would be a worse failure
+/// than a measurement that started slightly early.
+#[must_use]
+pub fn wait_until_settled(host: &str, port: u16, user: &str, password: &str, table: &str) -> f64 {
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(SETTLE_MAX_S);
+    while std::time::Instant::now() < deadline {
+        let quiet = crate::docker::try_clickhouse_sql(
+            host,
+            port,
+            user,
+            password,
+            &format!(
+                "SELECT (SELECT count() FROM system.parts WHERE table = '{table}' AND active) \
+                 + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
+            ),
+        )
+        .ok()
+        .and_then(|b| b.trim().parse::<u64>().ok());
+        if quiet.is_none_or(|n| n == 0) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(SETTLE_QUIET_MS));
+    started.elapsed().as_secs_f64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2131,26 +2131,9 @@ const INGEST_SWEEP_PATIENCE: usize = 2;
 /// ladder is climbed in ascending order, that error would fall entirely on the
 /// higher rungs and would manufacture a plateau out of the rig's own tidying.
 ///
-/// It is a floor on top of [`settle`]'s wait rather than the whole of the wait.
-/// A fixed sleep was sufficient while every repeated block was being
-/// deduplicated away and the table stayed at 800,000 rows; now that the rig's
-/// rows land, a rung leaves thousands of parts and a merge queue behind it, and
-/// two seconds of clock is not a statement about either. The server is asked
-/// instead.
-const INGEST_SETTLE_MS: u64 = 2_000;
-
 /// Seconds [`settle`] will wait for a truncated table to have no parts and no
 /// merges before giving up on the wait.
 ///
-/// Bounded because the alternative is a pass that hangs, and generous because
-/// the alternative to *that* is a rung charged for its predecessor. Exceeding it
-/// is recorded on the ceiling rather than swallowed: a target that cannot clear
-/// its own merge queue inside this is a finding about the target.
-const INGEST_SETTLE_MAX_S: u64 = 120;
-
-/// Milliseconds between polls while waiting for a table to settle.
-const INGEST_SETTLE_POLL_MS: u64 = 250;
-
 /// The concurrency ladder, and the decision about when to stop climbing it.
 ///
 /// Split out from the measurement so the rule is testable without a server. What
@@ -2806,7 +2789,7 @@ fn settle_reading(bursts: &[(u64, Burst)]) -> Option<Settle> {
     Some(Settle {
         max_wait_s,
         at_concurrency,
-        quiet_ms: INGEST_SETTLE_MS,
+        quiet_ms: crate::serverside::SETTLE_QUIET_MS,
     })
 }
 
@@ -3189,59 +3172,37 @@ impl Drop for CeilingTable<'_> {
 }
 
 /// Empties the ceiling table and waits until the server has nothing left to do
-/// about it.
+/// about it, returning the seconds waited.
 ///
-/// Returns the seconds waited, which is evidence rather than bookkeeping: it is
-/// how long the target needed to finish merging what the previous rung left, and
-/// therefore a measure of the work that fell outside the window that was timed.
-///
-/// The wait is on the server's own `system.parts` and `system.merges` rather
-/// than on a clock. A fixed sleep was sufficient while the rig's rows were being
-/// deduplicated away and the table never grew; now that they land, a rung leaves
-/// thousands of parts and a merge queue, and two seconds of quiet would be a
-/// guess. Since the ladder ascends, a guess that is too short lands entirely on
-/// the high rungs and manufactures a plateau out of the rig's own tidying.
+/// The wait is how long the target needed to finish merging what the previous
+/// rung left, so it measures work that fell outside the window that was timed.
+/// The ladder ascends, so an unpaid debt lands on the high rungs and
+/// manufactures a plateau out of the rig's own tidying.
 ///
 /// # Errors
 ///
 /// If the truncation is refused. A wait that runs past
-/// [`INGEST_SETTLE_MAX_S`] is **not** an error: the pass proceeds and the
-/// duration reaches the record through [`settle_note`], because a target that
-/// cannot clear its merge queue in two minutes is a finding rather than a
-/// malfunction.
+/// [`crate::serverside::SETTLE_MAX_S`] is not an error: the pass proceeds and
+/// the duration reaches the record through [`settle_note`].
 fn settle(ep: &Endpoints, table: &str) -> Result<f64, String> {
-    let sql = |s: &str| {
-        docker::try_clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, s)
-    };
-    let body = sql(&format!("TRUNCATE TABLE IF EXISTS {table}"))
-        .map_err(|e| format!("truncate {table}: {e}"))?;
+    let body = docker::try_clickhouse_sql(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        &format!("TRUNCATE TABLE IF EXISTS {table}"),
+    )
+    .map_err(|e| format!("truncate {table}: {e}"))?;
     if body.contains("DB::Exception") {
         return Err(format!("truncate {table}: {body}"));
     }
-
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(INGEST_SETTLE_MAX_S);
-    while Instant::now() < deadline {
-        let quiet = sql(&format!(
-            "SELECT (SELECT count() FROM system.parts WHERE table = '{table}' AND active) \
-             + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
-        ))
-        .ok()
-        .and_then(|b| b.trim().parse::<u64>().ok());
-        // An unreadable answer ends the wait rather than extending it: the
-        // system tables are a diagnostic, and a pass that hung because one of
-        // them stopped answering would be a worse failure than a rung that
-        // started slightly early.
-        if quiet.is_none_or(|n| n == 0) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(INGEST_SETTLE_POLL_MS));
-    }
-    // The floor, on top of the wait: a part that has just become inactive is
-    // still being unlinked, and the rung about to be timed should not be paying
-    // for that either.
-    std::thread::sleep(Duration::from_millis(INGEST_SETTLE_MS));
-    Ok(started.elapsed().as_secs_f64())
+    Ok(crate::serverside::wait_until_settled(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        table,
+    ))
 }
 
 // ---------------------------------------------------------------------------

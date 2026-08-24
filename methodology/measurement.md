@@ -30,7 +30,14 @@ old the backlog was; a drain record carries no latency metric at all, and the
 harness makes that structural rather than conventional. **Server-side cost
 excludes background merges**, which live in `system.part_log` and are
 arm-dependent: 25,000-row batches make far more parts than 262,144-row ones, and
-that cost lands nowhere in this figure. **A GC number exists only for JVM arms**
+that cost lands nowhere in this figure. The exclusion is from that figure only.
+Merges run on the same cores and the same disk as the measurement, so they reach
+throughput while being charged to nobody. Two things bound them. Every
+repetition waits for the target to report no active parts and no running merges
+before its window opens, so a repetition pays for its own merges rather than for
+its predecessor's; and `ch_rows_merged`, `ch_merge_duration_us` and
+`ch_settle_us` are on every record, so the merge work a window ran against is
+visible rather than inferred. **A GC number exists only for JVM arms**
 — and only for a container whose descriptor declares `gc_log`; a JVM container
 that declares none records no GC figures, an absence, not a zero. The absence is
 never a zero in the other direction either: a Rust arm has no collector, so a
