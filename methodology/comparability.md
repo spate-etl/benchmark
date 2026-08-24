@@ -105,6 +105,7 @@ asserts it stays in step with the constant in `harness/src/report.rs`.
 
 | Version | Date | Change |
 |---|---|---|
+| 2 | 2026-08-24 | Every repetition waits for the target to report no active parts and no running merges before its window opens, so a repetition pays for its own merges rather than its predecessor's. Sampler at 10 Hz, drain polled at 250 ms, and a 120-second floor on the measurement window with `window_resolution` and `short_window` on every record. Every sweep measures its own first arm a second time under a second label and publishes the difference as a `verdict` record. The correctness gate examines a share of the corpus bounded by ClickHouse's memory rather than a fixed count. The arm envelope a number was measured under is on the record. `infra_digest` covers the storage layout. |
 | 1 | 2026-07-29 | Initial protocol. One measurement window — throughput, mean cores and CPU-per-row divide by the sampler's own window. Headroom gated against both ceilings, with a ceiling measured at the wrong message size or under a different infrastructure envelope refused rather than extrapolated. Gate set covers row count and every derived column. Sustained mode and latency. Peak memory is what an arm held at one instant across its containers. Server-side cost, GC pauses and JVM heap measured. |
 
 What each change was and why is in the commit that made it; this table exists to

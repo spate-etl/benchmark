@@ -51,7 +51,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// numbers?" is a judgement; a content hash would answer yes to every typo fix
 /// and shatter every comparability group in the archive. `methodology/`
 /// carries a row per version and CI asserts the two stay in step.
-pub const HARNESS_VERSION: u32 = 1;
+pub const HARNESS_VERSION: u32 = 2;
 
 /// Version of the **corpus**: the Avro schema, the ClickHouse DDL, and the
 /// generator constants.

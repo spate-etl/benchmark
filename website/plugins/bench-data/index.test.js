@@ -151,6 +151,18 @@ test('the A/A control and the sweep verdict are not arms', async () => {
   );
   // The alpha native row still medians exactly its own three repetitions.
   assert.equal(find(rows, 'alpha', 'native').reps_counted, 3);
+
+  // The verdict is dropped as a row and kept as the sitting's floor, so the
+  // rows it describes can say what the rig was doing while they were taken.
+  assert.equal(find(rows, 'alpha', 'native').aa_spread, 0.021);
+});
+
+test('a sweep with no A/A control reports no floor rather than a wrong one', async () => {
+  const {rows} = await load();
+  // gamma's sittings carry no verdict. `null` is what the legend renders its
+  // "nothing has measured this" copy from; a zero would read as a rig that
+  // does not move.
+  assert.equal(find(rows, 'gamma', 'native').aa_spread, null);
 });
 
 test('flags are the union across repetitions, not the newest one\'s', async () => {
