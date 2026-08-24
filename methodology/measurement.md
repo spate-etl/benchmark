@@ -95,6 +95,27 @@ whole corpus, so a window clipped at either end understates the CPU and the
 reading comes out flatteringly low. Raising the rate bounds that clipping; it
 does not remove it, and the residual is why the floor exists as well.
 
+## What the rig does when nothing changes
+
+Every sweep measures its own first arm a second time, under a second label, in
+the same interleave as any other pair. The two halves differ by everything two
+arms differ by — container recreation, the truncate, the settle, position in the
+rotation — and by nothing else, so the difference between them is the spread this
+rig produces when the system under test does not change. Repetitions of one arm
+cannot answer that: they never cross the path along which two arms differ.
+
+The control is the sweep's first arm rather than a named one. Naming an entrant
+would make one system the rig's reference, which is not something a benchmark run
+by one of its entrants should hand itself.
+
+The pair's difference is published as a `verdict` record for the sweep, joined to
+its measurements by `invocation_id`. It is not a row in the comparison and the
+control is not an entrant: the number exists to be differenced, not to be ranked.
+The environment profile declares the spread above which a sweep's differences are
+not to be believed; until it declares one, the figure is recorded as an
+observation and nothing calls it acceptable. **An A/A control that reports a
+difference is a bug in the harness or the environment rather than a finding.**
+
 It is a separate limit from run-to-run spread, and the two are often confused.
 Spread says how much a repeated measurement wanders; quantisation says how finely
 any single one can be read. Both must clear before a difference means anything.

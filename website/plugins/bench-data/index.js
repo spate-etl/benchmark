@@ -281,6 +281,14 @@ function summarise(records) {
   const byKey = new Map();
   const byAttempt = new Map();
   for (const rec of records) {
+    // Only measurements are arms. A `verdict` is a conclusion drawn across
+    // arms — the sweep's A/A control is one — and rendering it as a row would
+    // put a statement about the rig in a table of systems.
+    if ((rec.kind ?? 'measurement') !== 'measurement') continue;
+    // The A/A control is the same arm measured a second time to difference
+    // against itself. Its number is evidence about the rig and would be a
+    // duplicate entrant in the comparison.
+    if ((rec.flags ?? []).includes('aa_control')) continue;
     if (!CARRIES_METRICS.has(rec.status)) {
       // Attempted and produced no publishable number. Surfaced as an explicit
       // gap rather than an absence a reader would read as "not tried".

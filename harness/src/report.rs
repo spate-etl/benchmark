@@ -252,6 +252,13 @@ pub enum Flag {
     UnpublishableEnvironment,
     /// Infrastructure containers were reused rather than recreated.
     ReusedInfra,
+    /// One half of the sweep's A/A control: the same arm measured a second time
+    /// under a second label.
+    ///
+    /// Not a system in the comparison. Its number exists to be differenced
+    /// against its twin's, and the difference is the spread the rig produces
+    /// when nothing changes.
+    AaControl,
     /// The measurement window fell below the floor the protocol declares.
     ///
     /// A drain's window is `corpus / throughput`, so it shrinks as arms get

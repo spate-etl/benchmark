@@ -44,6 +44,23 @@ pub struct Profile {
     pub infra: Infra,
     /// Where the measured ceiling lives.
     pub ceiling: CeilingRef,
+    /// What this rig does when nothing changes.
+    #[serde(default)]
+    pub noise: Noise,
+}
+
+/// The rig's own spread, measured by an A/A control.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Noise {
+    /// Relative difference between the two halves of an A/A pair, above which a
+    /// sweep's timing verdicts are not to be believed.
+    ///
+    /// `None` until an A/A run has measured one here. A sweep still runs its
+    /// control and still records the delta; what it cannot do is call the delta
+    /// acceptable, because nothing has said what acceptable is.
+    #[serde(default)]
+    pub aa_spread: Option<f64>,
 }
 
 /// How much weight a reader should give numbers from this environment.
@@ -458,6 +475,7 @@ mod tests {
                 ceiling: CeilingRef {
                     file: "ceilings/t.json".to_owned(),
                 },
+                noise: Noise::default(),
             },
             digest: "0".repeat(12),
             dir: PathBuf::from("."),

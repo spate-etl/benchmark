@@ -325,6 +325,13 @@ const DRAIN_MAX_REFERENCE_BATCHES: u64 = 1_500_000;
 /// interval. Against [`MIN_WINDOW_S`] this contributes at most 0.2%.
 const DRAIN_POLL_MS: u64 = 250;
 
+/// The figure the comparison leads on, and therefore the one an A/A control
+/// differences.
+const LEAD_METRIC: &str = "rows_per_s_per_core";
+
+/// The label the A/A control's half of the pair carries.
+const AA_LABEL: &str = "control";
+
 /// Seconds a drain window must reach for the reading to be treated as precise.
 ///
 /// The window is `corpus / throughput`, so it shrinks as arms get faster and has
@@ -600,18 +607,43 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     let _ceilings = env.ceilings()?;
     let ceiling = env.ceiling()?;
 
+    // The A/A control: the sweep's first arm, run a second time under a second
+    // label. Always, rather than on a flag — a control somebody has to remember
+    // to ask for is a control that is missing from the sweep that needed it.
+    //
+    // The first arm rather than a named one. Naming an entrant in a profile or a
+    // constant would make one system the rig's reference, which is not something
+    // a benchmark run by one of its entrants should hand itself.
+    //
+    // It runs in the interleave like any other arm, so the pair differs by
+    // everything two arms differ by — container recreation, truncate, settle,
+    // position in the rotation — and by nothing else. Repetitions of one arm
+    // never cross that path and so cannot see a bias in it.
+    let mut order: Vec<(&Arm<'_>, Option<&str>)> = arms.iter().map(|a| (a, None)).collect();
+    if let Some(first) = arms.first() {
+        order.push((first, Some(AA_LABEL)));
+    }
+
     // The plan, printed before anything is spent. A full sweep costs hours, so
     // "which arms will this actually run?" has to be answerable in advance
     // rather than inferred afterwards from what appeared.
     eprintln!(
         "plan: {} arm(s) x {} rep(s) = {} run(s), interleaved, in {} mode, on {} [{}]",
-        arms.len(),
+        order.len(),
         opts.reps,
-        arms.len() * opts.reps as usize,
+        order.len() * opts.reps as usize,
         opts.mode.name(),
         env.spec.id,
         format!("{:?}", env.spec.class).to_lowercase()
     );
+    if let Some(first) = arms.first() {
+        eprintln!(
+            "  the A/A control is {}:{} measured a second time as {AA_LABEL:?}; its \
+             number is not a system's, it is the difference against its twin",
+            first.entrant.id(),
+            first.variant.id
+        );
+    }
     if let Mode::Sustained {
         offered_msgs_per_s,
         window_s,
@@ -769,12 +801,15 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     let mut refusals = Vec::new();
     let mut emitted = 0usize;
 
+    let mut aa: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
+    let mut aa_sut: Option<Sut> = None;
+
     // Interleaved, not batched. Running all of one arm and then all of another
     // has already manufactured a fake 30% difference in a related project: the
     // machine is not in the same state at the end of a long run as at the start,
     // and batching aliases that drift onto whichever arm went last.
     for rep in 1..=opts.reps {
-        for arm in arms {
+        for (arm, aa_label) in &order {
             let expected_rows = corpus_rows;
             eprintln!(
                 "\n=== rep {rep}/{} — {}:{} ===",
@@ -794,9 +829,16 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
                 expected_rows,
                 schema_id,
                 &base_flags,
+                *aa_label,
             ) {
                 Ok(m) => {
                     emitted += 1;
+                    if let Some(v) = m.lead {
+                        aa.entry(aa_label.map(str::to_owned)).or_default().push(v);
+                        if aa_label.is_some() {
+                            aa_sut = Some(m.sut.clone());
+                        }
+                    }
                     // The refusal is printed and counted exactly as an
                     // unrecorded one is. A recorded refusal is not a quiet one:
                     // the record exists so a consumer can see the gap, not so
@@ -823,6 +865,11 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
         }
     }
 
+    if let Some(path) = record_aa_verdict(root, &env, &infra, opts, &aa, aa_sut)? {
+        emitted += 1;
+        eprintln!("A/A verdict recorded in {}", path.display());
+    }
+
     eprintln!(
         "\n{emitted} record(s) written, {} refusal(s)",
         refusals.len()
@@ -833,6 +880,113 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     Ok(())
 }
 
+/// Writes the sweep's A/A verdict, or `None` when the sweep produced no pair.
+///
+/// A `Verdict` rather than a measurement: it is a conclusion drawn across arms
+/// and not an observation of a system. It cannot be a field on the measurements
+/// themselves, because those are appended as each repetition finishes and the
+/// difference is not known until the last of them has been.
+///
+/// The record carries the delta and the environment's declared threshold; it
+/// does not carry a pass or a fail. The threshold is a property of the
+/// environment and can be re-measured, and a judgement baked into the record
+/// would be frozen at whatever was declared on the day.
+///
+/// # Errors
+///
+/// If the record cannot be appended.
+fn record_aa_verdict(
+    root: &Path,
+    env: &Environment,
+    infra: &Infra,
+    opts: &RunOptions,
+    aa: &BTreeMap<Option<String>, Vec<f64>>,
+    sut: Option<Sut>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let (Some(a), Some(b), Some(sut)) = (aa.get(&None), aa.get(&Some(AA_LABEL.to_owned())), sut)
+    else {
+        return Ok(None);
+    };
+    let (Some(ma), Some(mb), Some(spread)) = (median(a), median(b), aa_spread(a, b)) else {
+        return Ok(None);
+    };
+
+    let declared = env.spec.noise.aa_spread;
+    let verdict = match declared {
+        Some(t) if spread > t => {
+            eprintln!(
+                "A/A: {:.2}% spread, over the {:.2}% this environment declares. The rig \
+                 moved between two measurements of the same thing, so this sweep's \
+                 differences are not evidence.",
+                spread * 100.0,
+                t * 100.0
+            );
+            "over the declared floor: this sweep's differences are not evidence"
+        }
+        Some(t) => {
+            eprintln!(
+                "A/A: {:.2}% spread, within the declared {:.2}%",
+                spread * 100.0,
+                t * 100.0
+            );
+            "within the declared floor"
+        }
+        None => {
+            eprintln!(
+                "A/A: {:.2}% spread. This environment declares no floor, so there is \
+                 nothing to call it acceptable against.",
+                spread * 100.0
+            );
+            "no floor is declared for this environment, so this figure is the observation \
+             and not a verdict"
+        }
+    };
+
+    let mut report = Report::new(
+        "kafka_avro_clickhouse",
+        Kind::Verdict,
+        Status::Ok,
+        sut,
+        RunMeta::new(&env.spec.id, &env.digest, opts.trigger, infra.clone()),
+    )
+    .note(format!(
+        "A/A control: the sweep's first arm measured twice, {ma:.0} against {mb:.0} \
+         {LEAD_METRIC}; {verdict}"
+    ))
+    .metric("aa_spread", Metric::minimize(spread, "ratio"));
+    if let Some(t) = declared {
+        report = report.metric("aa_spread_declared", Metric::minimize(t, "ratio"));
+    }
+
+    let path = results::append(&results::root_for(root, opts.trigger), &report)
+        .map_err(|e| format!("append A/A verdict: {e}"))?;
+    Ok(Some(path))
+}
+
+/// The relative difference between the two halves of an A/A pair.
+///
+/// Medians rather than means, so one outlying repetition moves the floor by less
+/// than it moves the reading it is a floor for. Relative to the midpoint of the
+/// two, so the figure does not depend on which half is called which.
+fn aa_spread(a: &[f64], b: &[f64]) -> Option<f64> {
+    let (ma, mb) = (median(a)?, median(b)?);
+    let mid = f64::midpoint(ma, mb);
+    if mid <= 0.0 {
+        return None;
+    }
+    Some((ma - mb).abs() / mid)
+}
+
+/// The middle value of a set of readings.
+fn median(xs: &[f64]) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(f64::total_cmp);
+    Some(v[v.len() / 2])
+}
+
 /// What one repetition appended, and whether what it appended was a refusal.
 struct Measured {
     /// The results file the record went into.
@@ -841,6 +995,10 @@ struct Measured {
     status: Status,
     /// The refusal that made this a [`Status::Failed`] record, if it is one.
     refusal: Option<String>,
+    /// The lead figure this repetition published, when it published one.
+    lead: Option<f64>,
+    /// What was measured, carried so a sweep-level verdict can name it.
+    sut: Sut,
 }
 
 /// What one measurement window produced, when it produced anything at all.
@@ -1126,6 +1284,7 @@ fn measure(
     expected_rows: u64,
     schema_id: u32,
     base_flags: &[Flag],
+    aa_label: Option<&str>,
 ) -> Result<Measured, String> {
     let image = arm
         .image
@@ -1196,6 +1355,9 @@ fn measure(
     {
         flags.push(Flag::ShortWindow);
     }
+    if aa_label.is_some() {
+        flags.push(Flag::AaControl);
+    }
     // Whatever the measurement itself established — today only
     // `Flag::Saturated`, decided by `Sustained::kept_up` and by nothing else.
     if let Ok(d) = &outcome {
@@ -1251,6 +1413,13 @@ fn measure(
             .variant("envelope_cpus", e.cpus.clone())
             .variant("envelope_memory", e.memory.clone());
     }
+    // The control half of the A/A pair. In the variant map so the two halves are
+    // never medianed together as repetitions of one arm, and flagged so a
+    // consumer can drop it from the comparison: it is not a system, it is the
+    // rig measured against itself.
+    if let Some(label) = aa_label {
+        report = report.variant("aa_label", label.to_owned());
+    }
 
     // The offered rate and the window length are configuration, not measurement:
     // two sustained runs of one arm at different rates are different
@@ -1299,7 +1468,7 @@ fn measure(
             )
             .metric("cores_used", Metric::minimize(d.cost.cores_used, "cores"))
             .metric(
-                "rows_per_s_per_core",
+                LEAD_METRIC,
                 Metric::maximize(
                     if d.cost.cores_used > 0.0 {
                         d.rows_per_s / d.cost.cores_used
@@ -1398,6 +1567,8 @@ fn measure(
     Ok(Measured {
         path,
         status,
+        lead: report.metrics.get(LEAD_METRIC).map(|m| m.value),
+        sut: report.sut.clone(),
         refusal: outcome.err(),
     })
 }
@@ -3534,6 +3705,27 @@ fn assert_arm_caps(name: &str, declared: &Container, meta: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floor is the difference between two measurements of the same thing,
+    /// so it cannot depend on which of them is called the control.
+    #[test]
+    fn the_aa_spread_is_symmetric_and_relative() {
+        let a = [100.0, 102.0, 101.0];
+        let b = [110.0, 108.0, 109.0];
+        let ab = aa_spread(&a, &b).expect("a spread");
+        let ba = aa_spread(&b, &a).expect("a spread");
+        assert!((ab - ba).abs() < 1e-12, "{ab} vs {ba}");
+        // Medians are 101 and 109; the midpoint is 105.
+        assert!((ab - 8.0 / 105.0).abs() < 1e-12, "{ab}");
+
+        // Two measurements that agree are a floor of zero, not an absence.
+        assert_eq!(aa_spread(&a, &a), Some(0.0));
+
+        // Nothing to difference, and nothing invented from it.
+        assert_eq!(aa_spread(&[], &b), None);
+        assert_eq!(aa_spread(&a, &[]), None);
+        assert_eq!(aa_spread(&[0.0], &[0.0]), None);
+    }
 
     /// At the corpus the old fixed count was calibrated against, the share
     /// reproduces it — so this changes coverage only where the corpus moved.

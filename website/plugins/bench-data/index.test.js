@@ -131,6 +131,28 @@ test('a row that published a number still carries the harness\'s account of it',
   assert.equal(find(rows, 'alpha', 'native').note, 'headroom clickhouse ingest (native) 33%');
 });
 
+test('the A/A control and the sweep verdict are not arms', async () => {
+  const {rows, attempts} = await load();
+  // The control is the same arm measured a second time to difference against
+  // itself, and the verdict is a statement about the rig. Either one rendered
+  // as a row would put something that is not a system in a table of systems —
+  // and the control would put the same system in it twice.
+  assert.ok(
+    rows.every((r) => !(r.flags ?? []).includes('aa_control')),
+    'no row may come from the A/A control',
+  );
+  assert.ok(
+    !rows.some((r) => r.metrics.aa_spread),
+    'no row may come from a verdict record',
+  );
+  assert.ok(
+    !attempts.some((a) => a.note?.includes('A/A control')),
+    'and neither may be listed as an attempt that produced nothing',
+  );
+  // The alpha native row still medians exactly its own three repetitions.
+  assert.equal(find(rows, 'alpha', 'native').reps_counted, 3);
+});
+
 test('flags are the union across repetitions, not the newest one\'s', async () => {
   const {rows} = await load();
   // Only rep 2 of alpha:native is throttled, and it is not the newest.
