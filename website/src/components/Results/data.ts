@@ -13,8 +13,12 @@
 // is the mechanism by which a vendor-run benchmark's neutrality claim becomes
 // checkable rather than asserted.
 
-import {PRIMARY_COLUMN} from './columns';
-import {niceCeil} from './filter';
+// Imported WITH the extension, and it has to stay that way: `node --test` strips
+// types but does not resolve the bundler's extensionless specifiers, so a test
+// that reaches the contract predicates below cannot load this file without them.
+// `tsconfig.json` sets `allowImportingTsExtensions` for exactly this.
+import {PRIMARY_COLUMN} from './columns.ts';
+import {niceCeil} from './filter.ts';
 
 export {niceCeil};
 
@@ -51,6 +55,14 @@ export type Row = {
   wire_format: string | null;
   reps_counted: number;
   flags: string[];
+  /**
+   * The harness's own account of the repetition that produced `status`.
+   *
+   * This is where an `infra_bound` arm's REASON lives — which ceiling it was
+   * measured against and what share of it the arm reached. Optional because a
+   * record may carry no note at all.
+   */
+  note?: string | null;
   metrics: Record<string, Metric>;
   image_digest?: string;
   mode?: string;

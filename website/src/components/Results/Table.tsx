@@ -10,7 +10,7 @@ import {
   type Row as BenchRow,
 } from './data';
 import {columnsFor, defaultColumnsFor, detailFor} from './columns';
-import {fmt, unitLabel} from './format';
+import {fmt, unitLabel, unrankedNote} from './format';
 import Row, {type Column} from './Row';
 import {metricsPresent, modeOf} from './model';
 
@@ -229,12 +229,10 @@ export default function Table({
           <>
             Ranked positions are given only to <code>realistic</code> arms that passed the
             infrastructure-headroom limit.{' '}
-            {rows.length - ranked.size > 0 && (
-              <>
-                {rows.length - ranked.size} arm
-                {rows.length - ranked.size === 1 ? ' is' : 's are'} shown without one.{' '}
-              </>
-            )}
+            {/* Rewritten by the enhancer against the rows actually visible. The
+                server's count is the whole group; the Show control can hide some
+                of them. */}
+            <span data-bench-unranked="">{unrankedNote(rows.length - ranked.size)}</span>
           </>
         ) : (
           <>

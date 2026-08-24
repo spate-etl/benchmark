@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-import {displayLabel, fmtReps, fmt, unitLabel} from './format.ts';
+import {displayLabel, fmtReps, fmt, unitLabel, unrankedNote} from './format.ts';
 
 test('the headline columns render exactly as published', () => {
   // Throughput per core, the lead column — real values from the published
@@ -121,4 +121,13 @@ test('label de-duplication never fires on a coincidence', () => {
   );
   // Stripping everything falls back to the label rather than rendering blank.
   assert.equal(displayLabel('2.2.1', {version: '2.2.1'}), '2.2.1');
+});
+
+test('the unranked footnote agrees on number, and says nothing at zero', () => {
+  assert.equal(unrankedNote(1), '1 arm is shown without one. ');
+  assert.equal(unrankedNote(3), '3 arms are shown without one. ');
+  // Nothing rather than "0 arms are shown without one", which is what a reader
+  // sees the moment the Show control hides every unranked arm in a group.
+  assert.equal(unrankedNote(0), '');
+  assert.equal(unrankedNote(-1), '');
 });

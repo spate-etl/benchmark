@@ -303,7 +303,7 @@ export function facetsOf(entrants: FacetSource[]): Facet[] {
 // What a reader may show
 // ---------------------------------------------------------------------------
 
-/** The class that decides whether an arm is shown: its reason for being unranked. */
+/** The class that decides whether an arm is shown: its declared approach. */
 export const REALISTIC = 'realistic';
 
 /**
@@ -311,16 +311,21 @@ export const REALISTIC = 'realistic';
  * realistic". That is the default below because the contract says so, not
  * because it flatters anything — and everything else is one click away and
  * never hidden from a reader who asks. `tuned` and `stripped` exist precisely to
- * quantify an effect, and an infra-bound run is published so that "we ran it and
- * it blew the limit" stays distinguishable from "we never ran it".
+ * quantify an effect, so a reader who wants the delta can have it.
+ *
+ * These are APPROACHES — what the descriptor declared the configuration to be —
+ * and nothing else belongs here. `infra-bound` used to, and being an unticked
+ * class by default is what hid a realistic arm from every reader with scripting
+ * on. It is a verdict on a number rather than a kind of configuration, and it
+ * reaches the reader through the chip, the void lane and the disclosure.
+ * `model.ts`'s `showClassOf` carries the argument.
  */
-const SHOW_ORDER = ['realistic', 'tuned', 'stripped', 'infra-bound'];
+const SHOW_ORDER = ['realistic', 'tuned', 'stripped'];
 
 const SHOW_GLOSS: Record<string, string> = {
   realistic: 'headline-eligible',
   tuned: 'rule-1 compliant, but not a configuration a typical user would deploy',
   stripped: 'uses code the system does not ship, or drops a guarantee',
-  'infra-bound': 'over the infrastructure headroom limit — the number is disowned',
   undeclared: 'the descriptor did not say, which validation should have caught',
 };
 

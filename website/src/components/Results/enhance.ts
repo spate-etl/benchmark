@@ -17,6 +17,8 @@
  *      no re-render and no second copy of the scale logic.
  *   4. **Sort.** By the metric whose header was clicked, using the direction the
  *      measurement itself declares.
+ *   5. **Restate the footer's unranked count**, which the server computed over
+ *      the whole group and step 1 may have just invalidated.
  *
  * WHAT IT DELIBERATELY DOES NOT TOUCH
  *
@@ -38,7 +40,7 @@
  */
 
 import {compareLanes, visibleMax, type Sortable} from './filter';
-import {fmt} from './format';
+import {fmt, unrankedNote} from './format';
 
 const q = <T extends Element>(root: ParentNode, sel: string) =>
   Array.from(root.querySelectorAll<T>(sel));
@@ -151,6 +153,17 @@ function applyToBlock(block: HTMLElement, s: State) {
     const visible = rowVisible(a.row, s);
     a.row.hidden = !visible;
     if (a.detail) a.detail.hidden = !visible;
+  }
+
+  // Unconditionally, for the reason the axis ticks are: the server counted every
+  // unranked arm in the group, and the loop above may have just hidden some of
+  // them. A footer claiming arms the page is concurrently hiding is a printed
+  // number describing a page the reader is not looking at.
+  const foot = block.querySelector<HTMLElement>('[data-bench-unranked]');
+  if (foot) {
+    foot.textContent = unrankedNote(
+      arms.filter((a) => !a.row.hidden && a.row.dataset.ranked === '0').length,
+    );
   }
 
   const heads = q<HTMLTableCellElement>(block, 'th[data-m]');

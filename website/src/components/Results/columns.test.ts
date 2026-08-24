@@ -25,8 +25,19 @@ import {
   specOf,
   type FacetSource,
 } from './columns.ts';
+import {isPlotted, unrankedBecause, type Row} from './data.ts';
+import {showClassOf} from './model.ts';
 
 const ALL = CATALOGUE.map((m) => m.id);
+
+/**
+ * A row carrying only the two fields the contract predicates read.
+ *
+ * Cast rather than filled out: `Row` is thirteen fields of provenance, and
+ * spelling all of them would say that these tests depend on them.
+ */
+const armWith = (status: string, approach: string) =>
+  ({status, approach}) as unknown as Row;
 
 test('a metric the catalogue does not know is detail, never a column', () => {
   assert.equal(placementOf('some_metric_the_harness_added_later_us'), 'detail');
@@ -189,7 +200,7 @@ test('the facet values written into the markup match the facets offered', () => 
 // ---------------------------------------------------------------------------
 
 test('rule 3: realistic is the only class on by default', () => {
-  const classes = showClassesFor(['realistic', 'stripped', 'infra-bound']);
+  const classes = showClassesFor(['realistic', 'stripped', 'tuned']);
   assert.deepEqual(
     classes.filter((c) => c.on).map((c) => c.id),
     ['realistic'],
@@ -198,16 +209,49 @@ test('rule 3: realistic is the only class on by default', () => {
 });
 
 test('show classes keep their documented order and only offer what is present', () => {
-  const classes = showClassesFor(['infra-bound', 'realistic', 'stripped']);
+  const classes = showClassesFor(['tuned', 'realistic', 'stripped']);
   assert.deepEqual(
     classes.map((c) => c.id),
-    ['realistic', 'stripped', 'infra-bound'],
+    ['realistic', 'tuned', 'stripped'],
   );
   assert.deepEqual(
     showClassesFor(['realistic']).map((c) => c.id),
     ['realistic'],
     'a class nothing in the data carries is not worth a checkbox',
   );
+});
+
+/**
+ * The defect: rule 3 hid a realistic arm.
+ *
+ * `showClassOf` used to answer with `unrankedBecause`, which puts `infra-bound`
+ * ahead of the approach — right for ranking, and catastrophic for visibility,
+ * because rule 3 leaves every class but `realistic` unticked. `spate:rowbinary`
+ * was rendered into the HTML with its digits, its chip and its void lanes, and
+ * then hidden from every reader with scripting on.
+ *
+ * Rule 3 is about which CONFIGURATIONS a reader asked to see. Whether a number
+ * was disowned is a different question, and the legend already answers it: an
+ * infra-bound arm "keeps its digits and its reason but not its position".
+ */
+test('an infra-bound arm is filtered by its approach, so rule 3 cannot hide it', () => {
+  const infraBound = armWith('infra_bound', 'realistic');
+  assert.equal(showClassOf(infraBound), 'realistic');
+
+  const classes = showClassesFor([showClassOf(infraBound)]);
+  assert.deepEqual(
+    classes.filter((c) => c.on).map((c) => c.id),
+    ['realistic'],
+    'the row passes the default Show state like any other realistic arm',
+  );
+
+  // It is still unranked and still unplotted — what it loses is its position.
+  assert.equal(unrankedBecause(infraBound), 'infra-bound');
+  assert.equal(isPlotted(infraBound), false);
+
+  // And an arm that is BOTH stripped and infra-bound is filtered as stripped:
+  // that one really is a configuration a reader did not ask for.
+  assert.equal(showClassOf(armWith('infra_bound', 'stripped')), 'stripped');
 });
 
 test('a class the contract gains later still reaches the control', () => {
