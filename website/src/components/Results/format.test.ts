@@ -1,10 +1,10 @@
 // Formatting tests.
 //
-// The first block is the important one: it pins the exact rendering of the five
-// default columns, which are the figures a reader is most likely to quote. They
-// are written down as literals rather than derived, so a later change to the
-// scaling ladder has to state its intent by editing a test rather than silently
-// moving a published number.
+// The first block is the important one: it pins the exact rendering of the
+// default columns and of CPU per row, which are the figures a reader is most
+// likely to quote. They are written down as literals rather than derived, so a
+// later change to the scaling ladder has to state its intent by editing a test
+// rather than silently moving a published number.
 
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
@@ -12,13 +12,20 @@ import {test} from 'node:test';
 import {displayLabel, fmtReps, fmt, unitLabel} from './format.ts';
 
 test('the headline columns render exactly as published', () => {
+  // Throughput per core, the lead column — real values from the published
+  // archive: spate:native at 0.1.0, and the same arm at 0.2.0.
+  assert.equal(fmt(618227, 'records/s'), '618k');
+  assert.equal(fmt(2101775, 'records/s'), '2.10M');
+
   // Throughput — real values from the published archive.
   assert.equal(fmt(5764000, 'records/s'), '5.76M');
   assert.equal(fmt(2500000, 'records/s'), '2.50M');
   assert.equal(fmt(689000, 'records/s'), '689k');
   assert.equal(fmt(950, 'records/s'), '950');
 
-  // CPU per row: the third digit is the entire point of the figure.
+  // CPU per row — a switchable column rather than a default one since the
+  // per-core figure took the lead, and still quoted. The third digit is the
+  // entire point of it.
   assert.equal(fmt(0.677, 'us'), '0.677 µs');
   assert.equal(fmt(1.452, 'us'), '1.452 µs');
 
@@ -58,6 +65,9 @@ test('a unit the site has never seen still prints something sane', () => {
 test('a header never carries a unit the cell already prints', () => {
   assert.equal(unitLabel('us'), '', 'a µs header over a column of "174 ms" is a lie');
   assert.equal(unitLabel('records/s'), 'rows/s');
+  // `rows_per_s_per_core` is emitted as `records/s` too, so the header over the
+  // lead column comes from the catalogue's `unitLabel` override rather than
+  // from here. See `columns.ts`.
   assert.equal(unitLabel('bytes'), 'bytes');
   assert.equal(unitLabel('cores'), 'cores');
 });
