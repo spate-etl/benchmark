@@ -195,7 +195,10 @@ export default function Table({
                       <span className="bench-note">no axis</span>
                     </span>
                   )}
-                  <span className="bench-mh__unit">{unitLabel(c.unit)}</span>
+                  {/* The catalogue overrides the unit where the metric's own
+                      unit string is not the whole truth — `records/s` over a
+                      column that has already divided by cores. */}
+                  <span className="bench-mh__unit">{c.unitLabel ?? unitLabel(c.unit)}</span>
                 </th>
               ))}
               <th scope="col" className="bench-disclose__cell">

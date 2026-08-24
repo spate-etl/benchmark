@@ -19,6 +19,10 @@ Everything published comes from outside the system under test:
 | Server-side cost | ClickHouse's own `ProfileEvents` CPU-per-row, via `system.query_log` |
 | GC (JVM arms) | `-Xlog:gc*`, read with `docker cp` from the path the container's descriptor declares (`gc_log`) |
 
+The published lead figure, `rows_per_s_per_core`, is the ratio of the first two
+rows — a `SELECT count()` taken outside the system over cgroup counters read by
+a sidecar — so no single source can move it on its own.
+
 Every row above is collected. Three caveats travel with them rather than with
 the table. **Latency exists only in sustained mode** — in drain the topic is
 prefilled, so `send_ts` is a prefill timestamp and the difference measures how
@@ -69,6 +73,12 @@ smaller than one sampler tick is not a difference this instrument can see**. On 
 a configuration sweep in which fifty-eight windows all landed within 70 ms of a
 whole second and twenty-four distinct configurations resolved to five distinct
 rates.
+
+That limit is throughput's. The per-core figure divides CPU by rows rather than
+by time, so the window cancels and the tick does not quantise it. It is not
+independent of the sampler: both ends of the CPU delta are sampler readings, so
+a window truncated at either end understates the CPU while the row count stays
+the full corpus, and the reading comes out flatteringly low.
 
 It is a separate limit from run-to-run spread, and the two are often confused.
 Spread says how much a repeated measurement wanders; quantisation says how finely

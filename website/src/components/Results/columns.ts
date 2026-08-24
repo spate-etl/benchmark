@@ -20,6 +20,16 @@ export type MetricSpec = {
   label: string;
   gloss: string;
   placement: Placement;
+  /**
+   * Header unit, where the metric's own unit string is not the whole truth.
+   *
+   * `rows_per_s_per_core` is emitted as `records/s` because that is what the
+   * numerator is, and `unitLabel` renders that as `rows/s` — correct over
+   * throughput and wrong over a column that has already divided by cores. The
+   * override lives here rather than in the harness because the record is right
+   * and only the header is at issue.
+   */
+  unitLabel?: string;
 };
 
 /**
@@ -48,21 +58,23 @@ export type MetricSpec = {
 const CATALOGUE_LIST: MetricSpec[] = [
   // ---- default -----------------------------------------------------------
   {
+    id: 'rows_per_s_per_core',
+    label: 'Throughput per core',
+    gloss:
+      'Rows landed per second per mean core occupied — the one-sentence goal of the fairness contract, read literally. Exactly 1e6 / CPU per row.',
+    placement: 'default',
+    unitLabel: 'rows/s per core',
+  },
+  {
     id: 'rows_per_s',
     label: 'Throughput',
     gloss: 'Rows landed in ClickHouse per second, from SELECT count() outside the system.',
     placement: 'default',
   },
   {
-    id: 'cpu_us_per_row',
-    label: 'CPU per row',
-    gloss: 'cgroup v2 CPU microseconds per landed row. The efficiency figure.',
-    placement: 'default',
-  },
-  {
     id: 'cores_used',
     label: 'Cores used',
-    gloss: 'Mean cores over the measured window, against a 4-core data-plane envelope.',
+    gloss: 'Mean cores over the measured window, against a 6-core data-plane envelope.',
     placement: 'default',
   },
   {
@@ -82,9 +94,10 @@ const CATALOGUE_LIST: MetricSpec[] = [
 
   // ---- available ---------------------------------------------------------
   {
-    id: 'rows_per_s_per_core',
-    label: 'Throughput per core',
-    gloss: 'Rows per second divided by mean cores used — throughput with the envelope divided out.',
+    id: 'cpu_us_per_row',
+    label: 'CPU per row',
+    gloss:
+      'cgroup v2 CPU microseconds per landed row. The same measurement as throughput per core, inverted — not a second reading of it.',
     placement: 'available',
   },
   {

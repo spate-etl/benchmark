@@ -77,8 +77,23 @@ test('the default columns are on, and are a subset of the switchable ones', () =
   );
 });
 
-test('throughput leads the columns', () => {
-  assert.equal(columnsFor(ALL)[0].id, 'rows_per_s');
+test('throughput per core leads the columns', () => {
+  assert.equal(columnsFor(ALL)[0].id, 'rows_per_s_per_core');
+});
+
+// `rows_per_s_per_core` is `rows_per_s / cores_used`, which is `1e6 * rows /
+// cpu_us` once the sampler's window cancels — exactly `1e6 / cpu_us_per_row`.
+// The identity holds by construction in the harness and is invisible here, so
+// nothing in the catalogue stops the two being turned on together. On by
+// default they would put the lead figure in the table twice, side by side,
+// where a reader has every reason to read the pair as corroboration.
+test('the lead figure and its reciprocal are never both on by default', () => {
+  const on = new Set(defaultColumnsFor(ALL));
+  assert.ok(
+    !(on.has('rows_per_s_per_core') && on.has('cpu_us_per_row')),
+    'cpu_us_per_row is 1e6 / rows_per_s_per_core, so showing both by default ' +
+      'is showing one measurement twice — put whichever does not lead in `available`',
+  );
 });
 
 test('detail metrics never overlap the switchable columns', () => {
