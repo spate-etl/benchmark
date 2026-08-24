@@ -1167,6 +1167,20 @@ fn measure(
     .variant("partitions", i64::from(env.spec.infra.partitions))
     .variant("batches", i64::try_from(opts.batches).unwrap_or(i64::MAX));
 
+    // The data-plane envelope the arm ran under. In the variant map, so two
+    // envelopes are never medianed together as run-to-run spread — the same
+    // reason the sustained rate and window are there.
+    //
+    // The declared totals, and they are proof rather than a claim: validation
+    // asserts the data-plane containers sum to them, and `assert_arm_caps` reads
+    // each container's cap back out of its cgroup, so a record carrying these
+    // ran under them or did not run.
+    if let Some(e) = arm.entrant.spec.envelope.as_ref() {
+        report = report
+            .variant("envelope_cpus", e.cpus.clone())
+            .variant("envelope_memory", e.memory.clone());
+    }
+
     // The offered rate and the window length are configuration, not measurement:
     // two sustained runs of one arm at different rates are different
     // experiments, and the site's `variantKey` is built from this map precisely
