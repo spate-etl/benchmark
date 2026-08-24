@@ -814,6 +814,13 @@ struct Measurement {
     /// record carrying `ch_cpu_us_per_row: 0` would be the most flattering
     /// possible wrong answer.
     server: Option<serverside::ServerSideCost>,
+    /// Merge work ClickHouse completed over the same window, when the server
+    /// could be asked.
+    ///
+    /// `None` is "not measured". A window in which nothing merged reads as a
+    /// zero, which the server did answer, and is a different fact from a
+    /// `part_log` that could not be read at all.
+    merges: Option<serverside::MergeActivity>,
     /// What the arm's JVMs reported about their own collectors, if it has any.
     gc: Gc,
     /// The ClickHouse ingest ceiling this arm was held to, rows per second, or
@@ -1250,6 +1257,14 @@ fn measure(
         // and costs them as an absence, never as a zero.
         if let Some(server) = &d.server {
             for (key, metric) in server_metrics(server, d.rows) {
+                report = report.metric(key, metric);
+            }
+        }
+        // Merge work that ran against the same window. Separate from the cost
+        // figures above because it is charged to nobody: `ch_cpu_us` excludes
+        // it by construction, and it competes with the arm regardless.
+        if let Some(merges) = &d.merges {
+            for (key, metric) in merge_metrics(*merges) {
                 report = report.metric(key, metric);
             }
         }
@@ -1894,7 +1909,7 @@ fn run_arm(
     // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
     // they are excluded by `query_kind = 'Insert'`, but running the read first
     // keeps the figure independent of how strict the gate happens to be.
-    let server = measure_server_side(ep, arm, &costs, &mut note);
+    let (server, merges) = measure_server_side(ep, arm, &costs, &mut note);
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
@@ -1963,6 +1978,7 @@ fn run_arm(
         flags,
         load,
         server,
+        merges,
         gc,
         ceiling_rows_per_s,
     })
@@ -2330,7 +2346,10 @@ fn measure_server_side(
     arm: &Arm<'_>,
     costs: &[(String, sampler::Samples)],
     note: &mut String,
-) -> Option<serverside::ServerSideCost> {
+) -> (
+    Option<serverside::ServerSideCost>,
+    Option<serverside::MergeActivity>,
+) {
     let series: Vec<&sampler::Samples> = costs.iter().map(|(_, s)| s).collect();
     // The workload's target first, then whatever the entrant declared — the
     // MV-flatten arm's landing table rides here, so the parent insert that
@@ -2346,18 +2365,23 @@ fn measure_server_side(
     }
     let table_refs: Vec<&str> = tables.iter().map(String::as_str).collect();
     let forwarded = ch.is_some_and(|c| c.forwarded_inserts);
-    let measured = serverside::Window::spanning(&series).and_then(|w| {
-        serverside::measure(
-            &ep.ch_host,
-            ep.ch_port,
-            &ep.ch_user,
-            &ep.ch_password,
-            &table_refs,
-            w,
-            forwarded,
-        )
-    });
-    match measured {
+    let window = match serverside::Window::spanning(&series) {
+        Ok(w) => w,
+        Err(why) => {
+            eprintln!("  no server-side figure: {why}");
+            return (None, None);
+        }
+    };
+
+    let cost = match serverside::measure(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        &table_refs,
+        window,
+        forwarded,
+    ) {
         Ok(cost) => {
             eprintln!("  {}", cost.provenance());
             // The caveats travel with the number. A reader told "0.67 us/row of
@@ -2371,7 +2395,55 @@ fn measure_server_side(
             eprintln!("  no server-side figure: {why}");
             None
         }
-    }
+    };
+
+    let merges = match serverside::measure_merges(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        &table_refs,
+        window,
+    ) {
+        Ok(m) => {
+            eprintln!(
+                "  merges: {} row(s) over {} ms, completed in the window",
+                m.rows_merged, m.duration_ms
+            );
+            Some(m)
+        }
+        Err(why) => {
+            eprintln!("  no merge figure: {why}");
+            None
+        }
+    };
+
+    (cost, merges)
+}
+
+/// Merge work against an arm's measurement window, as record metrics.
+///
+/// Minimised, both of them: the corpus is fixed, so within one window more
+/// merge work is more unaccounted contention against the same output. Neither
+/// is charged to the arm or to `ch_cpu_us`.
+fn merge_metrics(merges: serverside::MergeActivity) -> Vec<(String, Metric)> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "row counts and millisecond spans stay far below f64's exact range"
+    )]
+    let rows = merges.rows_merged as f64;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "row counts and millisecond spans stay far below f64's exact range"
+    )]
+    let duration_us = (merges.duration_ms as f64) * 1000.0;
+    vec![
+        ("ch_rows_merged".to_owned(), Metric::minimize(rows, "rows")),
+        (
+            "ch_merge_duration_us".to_owned(),
+            Metric::minimize(duration_us, "us"),
+        ),
+    ]
 }
 
 /// What an arm's inserts cost ClickHouse, as record metrics.

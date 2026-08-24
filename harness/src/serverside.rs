@@ -993,6 +993,114 @@ pub fn flush_logs(
     Ok(())
 }
 
+/// Merge work ClickHouse completed over a measurement window.
+///
+/// Both figures cover merges that **finished** inside the window, because
+/// `system.part_log` records a merge at completion. A merge still running when
+/// the window closes contributes nothing here, so this is a lower bound on the
+/// merge work that competed with the arm.
+///
+/// `duration_ms` sums each merge's own elapsed time and merges run
+/// concurrently, so it can exceed the window's wall-clock length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeActivity {
+    /// Rows read by merges that completed in the window.
+    pub rows_merged: u64,
+    /// Summed elapsed time of those merges.
+    pub duration_ms: u64,
+}
+
+/// The projection [`measure_merges`] reads, over `tables` and `window`.
+///
+/// `event_date` bounds the partition scan either side of the window, matching
+/// [`attribution_sql`]; `part_log` is partitioned by date and a window crossing
+/// midnight would otherwise read one day only.
+///
+/// `tables` are **fully qualified** (`default.sensor_events`); `part_log` holds
+/// `database` and `table` separately, so the predicate rebuilds the qualified
+/// name rather than asking the caller for two lists.
+#[must_use]
+pub fn merge_sql(tables: &[&str], window: Window) -> String {
+    let names = tables
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT sumIf(rows, event_type = 'MergeParts'),          sumIf(duration_ms, event_type = 'MergeParts')          FROM system.part_log          WHERE event_date >= toDate(fromUnixTimestamp64Milli({from})) - 1            AND event_date <= toDate(fromUnixTimestamp64Milli({to})) + 1            AND event_time_microseconds >= fromUnixTimestamp64Milli({from})            AND event_time_microseconds < fromUnixTimestamp64Milli({to})            AND concat(database, '.', table) IN ({names})          FORMAT TSV",
+        from = window.from_ms,
+        to = window.to_ms,
+    )
+}
+
+/// Parses the two-column TSV [`merge_sql`] projects.
+///
+/// A window in which no merge completed is `0\t0`, which parses to a zero
+/// reading rather than an error: the server answered, and the answer is that
+/// nothing merged.
+///
+/// # Errors
+///
+/// [`ServerSideError::ServerException`] if the body carries one, and
+/// [`ServerSideError::Malformed`] for anything that is not two integers.
+pub fn parse_merge_activity(body: &str) -> Result<MergeActivity, ServerSideError> {
+    if body.contains("DB::Exception") {
+        return Err(ServerSideError::ServerException(body.trim().to_owned()));
+    }
+    let line = body.trim();
+    let malformed = |why: &str| ServerSideError::Malformed {
+        line: line.to_owned(),
+        why: why.to_owned(),
+    };
+    let mut fields = line.split('\t');
+    let mut next = |what: &str| -> Result<u64, ServerSideError> {
+        fields
+            .next()
+            .ok_or_else(|| malformed(&format!("no {what} column")))?
+            .trim()
+            .parse()
+            .map_err(|_| malformed(&format!("{what} is not an integer")))
+    };
+    let rows_merged = next("rows_merged")?;
+    let duration_ms = next("duration_ms")?;
+    if fields.next().is_some() {
+        return Err(malformed("more than two columns"));
+    }
+    Ok(MergeActivity {
+        rows_merged,
+        duration_ms,
+    })
+}
+
+/// Reads the merge work ClickHouse completed over `window`.
+///
+/// Flushes the system logs itself, so it carries no ordering contract with
+/// [`measure`]. Both flushes happen after the measurement window has closed and
+/// cannot perturb the number.
+///
+/// `tables` are **fully qualified** (`default.sensor_events`); see [`qualify`].
+///
+/// # Errors
+///
+/// Every variant of [`ServerSideError`] except
+/// [`ServerSideError::NoAttributedQueries`], which cannot arise: an empty result
+/// is a zero reading. A caller that cannot get a reading records the arm without
+/// it rather than attaching a zero.
+pub fn measure_merges(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    tables: &[&str],
+    window: Window,
+) -> Result<MergeActivity, ServerSideError> {
+    flush_logs(host, port, user, password)?;
+    let sql = merge_sql(tables, window);
+    let body = try_clickhouse_sql(host, port, user, password, &sql)
+        .map_err(|e| ServerSideError::Transport(e.to_string()))?;
+    parse_merge_activity(&body)
+}
+
 /// Reads what an arm's inserts cost ClickHouse over `window`.
 ///
 /// The one entry point the driver needs. Flushes the system logs, reads the
@@ -1048,6 +1156,74 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
     fn summarised(body: &str) -> Result<ServerSideCost, ServerSideError> {
         let rows = parse_response(body)?;
         summarise(&rows, &["default.sensor_events_t"], window())
+    }
+
+    #[test]
+    fn parses_a_merge_reading() {
+        let m = parse_merge_activity("1966080\t2431\n").expect("two integers parse");
+        assert_eq!(m.rows_merged, 1_966_080);
+        assert_eq!(m.duration_ms, 2431);
+    }
+
+    /// A window in which nothing merged is a reading, not a refusal. The server
+    /// answered; the answer is zero. A caller that turned this into an absence
+    /// would lose the ability to say "no merges ran here".
+    #[test]
+    fn a_window_with_no_merges_reads_as_zero() {
+        let m = parse_merge_activity("0\t0\n").expect("a zero row parses");
+        assert_eq!(m.rows_merged, 0);
+        assert_eq!(m.duration_ms, 0);
+    }
+
+    #[test]
+    fn a_part_log_exception_is_not_a_zero_reading() {
+        let err = parse_merge_activity(
+            "Code: 60. DB::Exception: Table system.part_log does not exist. (UNKNOWN_TABLE)",
+        )
+        .expect_err("an exception refuses");
+        assert!(
+            matches!(err, ServerSideError::ServerException(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_merge_row_is_refused() {
+        for body in ["", "1966080", "a\tb", "1\t2\t3"] {
+            assert!(
+                parse_merge_activity(body).is_err(),
+                "{body:?} should not parse"
+            );
+        }
+    }
+
+    /// The predicate rebuilds the qualified name because `part_log` splits it,
+    /// and bounds `event_date` either side so a window crossing midnight is not
+    /// read as one day.
+    #[test]
+    fn merge_sql_qualifies_the_table_and_bounds_the_partition_scan() {
+        let sql = merge_sql(&["default.sensor_events"], window());
+        assert!(
+            sql.contains("concat(database, '.', table) IN ('default.sensor_events')"),
+            "{sql}"
+        );
+        assert!(sql.contains("event_type = 'MergeParts'"), "{sql}");
+        assert!(
+            sql.contains("toDate(fromUnixTimestamp64Milli(1784979298378)) - 1"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("toDate(fromUnixTimestamp64Milli(1784979598378)) + 1"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("event_time_microseconds >= fromUnixTimestamp64Milli(1784979298378)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("event_time_microseconds < fromUnixTimestamp64Milli(1784979598378)"),
+            "{sql}"
+        );
     }
 
     #[test]
