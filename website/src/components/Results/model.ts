@@ -8,17 +8,37 @@
 //
 // NOTHING HERE MAY BRANCH ON AN ENTRANT ID.
 
-import {unrankedBecause, type Entrant, type Row} from './data';
+import type {Entrant, Row} from './data.ts';
 
 /**
- * The class that decides whether a reader sees this arm.
+ * The class that decides whether a reader sees this arm: its APPROACH.
  *
- * Derived from `unrankedBecause` rather than from a second reading of `status`
- * and `approach`, so the Show control and the rank ordinal can never disagree
- * about why an arm is not headline-eligible — they are the same sentence.
+ * Not `unrankedBecause`, and the difference is the whole of a defect this
+ * closes. That function answers "why is this arm not ranked?", and it answers it
+ * with `infra-bound` ahead of the approach because a disowned number is the
+ * stronger statement about ranking. Feeding the same sentence to the Show
+ * control made it the stronger statement about *visibility* too: rule 3 leaves
+ * only `realistic` ticked, so a realistic arm whose newest sitting came back
+ * `infra_bound` was hidden from every reader with scripting on. `spate:rowbinary`
+ * was in the prerendered HTML, with its digits and its chip, and rendered
+ * nowhere.
+ *
+ * The two questions are genuinely different, and `isPlotted` in `data.ts`
+ * already argues why. A `tuned` or `stripped` arm is a configuration a reader
+ * did not ask to see, and rule 3 says keep it off the chart until they do. An
+ * `infra_bound` arm is the realistic configuration; what is wrong with it is the
+ * number, not the configuration — and the legend promises it "keeps its digits
+ * and its reason but not its position", which is a promise about ranking and
+ * position, not about whether the row exists. `methodology/envelope.md` gives
+ * the reason the status is recorded at all: so that "we ran it and it blew the
+ * limit" stays distinguishable from "we never ran it". An arm hidden by default
+ * is not distinguishable from one that was never run.
+ *
+ * So infra-boundness reaches the reader through the chip, the void lane and the
+ * disclosure — never through whether the row is drawn.
  */
 export function showClassOf(r: Row): string {
-  return unrankedBecause(r) || 'realistic';
+  return r.approach || 'undeclared';
 }
 
 /** Every metric id present across a set of rows. */

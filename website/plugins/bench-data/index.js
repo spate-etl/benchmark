@@ -389,6 +389,14 @@ function summarise(records) {
           vals.length < 2 ? 0 : mid === 0 ? null : (sorted[sorted.length - 1] - sorted[0]) / mid,
       };
     }
+    // Hoisted: the note below is chosen against the status the row publishes,
+    // and an object literal cannot read its own property.
+    const status = worstStatus(counted);
+    const reason = reps
+      .filter((r) => r.status === status)
+      .sort((a, b) => a.run.ts_ms - b.run.ts_ms)
+      .pop();
+
     rows.push({
       key,
       sitting: sittingKey(newest),
@@ -406,7 +414,7 @@ function summarise(records) {
       // it: `approach` decides headline eligibility, `status` decides whether an
       // arm may be ranked at all, and `wire_format` is required beside every
       // number by rule 5.
-      status: worstStatus(counted),
+      status,
       mode: newest.variant?.mode ?? null,
       // Fail closed. A record that does not say what it is cannot be
       // headline-eligible: defaulting to `realistic` meant a foreign or
@@ -420,6 +428,24 @@ function summarise(records) {
       // — a throttled rep does not stop being throttled because the next one
       // was not.
       flags: [...new Set(counted.flatMap((r) => r.flags || []))].sort(),
+      // The harness's own account of this reading, so an arm can carry its
+      // REASON and not only its verdict.
+      //
+      // Taken from the newest repetition whose status is the one the row
+      // publishes, never simply from the newest. Those differ exactly when a
+      // sitting is mixed, which is the case that matters: `spate:rowbinary`'s
+      // published sitting is three repetitions at 70%, 65% and 79% of the
+      // ClickHouse ingest ceiling, and `worstStatus` makes the row
+      // `infra_bound` on the strength of the third. Pairing that verdict with
+      // the newest note would explain a disowned number with a repetition that
+      // passed. `byAttempt` above takes status and note together for the same
+      // reason.
+      //
+      // Carried verbatim rather than parsed for the clause that explains the
+      // status. The site does not re-derive a published figure, and a plugin
+      // picking sentences out of a harness-authored string would be doing a
+      // worse version of that.
+      note: (reason ?? newest).note ?? null,
       metrics,
     });
   }

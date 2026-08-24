@@ -111,6 +111,26 @@ test('one infra-bound repetition makes the whole row infra-bound', async () => {
   assert.equal(find(rows, 'alpha', 'rowbinary').status, 'infra_bound');
 });
 
+test('an infra-bound row carries the reason from the repetition that was infra-bound', async () => {
+  const {rows} = await load();
+  const row = find(rows, 'alpha', 'rowbinary');
+  // Rep 2 blew the limit; reps 1 and 3 did not, and rep 3 is the newest. Taking
+  // the note from `newest` alongside a status from `worstStatus` would explain a
+  // disowned number with a repetition that passed — the same mismatch the
+  // attempts path guards against by moving status and note together.
+  assert.match(row.note, /INFRA-BOUND/);
+  assert.match(row.note, /88%/);
+  assert.doesNotMatch(row.note, /64%/, 'the newest repetition passed and does not explain this row');
+});
+
+test('a row that published a number still carries the harness\'s account of it', async () => {
+  const {rows} = await load();
+  // Not conditional on the status: the note is provenance for every reading. The
+  // rule is uniform — the newest repetition whose status is the one the row
+  // publishes — which for an `ok` row is simply its newest.
+  assert.equal(find(rows, 'alpha', 'native').note, 'headroom clickhouse ingest (native) 33%');
+});
+
 test('flags are the union across repetitions, not the newest one\'s', async () => {
   const {rows} = await load();
   // Only rep 2 of alpha:native is throttled, and it is not the newest.

@@ -320,6 +320,20 @@ export default function Row({
                 )}
               </dd>
 
+              {/* The reason, which the legend promises a disowned number keeps.
+                  Before this the plugin dropped the record's note entirely, so
+                  an infra-bound arm's whole account of itself was a two-word
+                  chip — the measured share it blew, and which ceiling it blew,
+                  reached nobody. Printed verbatim: it is the harness's sentence
+                  about its own reading, and picking clauses out of it here would
+                  be the site re-deriving a published figure by another route. */}
+              {row.note && (
+                <>
+                  <dt>{why === 'infra-bound' ? 'Why this number is disowned' : 'This reading'}</dt>
+                  <dd className="bench-note">{row.note}</dd>
+                </>
+              )}
+
               {row.flags.length > 0 && (
                 <>
                   <dt>Flags</dt>

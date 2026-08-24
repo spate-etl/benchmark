@@ -145,3 +145,21 @@ export function displayLabel(
   out = out.replace(/^[\s·:—-]+|[\s·:—-]+$/g, '').replace(/[\s·]*·[\s·]*/g, ' · ').trim();
   return out || label;
 }
+
+/**
+ * The footer's count of arms drawn without a rank ordinal.
+ *
+ * Shared between the build and the enhancer rather than written twice, because
+ * the enhancer has to rewrite it: the server counts every unranked arm in the
+ * group, and the reader then hides some of them with the Show control. A count
+ * the filter has invalidated is the same defect as a stale axis tick — a printed
+ * number that describes a page the reader is no longer looking at — and that one
+ * is already rewritten unconditionally for exactly this reason.
+ *
+ * Returns the empty string at zero, so the caller renders nothing rather than
+ * "0 arms are shown without one".
+ */
+export function unrankedNote(n: number): string {
+  if (n <= 0) return '';
+  return `${n} arm${n === 1 ? ' is' : 's are'} shown without one. `;
+}

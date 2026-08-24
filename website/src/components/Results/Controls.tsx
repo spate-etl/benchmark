@@ -110,7 +110,9 @@ export default function Controls({
           {/* Rule 3 sets this default, not a preference. */}
           <p className="bench-note bench-controls__hint">
             Only <code>realistic</code> arms are ranked. The rest are shown when asked for,
-            labelled, and never given a position they have not earned.
+            labelled, and never given a position they have not earned. An arm whose number
+            was disowned as infra-bound is not filtered here at all — it stays on the page,
+            with its reason, and loses only its position.
           </p>
         </fieldset>
       )}
