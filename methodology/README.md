@@ -21,6 +21,21 @@ Find out, honestly, how much throughput each system delivers per unit of CPU and
 memory on the same pipeline, the same bytes, and the same hardware — and publish
 it whether or not Spate wins.
 
+**The figure that answers it is `rows_per_s_per_core`**, and that is the column
+the results table leads with. `cpu_us_per_row` is the same measurement inverted
+rather than a second one: the sampler's window cancels out of
+`rows_per_s / cores_used`, leaving rows per CPU-second, so the two are exact
+reciprocals and the site shows one by default and the other on request.
+
+Raw throughput is published beside that figure rather than in front of it,
+because the two degrade differently. `rows_per_s` is the corpus over the
+sampler's window, so it absorbs every source of wall-clock contention the shared
+infrastructure produces — broker scheduling, ingest queueing, background merges.
+An arm that no longer saturates its own envelope is one whose throughput
+increasingly describes the rig rather than the system. The per-core figure is
+work charged to the arm's own cgroup per row it produced, and is largely
+indifferent to how long the wall clock took to deliver that work.
+
 We expect to lose some arms. The ClickHouse Kafka engine does its decode and
 transform inside the database's own C++, with no framework between consumer and
 insert. Vector is Rust with the same no-GC story. Those results get published
