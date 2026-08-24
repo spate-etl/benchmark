@@ -10,7 +10,9 @@ body:
         see [Reproducing
         this](https://github.com/spate-etl/benchmark/blob/main/docs/reproduce.md)
         first, because a different environment or a busy machine explains most of
-        it. Run-to-run spread reaches 14.5% on throughput even on a quiet host.
+        it. Run-to-run spread is material on throughput even on a quiet host;
+        every sweep measures its own with an A/A control and publishes the
+        figure beside the numbers.
 
         A benchmark that cannot be reproduced is a claim, not evidence, so if it
         is none of those, please do open this.

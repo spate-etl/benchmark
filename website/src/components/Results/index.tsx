@@ -86,8 +86,19 @@ function Attempts({attempts}: {attempts: Attempt[]}) {
   );
 }
 
+/**
+ * The widest A/A spread any displayed sweep measured, or `null` if none did.
+ *
+ * The widest rather than the mean: it is the floor a reader is being warned
+ * about, and the warning has to hold for every number on the page.
+ */
+function measuredFloor(rows: Row[]): number | null {
+  const seen = rows.map((r) => r.aa_spread).filter((n): n is number => typeof n === 'number');
+  return seen.length ? Math.max(...seen) : null;
+}
+
 /** How to read a mark, drawn rather than described. */
-function Legend() {
+function Legend({floor}: {floor: number | null}) {
   return (
     <details className="bench-legend">
       <summary>How to read this</summary>
@@ -100,8 +111,19 @@ function Legend() {
           <p>
             <strong>The mark is the uncertainty.</strong> The capsule spans the smallest to
             the largest repetition and the notch is the median — at three repetitions those
-            are the three measurements, and nothing is modelled. Run-to-run spread on this
-            environment reaches 14.5%, which is wider than most differences here.
+            are the three measurements, and nothing is modelled.{' '}
+            {floor === null ? (
+              <>
+                No sweep here has measured what this rig does when nothing changes, so
+                treat every difference narrower than the capsules as unresolved.
+              </>
+            ) : (
+              <>
+                Measuring one arm twice under two labels in these sweeps moved it by{' '}
+                {(floor * 100).toFixed(1)}%, so a difference narrower than that is the rig
+                rather than the system.
+              </>
+            )}
           </p>
         </div>
         <div>
@@ -230,7 +252,7 @@ export default function Results(): React.JSX.Element {
         )}
       </div>
 
-      <Legend />
+      <Legend floor={measuredFloor(rows)} />
 
       <Controls
         facets={facets}

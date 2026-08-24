@@ -58,7 +58,10 @@ That is useful and I would like to know. The most likely causes, in order:
    comparing across; the site will refuse to draw them on one axis, which is
    the intended behaviour rather than an obstacle.
 2. **A busy machine.** Background load moves throughput materially, which is
-   why the site shows run-to-run spread on every chart.
+   why the site shows run-to-run spread on every chart. Every sweep also
+   measures one arm twice under two labels and publishes the difference, so the
+   spread the rig itself produces is a figure you can compare yours against
+   rather than a number quoted at you.
 3. **A real defect in the harness.** Open an issue. A benchmark that cannot be
    reproduced is a claim, not evidence.
 

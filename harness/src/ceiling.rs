@@ -328,13 +328,11 @@ pub const HEADROOM_LIMIT: f64 = 0.70;
 /// How far a ceiling's message size may differ from the corpus's before the
 /// harness refuses to gate against it.
 ///
-/// Five percent, and the number is chosen against the noise rather than against
-/// intuition. The reference environment's own profile records run-to-run spread
-/// reaching 14.5% on throughput, so a message-size difference inside this band
-/// cannot move a headroom share by more than the spread every chart already
-/// draws — while anything outside it is being extrapolated rather than measured.
-/// It is deliberately tighter than that noise floor: a rule whose tolerance is
-/// as wide as the noise is a rule that never fires.
+/// Five percent, chosen against the rig's noise rather than against intuition. A
+/// message-size difference inside this band cannot move a headroom share by more
+/// than the spread every chart already draws, while anything outside it is being
+/// extrapolated rather than measured. It stays tighter than any spread a sweep's
+/// A/A control has reported: a tolerance as wide as the noise never fires.
 ///
 /// The band is not a licence to interpolate. Inside it, [`Ceiling::headroom`]
 /// still compares the arm's **byte** rate against the measured byte rate as well
@@ -2065,10 +2063,8 @@ const INGEST_CONCURRENCY_FROM: u64 = 2;
 /// Doubling, for two reasons. It bounds the pass at
 /// `log2(max / from) + 1` rungs — six at today's constants, a window each —
 /// where a linear ladder fine enough to be interesting would cost tens. And it
-/// keeps each rung's step far larger than this host's noise: the environment
-/// profile records run-to-run spread reaching 14.5% on throughput, so a ladder
-/// whose rungs were 10% apart would be reading noise as signal in both
-/// directions.
+/// keeps each rung's step far larger than the host's noise: a ladder whose rungs
+/// were 10% apart would be reading noise as signal in both directions.
 ///
 /// The cost of a coarse ladder is that the winning rung is the best of a handful
 /// of powers of two rather than the true optimum, so the figure can be slightly
@@ -2102,8 +2098,8 @@ pub const INGEST_CONCURRENCY_MAX: u64 = 256;
 
 /// How much a rung must beat the incumbent best by to count as an improvement.
 ///
-/// Three percent, and it is deliberately far *below* this host's 14.5% noise
-/// rather than above it. The two errors are not symmetric. Setting the margin
+/// Three percent, far *below* the host's noise rather than above it. The two
+/// errors are not symmetric. Setting the margin
 /// above the noise would stop the sweep at the first genuine-but-modest gain,
 /// producing exactly the too-low ceiling this sweep exists to prevent; setting
 /// it low means noise occasionally buys one more rung, which costs one window
@@ -2118,10 +2114,11 @@ const INGEST_SWEEP_MARGIN: f64 = 0.03;
 /// Consecutive rungs that must fail to improve before the sweep calls it a
 /// plateau.
 ///
-/// Two, because one is noise. At 14.5% spread a single rung landing below its
-/// predecessor says nothing at all, and a "first non-improvement wins" rule
-/// would stop one rung after the first unlucky sample — which is how a rig
-/// reports a ceiling the arms it gates go on to exceed.
+/// Two, because one is noise. A single rung landing below its predecessor says
+/// nothing at all against a spread of several percent, and a "first
+/// non-improvement wins" rule would stop one rung after the first unlucky
+/// sample — which is how a rig reports a ceiling the arms it gates go on to
+/// exceed.
 const INGEST_SWEEP_PATIENCE: usize = 2;
 
 /// Milliseconds of quiet between a settled table and the rung timed against it.
@@ -5558,8 +5555,8 @@ mod tests {
         );
     }
 
-    /// Run-to-run spread on this host reaches 14.5%, so a single rung landing
-    /// below its predecessor is not evidence of anything. A rule that stopped at
+    /// A single rung landing below its predecessor is not evidence of anything
+    /// against the spread this host produces when nothing changes. A rule that stopped at
     /// the first non-improvement would end this sweep at 4 and report less than
     /// half of what the target absorbs.
     #[test]

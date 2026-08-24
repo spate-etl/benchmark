@@ -63,6 +63,14 @@ export type Row = {
    * record may carry no note at all.
    */
   note?: string | null;
+  /**
+   * The A/A spread this sweep's own control measured, when it ran one.
+   *
+   * The difference between two measurements of the same arm under two labels:
+   * what the rig does when the system under test does not change. `null` for a
+   * sweep that ran no control.
+   */
+  aa_spread?: number | null;
   metrics: Record<string, Metric>;
   image_digest?: string;
   mode?: string;
@@ -329,8 +337,8 @@ export function scaleFor(rows: Row[], metric: string): Scale | null {
  * Arms whose measured interval overlaps the leader's, per metric.
  *
  * The single most useful thing this page can say about its own numbers. With
- * three repetitions and run-to-run spread reaching 14.5%, a 10% lead is not a
- * lead — and a benchmark run by one of its entrants that lets a reader infer one
+ * three repetitions and a rig whose own control moves an unchanged arm by
+ * several percent, a 10% lead is not a lead — and a benchmark run by one of its entrants that lets a reader infer one
  * anyway has done the damage whether or not any sentence on the page was false.
  *
  * Two intervals that overlap are not separated BY THIS DATA. That is a weaker
