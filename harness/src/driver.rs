@@ -307,15 +307,41 @@ fn unrunnable_knobs(
     problems
 }
 
-/// Seconds a drain may take before it is abandoned.
+/// Seconds a drain of the reference corpus may take before it is abandoned.
 ///
-/// 600 is 2.5x the slowest drain any arm has needed (236 s), so it is
-/// unreachable by a working one — it bounds what a broken one wastes.
-const DRAIN_MAX_S: u64 = 600;
+/// 2.5x the slowest drain any arm has needed at 1,500,000 batches, so a working
+/// one cannot reach it. [`drain_max_s`] scales it with the corpus, which is a
+/// variant knob.
+const DRAIN_MAX_REFERENCE_S: u64 = 600;
+
+/// Batches [`DRAIN_MAX_REFERENCE_S`] was calibrated against.
+const DRAIN_MAX_REFERENCE_BATCHES: u64 = 1_500_000;
+
+/// Milliseconds between row-count polls while a drain runs.
+///
+/// The poll decides when the window closes, so its period is post-drain idle
+/// inside the window. It is also a query against the system under test, so a
+/// tighter poll competes with the arm — which is why it is not the sampler's
+/// interval. Against [`MIN_WINDOW_S`] this contributes at most 0.2%.
+const DRAIN_POLL_MS: u64 = 250;
+
+/// Seconds a drain window must reach for the reading to be treated as precise.
+///
+/// The window is `corpus / throughput`, so it shrinks as arms get faster and has
+/// no lower bound of its own. Below this, [`Flag::ShortWindow`] marks the record
+/// and `window_resolution` says what it was read at.
+pub const MIN_WINDOW_S: f64 = 120.0;
+
+/// The drain deadline for a corpus of `batches`.
+fn drain_max_s(batches: u64) -> u64 {
+    DRAIN_MAX_REFERENCE_S
+        .saturating_mul(batches.max(1))
+        .saturating_div(DRAIN_MAX_REFERENCE_BATCHES)
+        .max(DRAIN_MAX_REFERENCE_S)
+}
 /// Seconds to wait for the pipeline to settle before gating.
 const QUIESCE_MAX_S: u64 = 900;
-/// Sampler interval.
-const SAMPLE_INTERVAL_S: f64 = 1.0;
+
 /// Consecutive row-count probes that may fail before an arm is abandoned.
 ///
 /// A probe reads `SELECT count()` over HTTP, so it can fail for reasons that
@@ -332,19 +358,55 @@ const LOG_SEPARATOR: &str = "\nLogs:\n";
 /// Characters of a refusal that reach a record's `note`.
 const NOTE_MAX_CHARS: usize = 400;
 
-/// Batches the correctness gate examines, counted down from the top of the range.
+/// Share of the corpus the correctness gate examines, counted down from the top
+/// of the range.
 ///
-/// Bounded because exact-distinct needs a hash set proportional to cardinality,
-/// and running it over the full 150M-row corpus asked ClickHouse for 10.45 GiB
-/// against a 10.8 GiB limit and was killed — taking a completed, valid
-/// measurement down with it.
+/// A share rather than a count. The count this replaces was calibrated against
+/// a 1,500,000-batch corpus, where it covered 6.7%; the corpus is a variant
+/// knob, so a fixed count means the gate covers less of a longer one — and a
+/// longer corpus is exactly what raises the number of rows an arm could lose
+/// without the gate noticing.
+const GATE_SHARE: f64 = 0.067;
+
+/// Bytes of ClickHouse memory one batch of the gate's exact-distinct costs.
 ///
-/// The slice is taken from the TOP of the range because that is the part
-/// produced during and after the measurement window, and it is still ten million
-/// rows: a system that drops, duplicates or mis-transforms does so
-/// systematically rather than once. The window is recorded in the record's note,
-/// so the gate is visibly a sample rather than silently one.
-const GATE_MAX_BATCHES: u64 = 100_000;
+/// Exact-distinct needs a hash set proportional to cardinality, and the gate's
+/// is `(batch_id, event_seq)` over the rows in its window. One observation
+/// backs this: `uniqExact` over the full 150M-row, 1,500,000-batch corpus asked
+/// for 10.45 GiB, which is ~7.5 KiB per batch.
+const GATE_BYTES_PER_BATCH: u64 = 7_500;
+
+/// Fraction of ClickHouse's memory the gate may plan to occupy.
+///
+/// The run that established [`GATE_BYTES_PER_BATCH`] was killed at 10.45 GiB
+/// against a 10.8 GiB limit, taking a completed, valid measurement with it. The
+/// gate is a check on a measurement already taken, so it is sized to lose that
+/// race rather than to win it.
+const GATE_MEMORY_SHARE: f64 = 0.25;
+
+/// Batches the correctness gate examines for a corpus of `batches`, against a
+/// ClickHouse allocation of `ch_memory_bytes`.
+///
+/// The slice is taken from the top of the range because that is the part
+/// produced during and after the measurement window. The window is recorded in
+/// the record's note, so the gate is visibly a sample rather than silently one.
+fn gate_window_batches(batches: u64, ch_memory_bytes: u64) -> u64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "batch counts and byte budgets are far below f64's exact range"
+    )]
+    let want = (batches as f64 * GATE_SHARE) as u64;
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "as above"
+    )]
+    let affordable = ((ch_memory_bytes as f64 * GATE_MEMORY_SHARE) as u64) / GATE_BYTES_PER_BATCH;
+    want.min(affordable).max(1)
+}
 
 /// Seconds a sustained measurement window is held open, unless asked otherwise.
 ///
@@ -1128,6 +1190,12 @@ fn measure(
     if outcome.as_ref().is_ok_and(|d| d.cost.was_throttled()) {
         flags.push(Flag::CpuCapThrottled);
     }
+    if outcome
+        .as_ref()
+        .is_ok_and(|d| d.cost.window_s < MIN_WINDOW_S)
+    {
+        flags.push(Flag::ShortWindow);
+    }
     // Whatever the measurement itself established — today only
     // `Flag::Saturated`, decided by `Sustained::kept_up` and by nothing else.
     if let Ok(d) = &outcome {
@@ -1289,6 +1357,16 @@ fn measure(
         // Minimised: it is merge work the previous repetition left, and a rising
         // figure across a sweep is the drift `ch_rows_merged` exists to expose.
         report = report.metric("ch_settle_us", Metric::minimize(d.settle_s * 1e6, "us"));
+        // One sampler tick as a fraction of the window this reading was taken
+        // over. A reader cannot otherwise tell a figure read at 0.1% from one
+        // read at 7%, and the two are not the same evidence.
+        report = report.metric(
+            "window_resolution",
+            Metric::minimize(
+                crate::sampler::INTERVAL_S / d.cost.window_s.max(f64::EPSILON),
+                "ratio",
+            ),
+        );
         // GC pauses and heap, for the JVM arms and no others. Emitted only
         // where the quantity exists: a Rust binary has no collector, and a bar
         // of length zero would say it paused for 0 ms, which is a claim about a
@@ -1629,6 +1707,7 @@ fn run_arm(
             &mut containers,
             &rows_now,
             expected_rows,
+            opts.batches,
         )?,
         Mode::Sustained {
             offered_msgs_per_s,
@@ -1953,12 +2032,16 @@ fn run_arm(
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
+    let gate_batches = gate_window_batches(
+        opts.batches,
+        crate::entrant::parse_memory(&env.spec.infra.clickhouse.memory).unwrap_or(0),
+    );
     let gates = corpus::run_gates(
         &ep.ch_host,
         ep.ch_port,
         &ep.ch_user,
         &ep.ch_password,
-        GATE_MAX_BATCHES,
+        gate_batches,
     )
     .map_err(|e| with_logs(&e, &logs))?;
     if let Some(why) = gates.failure() {
@@ -1983,7 +2066,7 @@ fn run_arm(
         ));
     }
     note.push_str(&format!(
-        "; gate window {GATE_MAX_BATCHES} batches, quiesced at {} rows{}",
+        "; gate window {gate_batches} batches, quiesced at {} rows{}",
         settled.rows,
         if settled.settled {
             ""
@@ -2049,13 +2132,15 @@ fn hold_drain_window(
     containers: &mut ArmContainers,
     rows_now: &dyn Fn() -> Option<u64>,
     expected_rows: u64,
+    batches: u64,
 ) -> Result<(Vec<(String, crate::sampler::Samples)>, Held), String> {
-    let samplers = sampler::sample_arm(names, SAMPLE_INTERVAL_S);
+    let deadline_s = drain_max_s(batches);
+    let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
     let started = Instant::now();
     let mut rows = 0u64;
     let mut probe_failures = 0u32;
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(DRAIN_POLL_MS));
 
         if let Some(why) = dead_container(names, data_plane_name, "the drain") {
             let logs = containers.stop();
@@ -2086,11 +2171,11 @@ fn hold_drain_window(
         if rows >= expected_rows {
             break;
         }
-        if started.elapsed() > Duration::from_secs(DRAIN_MAX_S) {
+        if started.elapsed() > Duration::from_secs(deadline_s) {
             let logs = containers.stop();
             return Err(with_logs(
                 &format!(
-                    "the drain did not finish within {DRAIN_MAX_S}s \
+                    "the drain did not finish within {deadline_s}s \
                      ({rows} of {expected_rows} rows)"
                 ),
                 &logs,
@@ -2209,7 +2294,7 @@ fn hold_sustained_window(
     // The window. Fixed length, because a sustained stream has no natural end —
     // this is the one place in the harness where a window has to be *sized*, and
     // `SUSTAINED_WINDOW_S` records why the size is what it is.
-    let samplers = sampler::sample_arm(names, SAMPLE_INTERVAL_S);
+    let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
     let opened = Instant::now();
     let mut probe_failures = 0u32;
     while opened.elapsed() < Duration::from_secs(window_s) {
@@ -3449,6 +3534,47 @@ fn assert_arm_caps(name: &str, declared: &Container, meta: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At the corpus the old fixed count was calibrated against, the share
+    /// reproduces it — so this changes coverage only where the corpus moved.
+    #[test]
+    fn the_gate_window_is_a_share_of_the_corpus_bounded_by_memory() {
+        let sixteen_gib = 16 * 1024 * 1024 * 1024;
+        let reference = gate_window_batches(1_500_000, sixteen_gib);
+        assert!(
+            (99_000..=102_000).contains(&reference),
+            "expected ~100,000 at the reference corpus, got {reference}"
+        );
+
+        // Twenty times the corpus does not mean a twentieth of the coverage.
+        let long = gate_window_batches(30_000_000, 32 * 1024 * 1024 * 1024);
+        assert!(long > reference * 10, "{long} vs {reference}");
+
+        // Memory is the binding constraint, not the share, once the corpus is
+        // long enough — the gate is a check on a measurement already taken, so
+        // it loses that race rather than winning it.
+        assert!(gate_window_batches(u64::MAX, sixteen_gib) < 600_000);
+
+        // A window of zero batches would gate nothing while reporting a gate.
+        assert_eq!(gate_window_batches(1, 0), 1);
+    }
+
+    /// The deadline bounds what a broken drain wastes, so it has to move with
+    /// the corpus a working one has to get through.
+    #[test]
+    fn the_drain_deadline_scales_with_the_corpus() {
+        assert_eq!(
+            drain_max_s(DRAIN_MAX_REFERENCE_BATCHES),
+            DRAIN_MAX_REFERENCE_S
+        );
+        assert_eq!(
+            drain_max_s(DRAIN_MAX_REFERENCE_BATCHES * 20),
+            DRAIN_MAX_REFERENCE_S * 20
+        );
+        // Never below the calibrated floor, however small the corpus.
+        assert_eq!(drain_max_s(1), DRAIN_MAX_REFERENCE_S);
+        assert_eq!(drain_max_s(0), DRAIN_MAX_REFERENCE_S);
+    }
 
     /// A variant carrying the Flink arm's sink knobs, for the tuning tests.
     fn tunable_variant() -> Variant {

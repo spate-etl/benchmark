@@ -13,7 +13,7 @@ Everything published comes from outside the system under test:
 | Quantity | Source |
 |---|---|
 | Throughput | `SELECT count()` against ClickHouse, polled by the driver, over the sampler's own window |
-| CPU | cgroup v2 `cpu.stat` (`usage_usec`, `user_usec`, `system_usec`), sampled at 1 Hz by a sidecar container |
+| CPU | cgroup v2 `cpu.stat` (`usage_usec`, `user_usec`, `system_usec`), sampled at 10 Hz by a sidecar container |
 | Memory | cgroup v2 peak **anonymous** memory, plus `memory.peak` and (for JVM arms) configured vs used heap |
 | Latency | `ingest_ts - send_ts` computed in ClickHouse, where `ingest_ts` is a `MATERIALIZED now64(6)` column. Sustained mode only |
 | Server-side cost | ClickHouse's own `ProfileEvents` CPU-per-row, via `system.query_log` |
@@ -74,18 +74,26 @@ regardless of base image.
 ## What the instrument can resolve
 
 The drain's window comes from the sampler's own timestamps, and the sampler runs
-at 1 Hz. So a drain is measured in whole seconds, and **a throughput difference
-smaller than one sampler tick is not a difference this instrument can see**. On a
-26-second drain one tick is 3.8%; on a 40-second one it is 2.5%. This was found by
-a configuration sweep in which fifty-eight windows all landed within 70 ms of a
-whole second and twenty-four distinct configurations resolved to five distinct
-rates.
+at 10 Hz. So **a throughput difference smaller than one sampler tick is not a
+difference this instrument can see**.
 
-That limit is throughput's. The per-core figure divides CPU by rows rather than
-by time, so the window cancels and the tick does not quantise it. It is not
-independent of the sampler: both ends of the CPU delta are sampler readings, so
-a window truncated at either end understates the CPU while the row count stays
-the full corpus, and the reading comes out flatteringly low.
+How large that is depends on the arm, not on the rig. A drain's window is the
+corpus divided by throughput, so it shrinks as arms get faster and has no lower
+bound of its own — a faster arm is measured more coarsely, and the error is
+systematic rather than random, because a fixed row count divided by a smaller
+window reads high. Two things bound it. The corpus is sized so that the fastest
+arm's window clears a declared floor of **120 seconds**, at which one tick is
+0.08%; and every record carries `window_resolution`, the tick as a fraction of
+the window it was actually read over, so a reading taken at 0.08% is
+distinguishable from one taken at 7%. A window below the floor carries
+`short_window` beside `reused_infra` and `cpu_cap_throttled`.
+
+The per-core figure divides CPU by rows rather than by time, so the window
+cancels and the tick does not quantise it. It is not independent of the sampler:
+both ends of the CPU delta are sampler readings while a drain's row count is the
+whole corpus, so a window clipped at either end understates the CPU and the
+reading comes out flatteringly low. Raising the rate bounds that clipping; it
+does not remove it, and the residual is why the floor exists as well.
 
 It is a separate limit from run-to-run spread, and the two are often confused.
 Spread says how much a repeated measurement wanders; quantisation says how finely

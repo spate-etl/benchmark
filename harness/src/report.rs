@@ -252,6 +252,14 @@ pub enum Flag {
     UnpublishableEnvironment,
     /// Infrastructure containers were reused rather than recreated.
     ReusedInfra,
+    /// The measurement window fell below the floor the protocol declares.
+    ///
+    /// A drain's window is `corpus / throughput`, so it shrinks as arms get
+    /// faster and has no lower bound of its own. Both ends of the CPU delta are
+    /// sampler readings while the row count is the whole corpus, so a short
+    /// window reads flatteringly low. `window_resolution` on the same record
+    /// says what it was read at.
+    ShortWindow,
 }
 
 /// One measured quantity, carrying its unit and its direction of goodness.

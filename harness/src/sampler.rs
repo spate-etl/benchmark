@@ -49,6 +49,17 @@ use crate::docker::{NETWORK, docker, docker_try};
 
 /// The sampler container's name. Fixed, so an orphan from an interrupted run is
 /// always cleaned up by the next one rather than accumulating.
+/// Milliseconds between cgroup readings.
+///
+/// Both ends of a window's CPU delta are sampler readings while a drain's row
+/// count is the whole corpus, so a window clipped at either end understates CPU
+/// against a full numerator and reads flatteringly low. The clipping is bounded
+/// by this interval, so the interval bounds that error.
+pub const INTERVAL_MS: u64 = 100;
+
+/// The same interval in seconds, which is what the sampler process is given.
+pub const INTERVAL_S: f64 = INTERVAL_MS as f64 / 1000.0;
+
 const SAMPLER_CONTAINER: &str = "spate-bench-sampler";
 
 /// Image used for the sampler. Chosen only because it has a Python interpreter;
@@ -412,7 +423,7 @@ impl Samples {
 /// already goes out of its way not to penalise, on the one panel where a JVM
 /// looks worst.
 ///
-/// The series are sampled independently at 1 Hz and are not synchronised, so
+/// The series are sampled independently and are not synchronised, so
 /// they are aligned into one-second buckets by their own timestamps. A container
 /// with no sample in a bucket contributes its last known reading rather than
 /// zero: these are levels, not events, and a gap means "not observed", not
@@ -423,9 +434,9 @@ impl Samples {
 /// condition under which the arm has no cost at all.
 #[must_use]
 pub fn simultaneous_peak_anon(series: &[&[Sample]]) -> Option<f64> {
-    /// Bucket width. Matches the sampler interval: finer would invent alignment
-    /// the 1 Hz series cannot support.
-    const BUCKET_MS: u64 = 1_000;
+    /// Bucket width, equal to the sampler interval: finer would invent
+    /// alignment the series cannot support.
+    const BUCKET_MS: u64 = INTERVAL_MS;
 
     let readable: Vec<Vec<&Sample>> = series
         .iter()
@@ -490,7 +501,7 @@ pub fn simultaneous_peak_anon(series: &[&[Sample]]) -> Option<f64> {
 ///
 /// Defect this closes: they did not agree. The driver timed the drain on its own
 /// clock and divided rows by an interval that ran from the first landed row to
-/// *after* `quiesce` (three or more stable 1 Hz polls) and `stop_all` (a `docker
+/// *after* `quiesce` (three or more stable polls) and `stop_all` (a `docker
 /// logs` plus a `docker rm -f` per container), plus a `+1.0` fudge, while
 /// `cores_used` rested on the sampler's window. The two forms of the identity
 /// above disagreed by +5.9% to +11.2% on every published Spate record and by
