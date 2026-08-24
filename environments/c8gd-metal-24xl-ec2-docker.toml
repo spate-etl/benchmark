@@ -1,0 +1,65 @@
+# One on-demand EC2 c8gd.metal-24xl per run, launched fresh and terminated when
+# the run ends. Graviton4 has no SMT and there is no hypervisor: the 96 vCPUs
+# are 96 physical cores, and a cgroup CPU cap means what it says.
+#
+# `env_digest` on every record is a hash of this file.
+
+id = "c8gd-metal-24xl-ec2-docker"
+
+# The site removes its "not authoritative" banner from this field.
+class = "authoritative"
+
+[host]
+description = "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root"
+cpu         = "AWS Graviton4"
+cores       = 96
+core_layout = "homogeneous: 96 physical cores, no SMT"
+memory      = "192 GiB"
+os          = "Ubuntu 24.04, Docker CE"
+arch        = "aarch64"
+
+caveats = """
+Storage is the instance's own NVMe. ClickHouse, the broker and Docker's data
+root each get a device, so the write path and the read path under test do not
+share a queue. Nothing about the disk is provisioned, so nothing about it is a
+variable this profile has to declare.
+
+The host is bare metal: the Nitro hypervisor is absent, not merely
+well-behaved.
+"""
+
+# THESE CAPS ARE PROVISIONAL. Nothing may be published against them. A tuning
+# session sets them: partitions with the broker cap against the consume
+# ceiling, then ClickHouse at the smallest cap holding every arm at or below
+# 50% of its ingest ceiling, then the arm envelope takes what remains.
+#
+# Changing these caps, the partition count or the storage kind moves
+# `infra_digest`, and `Ceilings::gate` drops every ceiling not measured under
+# the new one.
+[infra]
+partitions = 8
+
+[infra.broker]
+kind     = "redpanda"
+image    = "redpandadata/redpanda:v26.1.13"
+cpus     = "3"
+memory   = "8g"
+registry = "redpanda-builtin"
+
+[infra.clickhouse]
+image  = "clickhouse/clickhouse-server:26.3"
+cpus   = "16"
+memory = "16g"
+
+# `kind` is in `infra_digest`; the paths are not. A path that is not its own
+# mount fails the run before any container starts.
+[infra.storage]
+kind            = "local-nvme"
+clickhouse_data = "/mnt/bench-clickhouse"
+broker_data     = "/mnt/bench-broker"
+
+# Written by `bench ceiling --measure --write --env c8gd-metal-24xl-ec2-docker`
+# on the box. An arm above 70% of the measured ceiling is infra-bound and cannot
+# be published.
+[ceiling]
+file = "ceilings/c8gd-metal-24xl-ec2-docker.json"

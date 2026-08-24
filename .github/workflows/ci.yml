@@ -73,8 +73,8 @@ jobs:
       # A sweep is not runnable here, but the plan it would execute is, and a
       # selector grammar that silently expands to the whole matrix is the kind of
       # defect that costs hours on the machine that can run it.
-      - name: bench run --dry-run (c8g-8xl-ec2-docker)
-        run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run --env c8g-8xl-ec2-docker
+      - name: bench run --dry-run (c8gd-metal-24xl-ec2-docker)
+        run: cargo run --quiet --locked -p spate-benchmark-harness --bin bench -- run '*' --dry-run --env c8gd-metal-24xl-ec2-docker
 
   # The AWS footprint is not here: the launcher, collector and Terraform live in
   # the private ops repo (it deploys to a shared account), and that repo runs its

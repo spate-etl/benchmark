@@ -120,6 +120,40 @@ pub struct Infra {
     pub partitions: i32,
     pub broker: Broker,
     pub clickhouse: ClickHouse,
+    /// What the measured data paths sit on.
+    #[serde(default)]
+    pub storage: Storage,
+}
+
+/// Which device each measured data path sits on.
+///
+/// [`Kind`] is part of [`Environment::infra_digest`], so a ceiling measured
+/// under one layout does not gate a run under another.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Storage {
+    #[serde(default)]
+    pub kind: Kind,
+    /// Host path bind-mounted at ClickHouse's data directory.
+    #[serde(default)]
+    pub clickhouse_data: String,
+    /// Host path bind-mounted at the broker's data directory.
+    #[serde(default)]
+    pub broker_data: String,
+}
+
+/// How the infrastructure's data paths are laid out on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    /// Every container writes to its own layer on the host's root filesystem.
+    /// One device, shared by ClickHouse, the broker and Docker. The default,
+    /// and what a single-disk host has.
+    #[default]
+    SharedRoot,
+    /// ClickHouse and the broker each bind-mount a host path on a device of its
+    /// own.
+    LocalNvme,
 }
 
 /// The broker and its built-in registry.
@@ -186,6 +220,10 @@ impl Environment {
                 spec.id
             ));
         }
+        spec.infra
+            .storage
+            .check()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let digest = short_digest(src.as_bytes());
         Ok(Self {
             spec,
@@ -206,11 +244,21 @@ impl Environment {
     /// what was measured *and* why it is or is not usable; everything that acts
     /// on a ceiling wants [`Environment::ceiling`] instead.
     ///
+    /// An absent file yields an empty set, which [`crate::ceiling::Ceilings::gate`]
+    /// then refuses with a reason naming the measurement to take. The same
+    /// distinction [`Environment::ceiling`] draws: `Err` is a file somebody has
+    /// to fix, a refusal is a measurement somebody has to run, and an
+    /// environment committed ahead of its bootstrap owes a measurement.
+    ///
     /// # Errors
     ///
-    /// If the referenced file is missing or does not parse.
+    /// If the referenced file exists and does not parse.
     pub fn ceilings(&self) -> Result<crate::ceiling::Ceilings, String> {
-        crate::ceiling::Ceilings::load(&self.ceilings_path())
+        let path = self.ceilings_path();
+        if !path.exists() {
+            return Ok(crate::ceiling::Ceilings::default());
+        }
+        crate::ceiling::Ceilings::load(&path)
     }
 
     /// The ceilings this environment may actually be **gated against**.
@@ -243,19 +291,24 @@ impl Environment {
     /// provenance — recorded, rendered as a footnote — because refusing to
     /// compare across one would make the suite unusable. What splits a
     /// comparability group is a change in the *shape* of the infrastructure:
-    /// CPU, memory, partitions, broker family.
+    /// CPU, memory, partitions, broker family, and the storage [`Kind`].
+    ///
+    /// The storage paths are excluded. A mount point is not a device, so moving
+    /// one changes nothing the rig contends for; a path that is not its own
+    /// mount is caught by `crate::infra`, which reads the mount back.
     #[must_use]
     pub fn infra_digest(&self) -> String {
         let i = &self.spec.infra;
         short_digest(
             format!(
-                "{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}",
                 i.broker.kind,
                 i.broker.cpus,
                 i.broker.memory,
                 i.clickhouse.cpus,
                 i.clickhouse.memory,
-                i.partitions
+                i.partitions,
+                i.storage.kind.as_str()
             )
             .as_bytes(),
         )
@@ -275,6 +328,38 @@ impl Environment {
     #[must_use]
     pub fn publication_bar(&self) -> Option<&'static str> {
         self.spec.class.publication_bar()
+    }
+}
+
+impl Kind {
+    /// The digest token, and the word an operator reads.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedRoot => "shared-root",
+            Self::LocalNvme => "local-nvme",
+        }
+    }
+}
+
+impl Storage {
+    /// Refuses `local-nvme` that does not name both paths.
+    ///
+    /// Without them the containers write to their own layers on the root
+    /// filesystem while `infra_digest` records a layout they are not running
+    /// under.
+    fn check(&self) -> Result<(), String> {
+        if self.kind == Kind::LocalNvme
+            && (self.clickhouse_data.trim().is_empty() || self.broker_data.trim().is_empty())
+        {
+            return Err("[infra.storage] kind = \"local-nvme\" must also give \
+                        clickhouse_data and broker_data: without them the containers \
+                        write to their own layers on the root filesystem, which is what \
+                        \"shared-root\" means, while infra_digest goes on saying they \
+                        did not"
+                .to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -331,5 +416,114 @@ mod tests {
     #[test]
     fn the_headroom_limit_is_reachable_under_the_name_the_driver_imports() {
         assert!((HEADROOM_LIMIT - crate::ceiling::HEADROOM_LIMIT).abs() < f64::EPSILON);
+    }
+
+    fn infra_with(storage: Storage) -> Infra {
+        Infra {
+            partitions: 8,
+            broker: Broker {
+                kind: "redpanda".to_owned(),
+                image: "redpandadata/redpanda:v26.1.13".to_owned(),
+                cpus: "3".to_owned(),
+                memory: "8g".to_owned(),
+                registry: "redpanda-builtin".to_owned(),
+            },
+            clickhouse: ClickHouse {
+                image: "clickhouse/clickhouse-server:26.3".to_owned(),
+                cpus: "16".to_owned(),
+                memory: "16g".to_owned(),
+            },
+            storage,
+        }
+    }
+
+    fn env_with(infra: Infra) -> Environment {
+        Environment {
+            spec: Profile {
+                id: "t".to_owned(),
+                class: Class::Fixture,
+                host: Host {
+                    description: String::new(),
+                    cpu: String::new(),
+                    cores: 1,
+                    core_layout: String::new(),
+                    memory: String::new(),
+                    os: String::new(),
+                    arch: String::new(),
+                    vm_cpus: 0,
+                    vm_memory: String::new(),
+                    caveats: String::new(),
+                },
+                infra,
+                ceiling: CeilingRef {
+                    file: "ceilings/t.json".to_owned(),
+                },
+            },
+            digest: "0".repeat(12),
+            dir: PathBuf::from("."),
+        }
+    }
+
+    /// A profile committed ahead of its ceiling bootstrap owes a measurement,
+    /// not a file fix, and the two exits are different.
+    #[test]
+    fn an_unmeasured_ceiling_is_a_refusal_rather_than_an_error() {
+        let gate = crate::ceiling::Ceilings::default().gate(4056, "abcdef123456");
+        assert_eq!(gate.consume_msgs_per_s, 0);
+        assert!(
+            gate.refusals()
+                .iter()
+                .any(|r| r.contains("bench ceiling --measure")),
+            "the refusal must name the measurement to take: {:?}",
+            gate.refusals()
+        );
+    }
+
+    #[test]
+    fn the_storage_layout_splits_a_comparability_group() {
+        let shared = env_with(infra_with(Storage::default()));
+        let nvme = env_with(infra_with(Storage {
+            kind: Kind::LocalNvme,
+            clickhouse_data: "/mnt/ch".to_owned(),
+            broker_data: "/mnt/br".to_owned(),
+        }));
+        assert_ne!(shared.infra_digest(), nvme.infra_digest());
+
+        // Paths are excluded.
+        let moved = env_with(infra_with(Storage {
+            kind: Kind::LocalNvme,
+            clickhouse_data: "/data/ch".to_owned(),
+            broker_data: "/data/br".to_owned(),
+        }));
+        assert_eq!(nvme.infra_digest(), moved.infra_digest());
+    }
+
+    #[test]
+    fn a_profile_that_says_nothing_about_storage_is_saying_shared_root() {
+        assert_eq!(Storage::default().kind, Kind::SharedRoot);
+        assert_eq!(Kind::SharedRoot.as_str(), "shared-root");
+        assert_eq!(Kind::LocalNvme.as_str(), "local-nvme");
+    }
+
+    #[test]
+    fn declaring_local_nvme_without_paths_is_refused_at_load() {
+        let missing = Storage {
+            kind: Kind::LocalNvme,
+            clickhouse_data: String::new(),
+            broker_data: "/mnt/br".to_owned(),
+        };
+        let e = missing.check().expect_err("must refuse");
+        assert!(e.contains("clickhouse_data"), "{e}");
+
+        assert!(Storage::default().check().is_ok());
+        assert!(
+            Storage {
+                kind: Kind::LocalNvme,
+                clickhouse_data: "/mnt/ch".to_owned(),
+                broker_data: "/mnt/br".to_owned(),
+            }
+            .check()
+            .is_ok()
+        );
     }
 }

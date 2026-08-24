@@ -70,10 +70,11 @@ is ours is exactly as reproducible as every arm that is not.
 
 ## Reproducing the cloud environment
 
-Published runs execute on a disposable EC2 box — one on-demand `c8g.8xlarge`
-(Graviton4: 32 vCPUs that are 32 physical cores, no SMT), Ubuntu 24.04 arm64,
-a 500 GiB gp3 volume provisioned at 10,000 IOPS and 1,000 MiB/s so storage is
-never the bottleneck being measured. What the box actually executes is public
+Published runs execute on a disposable EC2 box — one on-demand
+`c8gd.metal-24xl` (Graviton4: 96 vCPUs that are 96 physical cores, no SMT, no
+hypervisor), Ubuntu 24.04 arm64, with ClickHouse, the broker and Docker each on
+one of the instance's three local NVMe devices, so storage is not a figure
+anyone has to provision. What the box actually executes is public
 and versioned at the SHA it ran: `.github/aws/userdata.sh.tpl` boots it and
 `.github/aws/run-bench.sh` builds the harness from the clone at that SHA and
 runs the suite. The instance type, volume, AMI and those scripts are the whole
@@ -84,5 +85,5 @@ AWS Terraform — runs from a **private operations repository**, because the
 benchmark shares an AWS account and its account shape is not something to
 publish. It changes nothing you can reproduce: a run executes this repo at an
 approved commit and its results come back as an ordinary, validated pull
-request. A full sweep costs roughly the instance-hours it takes at ~$1.3/hour,
+request. A full sweep costs roughly the instance-hours it takes at ~$5.6/hour,
 bounded by a 36-hour TTL.

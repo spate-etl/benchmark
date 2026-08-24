@@ -13,7 +13,7 @@ machines and tells a reader nothing they can reproduce against. Each record also
 carries a digest of the profile, so editing it later cannot retroactively
 re-describe runs that already happened.
 
-## `c8g-8xl-ec2-docker` — the environment
+## `c8gd-metal-24xl-ec2-docker` — the environment
 
 **Class: authoritative.** A fresh machine per run, launched by
 [the pipeline in this repository](reproduce.md#reproducing-the-cloud-environment)
@@ -21,25 +21,28 @@ and terminated when the run ends, so no state survives between measurements.
 
 | | |
 |---|---|
-| Host | AWS EC2 c8g.8xlarge, on-demand |
-| CPU | Graviton4 — 32 physical cores, homogeneous, no SMT |
-| Memory | 64 GiB |
-| Storage | EBS gp3 500 GiB, provisioned at 10,000 IOPS / 1,000 MiB/s |
+| Host | AWS EC2 c8gd.metal-24xl, on-demand, bare metal |
+| CPU | Graviton4 — 96 physical cores, homogeneous, no SMT |
+| Memory | 192 GiB |
+| Storage | 3 × 1,900 GB local NVMe SSD; EBS gp3 200 GiB root |
 | OS | Ubuntu 24.04, Docker CE, arm64 |
 
 ### Why it earns the class
 
 Every vCPU is a dedicated physical core: Graviton has no simultaneous
-multithreading and the Nitro hypervisor does not oversubscribe, so a cgroup CPU
-cap means what it says. Docker here is Docker CE on Linux — containers are plain
-cgroups, the same mechanism the envelope enforcement and the sampler read, with
-no VM between the harness and the kernel. A JVM on this box **is** a JVM on
-Linux. The storage is deliberately over-provisioned so the disk is headroom
-rather than a variable, and its exact provisioning is part of the committed
-profile: changing it would change what is being measured.
+multithreading, and on a metal instance there is no hypervisor at all, so a
+cgroup CPU cap means what it says. Docker here is Docker CE on Linux —
+containers are plain cgroups, the same mechanism the envelope enforcement and
+the sampler read, with no VM between the harness and the kernel. A JVM on this
+box **is** a JVM on Linux.
 
-It is not bare metal — a `*.metal` instance would remove the hypervisor
-entirely — and it is rentable by anyone, which is the point: the environment is
+ClickHouse and the broker each write to their own local NVMe device, and
+Docker's data root — where every arm container's writable layer lives — has a
+third. The write path and the read path under test therefore do not share a
+queue. Nothing about the disk is provisioned, so nothing about it is a number
+this profile has to choose or defend.
+
+The instance is rentable by anyone, which is the point: the environment is
 reproducible with an AWS account and this repository, not with access to our
 hardware.
 
@@ -57,9 +60,8 @@ number,
 which is the honest cost of the choice.
 
 **Infrastructure sits outside every arm's budget** and is identical for all of
-them: Redpanda at 3 CPUs / 8 GiB, ClickHouse at 16 CPUs / 16 GiB, an 8-partition
-topic. It is declared in the environment profile rather than passed on the
-command line — which is the fix for a real failure, where a runner script, the
+them: Redpanda, ClickHouse and the topic's partition count are declared in the
+environment profile rather than passed on the command line — which is the fix for a real failure, where a runner script, the
 driver's defaults and the written methodology stated three different envelopes
 while no record said which had been in force.
 

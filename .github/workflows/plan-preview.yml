@@ -29,7 +29,7 @@ on:
         default: "*"
       env_id:
         description: Environment profile to preview against
-        default: c8g-8xl-ec2-docker
+        default: c8gd-metal-24xl-ec2-docker
       reps:
         description: Repetitions per arm (3 is the methodology's floor)
         default: "3"
@@ -91,7 +91,7 @@ jobs:
               echo "::warning::cannot resolve $before; nothing to preview"
               selector=""
             fi
-            env_id=c8g-8xl-ec2-docker
+            env_id=c8gd-metal-24xl-ec2-docker
             reps=3
             mode=run
           fi

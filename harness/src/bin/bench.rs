@@ -656,6 +656,7 @@ fn cmd_validate(root: &Path) -> Result<(), String> {
         "environments: {envs} profile(s) valid, {gateable} with a ceiling that may be \
          gated against"
     );
+
     // Reported, not failed, and the distinction is deliberate. A malformed
     // ceilings file is a defect in a committed file and CI should stop for it —
     // it does, above, because the load returns Err. A ceiling that is well

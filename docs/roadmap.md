@@ -53,10 +53,11 @@ Community Licence over parts of the connector set.
 - **A latency curve.** Percentiles against offered load, which needs a sweep mode
   the harness does not have yet.
 - **The first published sweep.** The cloud pipeline is built: an approval-gated
-  pipeline launches a disposable EC2 c8g.8xlarge, runs the suite, and returns
-  results as a validated pull request. What remains before numbers publish:
-  measure the environment's ceilings (`bench ceiling --measure --write` via the
-  pipeline's bootstrap mode) and land the first sweep.
+  pipeline launches a disposable EC2 c8gd.metal-24xl, runs the suite, and
+  returns results as a validated pull request. What remains before numbers
+  publish: settle the infrastructure split for the host, measure the
+  environment's ceilings (`bench ceiling --measure --write` via the pipeline's
+  bootstrap mode) and land the first sweep.
 - **Sending competitor configurations upstream** and asking whether we
   handicapped anyone, then linking whatever comes back — including "they told us
   to change X and we did".

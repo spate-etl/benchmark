@@ -46,11 +46,11 @@ can this run?", that is a different sweep and it has not been done.
 
 ## The host is rented
 
-Measurements run on a fresh EC2 c8g.8xlarge per run — Linux, homogeneous
-physical cores, no VM layer. What that leaves: it is a virtualised
-single-tenant instance rather than bare metal, storage is EBS rather than local
-NVMe (deliberately over-provisioned and recorded in the profile), and AWS is a
-shared platform whose behaviour we do not control, only pin and disclose.
+Measurements run on a fresh EC2 c8gd.metal-24xl per run — bare-metal Linux,
+homogeneous physical cores, no hypervisor, ClickHouse and the broker each on
+their own local NVMe device. What that leaves: AWS is a shared platform whose
+behaviour we do not control, only pin and disclose, and one instance of one
+type in one region is not every machine a system will meet.
 
 ## The transform is measured, but it is a very small one
 

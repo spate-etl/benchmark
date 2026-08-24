@@ -390,6 +390,7 @@ mod tests {
             clickhouse_cpus: "500000 100000".to_owned(),
             clickhouse_memory: "12884901888".to_owned(),
             partitions: 8,
+            storage: "local-nvme".to_owned(),
             registry: "redpanda-builtin".to_owned(),
             ceiling_msgs_per_s: 305_554,
             ceiling_bytes_per_s: 256_700_000,

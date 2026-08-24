@@ -404,8 +404,9 @@ pub struct Sut {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Infra {
     /// Stable hash over the envelope-defining subset only — cpus, memory,
-    /// partitions, broker family. Deliberately excludes versions, so a
-    /// ClickHouse patch release does not split a comparability group.
+    /// partitions, broker family, storage layout. Deliberately excludes
+    /// versions, so a ClickHouse patch release does not split a comparability
+    /// group.
     pub digest: String,
     /// Broker family, e.g. `redpanda`.
     pub broker: String,
@@ -427,6 +428,14 @@ pub struct Infra {
     pub clickhouse_memory: String,
     /// Topic partition count.
     pub partitions: i32,
+    /// What the measured data paths sat on: `shared-root` or `local-nvme`.
+    /// Part of `digest` above.
+    ///
+    /// Additive: [`SCHEMA_VERSION`] stays at 2 and this is `#[serde(default)]`,
+    /// so a record without the field still deserialises, with an empty string
+    /// meaning "not stated".
+    #[serde(default)]
+    pub storage: String,
     /// Schema Registry implementation, e.g. `redpanda-builtin`.
     pub registry: String,
     /// The measured consume ceiling this run was gated against, in **messages**
@@ -724,6 +733,7 @@ mod tests {
             clickhouse_cpus: "500000 100000".to_owned(),
             clickhouse_memory: "12884901888".to_owned(),
             partitions: 8,
+            storage: "local-nvme".to_owned(),
             registry: "redpanda-builtin".to_owned(),
             ceiling_msgs_per_s: 305_554,
             ceiling_bytes_per_s: 256_700_000,

@@ -56,9 +56,36 @@ finish() {
 trap finish EXIT
 
 apt-get update
-apt-get install -y git
+apt-get install -y git xfsprogs
 snap install aws-cli --classic
 export PATH="$PATH:/snap/bin"
+
+echo "boot: user-data reached $(date -u +%Y-%m-%dT%H:%M:%SZ), $(awk '{print $1}' /proc/uptime)s after power-on"
+
+# Instance-store NVMe, if this instance type has any. Each measured path gets a
+# device so the write path and the read path under test do not share a queue;
+# Docker takes the third, because every arm container's writable layer is on it.
+#
+# Mounted before Docker is installed. The environment profile declares which
+# layout it expects and the harness refuses the run if the host does not have
+# it, so a type without instance store fails there rather than here.
+mapfile -t stores < <(lsblk -dn -o NAME,MODEL | awk '/Instance Storage/ {print "/dev/"$1}')
+echo "instance-store devices: ${stores[*]:-none}"
+
+mount_store() {
+  local device=$1 path=$2 owner=${3:-}
+  [ -n "$device" ] || return 0
+  mkfs.xfs -f -q "$device"
+  mkdir -p "$path"
+  mount -o noatime "$device" "$path"
+  if [ -n "$owner" ]; then chown "$owner" "$path"; fi
+  echo "mounted $device at $path"
+}
+
+# 101:101 is the uid:gid both ClickHouse and Redpanda run as in their images.
+mount_store "${stores[0]:-}" /mnt/bench-clickhouse 101:101
+mount_store "${stores[1]:-}" /mnt/bench-broker 101:101
+mount_store "${stores[2]:-}" /var/lib/docker
 
 git clone https://github.com/spate-etl/benchmark /opt/bench
 cd /opt/bench

@@ -147,12 +147,12 @@ produces a diff confined to one file.
 
 ## Host caveat
 
-Published measurements run on `c8g-8xl-ec2-docker`: a fresh, single-tenant EC2
-c8g.8xlarge per run — Linux, 32 homogeneous physical cores with no SMT, no VM
-between the harness and the kernel. Its environment profile declares
-`class = "authoritative"`, and the exact machine, storage provisioning and
-launch pipeline are committed in this repository, so the environment is
-reproducible with an AWS account rather than with access to anyone's hardware.
+Published measurements run on `c8gd-metal-24xl-ec2-docker`: a fresh EC2
+c8gd.metal-24xl per run — bare-metal Linux, 96 homogeneous physical cores with
+no SMT and no hypervisor. Its environment profile declares
+`class = "authoritative"`, and the exact machine, storage layout and launch
+pipeline are committed in this repository, so the environment is reproducible
+with an AWS account rather than with access to anyone's hardware.
 
 The site shows run-to-run spread on every chart and carries full environment
 provenance in every record. Environments are never drawn on one axis: results

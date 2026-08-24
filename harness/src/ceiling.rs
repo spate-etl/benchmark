@@ -6379,8 +6379,8 @@ mod tests {
         assert!(err.to_string().contains("consume_msgs_per_s"), "{err}");
     }
 
-    /// The committed reference ceiling, checked against the rule rather than
-    /// against a value.
+    /// Every committed ceiling, checked against the rule rather than against a
+    /// value.
     ///
     /// Pinning today's figures here would make this something to edit whenever a
     /// maintainer legitimately re-measures, and a test people edit is a test
@@ -6388,35 +6388,58 @@ mod tests {
     /// a consume ceiling reaches the gate only if it records the message size,
     /// the envelope and the side of the bench network it was taken on, and the
     /// size matches this corpus. The assertion is an equivalence, so it holds
-    /// whether the committed file currently satisfies the rule or is being
+    /// whether a committed file currently satisfies the rule or is being
     /// correctly refused until a pass is re-run.
+    ///
+    /// Discovered rather than named. This used to open one path spelled out in
+    /// full, which made retiring that environment fail a test about a rule the
+    /// environment had nothing to do with — and the fix a maintainer reaches for
+    /// under that pressure is to edit the literal, which is how the rule quietly
+    /// stops covering the file that replaced it. Iterating the directory means a
+    /// new ceiling is covered the moment it is committed, by nobody's decision.
+    ///
+    /// An empty directory passes, and that is correct rather than a hole: the
+    /// archive genuinely has no ceilings between retiring one environment and
+    /// measuring the next, and a test that failed then would be reporting the
+    /// absence of a measurement as a defect in a rule.
     #[test]
-    fn the_committed_reference_ceiling_reaches_the_gate_only_if_it_says_what_it_measured() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../environments/ceilings/c8g-8xl-ec2-docker.json");
-        let ceilings = Ceilings::load(&path).expect("the committed ceilings file parses");
-        let consume = ceilings
-            .consume
-            .as_ref()
-            .expect("the file records a consume ceiling");
-        assert_ne!(
-            consume.message_bytes, 0,
-            "a ceiling that does not record the message size it was measured at is the \
-             defect this file's shape exists to prevent"
-        );
+    fn every_committed_ceiling_reaches_the_gate_only_if_it_says_what_it_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../environments/ceilings");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let ceilings =
+                Ceilings::load(&path).unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
+            let Some(consume) = ceilings.consume.as_ref() else {
+                continue;
+            };
+            assert_ne!(
+                consume.message_bytes,
+                0,
+                "{}: a ceiling that does not record the message size it was measured at is \
+                 the defect this file's shape exists to prevent",
+                path.display()
+            );
 
-        // Its own recorded envelope, so the only thing left to disagree is the
-        // message size.
-        let gate = ceilings.gate(corpus_message_bytes(), &consume.provenance.infra_digest);
-        assert_eq!(
-            gate.consume_msgs_per_s > 0,
-            !consume.provenance.infra_digest.is_empty()
-                && location_named(&consume.client) == Some(Location::Inside)
-                && !size_differs_materially(consume.message_bytes, corpus_message_bytes()),
-            "the committed ceiling must reach the gate exactly when it says what it was \
-             measured against: {:?}",
-            gate.refusals()
-        );
+            // Its own recorded envelope, so the only thing left to disagree is
+            // the message size.
+            let gate = ceilings.gate(corpus_message_bytes(), &consume.provenance.infra_digest);
+            assert_eq!(
+                gate.consume_msgs_per_s > 0,
+                !consume.provenance.infra_digest.is_empty()
+                    && location_named(&consume.client) == Some(Location::Inside)
+                    && !size_differs_materially(consume.message_bytes, corpus_message_bytes()),
+                "{}: a committed ceiling must reach the gate exactly when it says what it \
+                 was measured against: {:?}",
+                path.display(),
+                gate.refusals()
+            );
+        }
     }
 
     #[test]

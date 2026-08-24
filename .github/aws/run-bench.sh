@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The benchmark box's payload. Executed by the user-data stub from a checkout
 # of this repository at the approved SHA, as root, on a fresh Ubuntu 24.04
-# arm64 c8g.8xlarge. Everything it needs arrives in the environment
+# arm64 c8gd.metal-24xl. Everything it needs arrives in the environment
 # (RUN_ID/SHA/ENV_ID/SELECTOR/REPS/TRIGGER/MODE/BUCKET/TTL_HOURS); everything
 # it produces leaves via s3://$BUCKET/incoming/$RUN_ID/.
 #
