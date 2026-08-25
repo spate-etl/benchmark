@@ -183,8 +183,14 @@ done
 note "bringing infrastructure up"
 "$BENCH" prefill --env "$ENV_ID" --batches 1
 
-note "walking the ladder"
-walk_ladder || note "ladder aborted; the box stays up for diagnosis"
+# A clean gate means the committed ceilings describe this profile already, so
+# the ladder has nothing to size and the box is a held session from the start.
+if "$BENCH" ceiling --env "$ENV_ID" >/dev/null 2>&1; then
+  note "committed ceilings gate clean against this profile; holding without the ladder"
+else
+  note "walking the ladder"
+  walk_ladder || note "ladder aborted; the box stays up for diagnosis"
+fi
 
 # Under logs/ because that is the one prefix the instance role can write
 # besides the run markers. Guarded: an upload refusal must not kill a held
