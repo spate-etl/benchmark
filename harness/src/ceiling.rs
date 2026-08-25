@@ -779,10 +779,18 @@ impl Ceilings {
 
     /// Writes a ceilings file, pretty-printed and newline-terminated.
     ///
+    /// Creates the parent directory: a repository whose every ceiling is
+    /// retired has no `environments/ceilings/`, and the first measured pass
+    /// must not fail at the write after paying for the measurement.
+    ///
     /// # Errors
     ///
-    /// If the file cannot be serialised or written.
+    /// If the directory cannot be created or the file cannot be serialised
+    /// or written.
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        }
         let mut json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("serialise {}: {e}", path.display()))?;
         json.push('\n');
