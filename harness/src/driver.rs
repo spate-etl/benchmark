@@ -564,7 +564,13 @@ pub fn prefill(root: &Path, opts: &RunOptions) -> Result<(), String> {
     // `batch_id`. The round-trip unit tests only prove the encoder and decoder
     // agree with each other; this proves the wire matches the contract, which is
     // what every competitor arm actually reads.
-    let verified = corpus::verify_corpus(&ep.bootstrap, &opts.topic, schema_id, 64);
+    // Partition 0 holds every `partitions`-th batch, so a corpus shallower
+    // than 64 x partitions cannot offer 64 messages there.
+    let sample = opts
+        .batches
+        .div_ceil(u64::try_from(env.spec.infra.partitions).unwrap_or(1).max(1))
+        .min(64);
+    let verified = corpus::verify_corpus(&ep.bootstrap, &opts.topic, schema_id, sample);
     eprintln!("verified {verified} messages against the contract");
 
     // The integer-only count. The full `expected` formats a string
