@@ -63,19 +63,37 @@ measure() { # phase partitions broker_cpus ch_cpus [--only fmt ...]
   shift 4
   local t0=$SECONDS rc=0
   "$BENCH" ceiling --measure --write "$@" --env "$ENV_ID" >>"$LOG" 2>&1 || rc=1
+  # One retry after a pause: a freshly recreated container can outlast
+  # bring_up's readiness wait while it replays its data directory.
+  if [ "$rc" = 1 ]; then
+    sleep 30
+    rc=0
+    "$BENCH" ceiling --measure --write "$@" --env "$ENV_ID" >>"$LOG" 2>&1 || rc=1
+  fi
   emit "$ph" "$p" "$b" "$c" "$((SECONDS - t0))" "$((1 - rc))"
   note "rung $ph p=$p b=$b ch=$c ok=$((1 - rc)) ($((SECONDS - t0))s)"
+  # The box terminates with its filesystem, so a failed rung's evidence has to
+  # reach the payload log to survive.
+  if [ "$rc" = 1 ]; then tail -n 25 "$LOG" | sed 's/^/    /'; fi
 }
 
 # `assert_cap` refuses a running container whose applied cap disagrees with the
 # profile, and `bring_up` reuses a running container rather than recreating it,
 # so a cap change must remove the container it re-caps. The broker's data dir
-# is an NVMe bind mount, so its corpus outlives the container: broker rungs
-# need no re-prefill.
+# is an NVMe bind mount, so its corpus outlives the container — but only under
+# an equal or larger cap: Redpanda refuses to boot a data directory laid out
+# for more shards than it has, so a cap decrease needs wipe_broker first.
 set_broker() {
   set_key infra.broker cpus "$1"
   docker rm -f spate-bench-redpanda >/dev/null 2>&1 || true
   sleep 2
+}
+wipe_broker() {
+  local bdata
+  bdata=$(grep -E '^broker_data' "$PROFILE" | sed 's/.*"\(.*\)"/\1/')
+  [ -d "$bdata" ] || { note "no broker_data dir at '$bdata'"; return 1; }
+  docker rm -f spate-bench-redpanda >/dev/null 2>&1 || true
+  rm -rf "${bdata:?}"/* "${bdata:?}"/.[!.]* 2>/dev/null || true
 }
 set_ch() {
   set_key infra.clickhouse cpus "$1"
@@ -116,16 +134,23 @@ walk_ladder() {
     measure partitions "$p" 8 16 --only rowbinary
   done
 
-  best_p=$(jq -s 'map(select(.phase=="partitions" and .ok))
-    | sort_by(-.consume_msgs_per_s)[0].partitions' "$RUNGS")
+  # The largest partition count within 3% of the best consume rate: partitions
+  # bound every arm's consume parallelism, so where the ceiling is flat the
+  # widest topic wins.
+  best_p=$(jq -s '[.[] | select(.phase=="partitions" and .ok)] as $r
+    | ($r | map(.consume_msgs_per_s) | max) as $top
+    | [$r[] | select(.consume_msgs_per_s >= $top * 0.97)]
+    | sort_by(-.partitions)[0].partitions' "$RUNGS")
   if [ -z "$best_p" ] || [ "$best_p" = null ]; then best_p=8; fi
   note "phase 1 settles on p=$best_p"
-  if [ "$(tail -n1 "$RUNGS" | jq -r '.partitions')" != "$best_p" ]; then
-    reprefill "$best_p" || { note "prefill at p=$best_p failed; see $LOG"; return 1; }
-  fi
 
-  # Phase 2 — broker down, against the corpus phase 1 left in place.
-  for b in 8 6 4 3; do
+  # Phase 2 — broker rungs ascend from the smallest cap over a fresh data
+  # directory, because a shard-count decrease refuses to boot. One re-prefill
+  # buys all four rungs.
+  wipe_broker || return 1
+  set_key infra.broker cpus 3
+  reprefill "$best_p" || { note "prefill at p=$best_p failed; see $LOG"; return 1; }
+  for b in 3 4 6 8; do
     set_broker "$b"
     measure broker "$best_p" "$b" 16 --only rowbinary
   done
@@ -139,11 +164,11 @@ walk_ladder() {
   if [ -z "$best_b" ] || [ "$best_b" = null ]; then best_b=3; fi
   note "phase 2 settles on b=$best_b"
 
-  # Phase 3 — ClickHouse up. Its cap does not touch the broker: no re-prefill.
-  set_broker "$best_b"
-  for c in 16 32 48 64; do
+  # Phase 3 — ClickHouse up, with the broker left at 8: shrinking it here
+  # would be a shard decrease, and its cap is not what these rungs measure.
+  for c in 16 24 32 48 64; do
     set_ch "$c"
-    measure clickhouse "$best_p" "$best_b" "$c" --only rowbinary --only native
+    measure clickhouse "$best_p" 8 "$c" --only rowbinary --only native
   done
 }
 
@@ -161,20 +186,23 @@ note "bringing infrastructure up"
 note "walking the ladder"
 walk_ladder || note "ladder aborted; the box stays up for diagnosis"
 
+# Under logs/ because that is the one prefix the instance role can write
+# besides the run markers. Guarded: an upload refusal must not kill a held
+# session whose evidence is also in the payload log above.
 if [ -f "$RUNGS" ]; then
   note "rungs measured:"
   cat "$RUNGS"
-  aws s3 cp "$RUNGS" "$S3_RUN/tuning/rungs.jsonl"
+  aws s3 cp "$RUNGS" "$S3_RUN/logs/rungs.jsonl" || note "rungs upload refused"
 fi
-if [ -f "$LOG" ]; then aws s3 cp "$LOG" "$S3_RUN/tuning/ladder.log"; fi
-aws s3 cp "$PROFILE" "$S3_RUN/tuning/$ENV_ID.toml"
-if [ -f "$CEIL" ]; then aws s3 cp "$CEIL" "$S3_RUN/tuning/$ENV_ID.ceilings.json"; fi
+if [ -f "$LOG" ]; then aws s3 cp "$LOG" "$S3_RUN/logs/ladder.log" || note "ladder.log upload refused"; fi
+aws s3 cp "$PROFILE" "$S3_RUN/logs/$ENV_ID.toml" || note "profile upload refused"
+if [ -f "$CEIL" ]; then aws s3 cp "$CEIL" "$S3_RUN/logs/$ENV_ID.ceilings.json" || note "ceilings upload refused"; fi
 
 cat <<'EOF'
 
 === the box is now held open for a tuning session ===
 
-The ladder has run; its rungs are in /tmp/rungs.jsonl and in $S3_RUN/tuning/.
+The ladder has run; its rungs are in /tmp/rungs.jsonl and in $S3_RUN/logs/.
 The session's remaining work: set the profile from the rungs, build the
 entrants, and measure arms with --trigger tuning for the 50% headroom check.
 
