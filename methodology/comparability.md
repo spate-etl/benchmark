@@ -31,9 +31,11 @@ for seq in 0..100:
 `(batch_id, seq)` is the row identity. `uniqExact((batch_id, event_seq))` is
 therefore the loss gate and `count() - uniqExact(...)` the duplicate count — both
 exact, and both taken over a **bounded window** rather than the whole corpus. The
-window is the top 100,000 batches of the landed range, which against the published
-1,500,000-batch corpus is 6.7% of it, about ten million rows before the
-workload's filters.
+window is the top of the landed range, sized as a share: 6.7% of the corpus,
+bounded by what a quarter of ClickHouse's memory allows at the measured ~7.5 KiB
+per batch. Against the published 40,000,000-batch corpus and the 32 GiB
+allocation the memory bound decides, about 1.15M batches — and the window each
+run actually used is written into its record's note.
 
 The bound is not a convenience. Exact-distinct needs a hash set proportional to
 cardinality, and running it across the full 150M-row corpus asked ClickHouse for

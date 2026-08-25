@@ -89,7 +89,7 @@ payload() {
   read -ra sel <<< "$SELECTOR"
 
   run_step build-entrants "$bench" build "${sel[@]}"
-  # The run-mode corpus depth (the 1.5M default) is part of what an arm
+  # The run-mode corpus depth (the 40M default) is part of what an arm
   # measures — arms replay the topic to exhaustion — so it is not touched
   # here. The ceiling pass is different: its corpus is fuel for a measurement
   # window, and the consume pass REFUSES (DRAINED) when the backlog cannot

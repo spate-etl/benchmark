@@ -183,12 +183,12 @@ fn opts_from(args: &[String], root: &Path) -> Result<RunOptions, String> {
         fresh_infra: false,
         fail_fast: false,
         topic: spate_benchmark_harness::corpus::TOPIC.to_owned(),
-        // PROVISIONAL. The corpus has to be long enough that the fastest arm's
-        // window clears `driver::MIN_WINDOW_S`; below it a record carries
-        // `short_window`. The value that satisfies it depends on rates only the
-        // box can measure, and `--batches` moves no digest, so a tuning run sets
-        // it.
-        batches: 1_500_000,
+        // The corpus has to be long enough that the fastest arm's window
+        // clears `driver::MIN_WINDOW_S`; below it a record carries
+        // `short_window`. The fastest measured arm drains 30M in 131s, so 40M
+        // holds the floor with a third in hand for the next release's speedup.
+        // `--batches` moves no digest, so raising it later is free.
+        batches: 40_000_000,
         knobs: BTreeMap::new(),
     };
     // Collected as locals and folded into `Mode` after the loop: a sustained run
