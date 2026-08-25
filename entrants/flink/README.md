@@ -50,7 +50,7 @@ before `max_rows` does; `SINK_MAX_ROW_BYTES` is 1 MiB and must be no larger.
 
 | Key | Value | Why |
 |---|---|---|
-| `taskmanager.memory.process.size` | `86016m` | Total process memory in the 96 GiB container, 12 GiB slack (limit/8). `entrants_are_valid` refuses anything below `86016m`, so this is partly a floor the harness imposes. |
+| `taskmanager.memory.process.size` | `21504m` | Deliberately not scaled with the 96 GiB container: this sizing (~17.5g heap) measured 2.9M rows/s where a 28.8g heap measured 1.0M — GC churn grows with the heap while the live set does not. `entrants_are_valid` bounds it between the 24 GiB-era sizing and the compressed-oops boundary. |
 | `taskmanager.memory.managed.fraction` | **`0.0`** | The default `0.4` *reserves* 5.7 GiB whether or not anything uses it, and a stateless job on the `hashmap` backend uses none. |
 | `taskmanager.memory.task.off-heap.size` | `128m` | Headroom for the sink's socket I/O, so a burst is backpressure rather than `OutOfMemoryError: Direct buffer memory`. |
 | `jobmanager.memory.process.size` | `1920m` | 2 GiB container, 128 MiB slack. Deliberately generous: the control plane must never be what limits the arm, and its *measured* cost is what gets published. |

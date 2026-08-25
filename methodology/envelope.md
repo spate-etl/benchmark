@@ -53,9 +53,13 @@ CPU is the scarce resource here and memory is not: one arm runs at a time, so
 the host's memory only ever holds one envelope beside the infrastructure. Every
 arm gets 96 GiB — 3 GiB per envelope CPU — against a largest measured peak of
 56 GiB (vector, whose prefetch and in-flight batches scale with its request
-concurrency). JVM process totals are sized to the container by one rule,
-container limit minus limit/8 slack, and their direct-memory bounds scale with
-the task count; `entrants_are_valid` enforces both.
+concurrency). JVM process totals keep their 24 GiB-era
+sizing rather than scaling with the container: on this envelope every larger
+heap tried measured slower — GC churn grows with the heap while the live set
+does not, and past ~32g the JVM also drops compressed references — so the
+envelope's extra memory serves the page cache and native buffers instead.
+`entrants_are_valid` bounds each JVM between that era sizing and the
+compressed-oops boundary.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would

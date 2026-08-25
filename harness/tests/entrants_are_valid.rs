@@ -123,19 +123,28 @@ fn flink_jvm_sizing_fits_its_declared_container() {
             Role::ControlPlane => sizes[0],
             Role::DataPlane => sizes[1],
         };
+        // The JVM's floor is the smaller of the container less limit/8 slack
+        // (the JVM's accounting does not cover everything in the container)
+        // and the 24 GiB-era process size, which measured faster on the 96 GiB
+        // envelope than every larger heap tried — GC churn grows with the
+        // heap while the live set does not. The ceiling is the process size
+        // whose derived heap sits at the compressed-oops boundary: past ~32g
+        // every reference doubles. Below the floor the arm is denied memory
+        // it was allocated; above the ceiling it is denied a configuration
+        // anyone would deploy.
+        const ERA_PROCESS_MIB: u64 = 21_504;
+        const OOPS_BOUNDARY_PROCESS_MIB: u64 = 34_816;
+        let floor = (limit - limit / 8).min(ERA_PROCESS_MIB);
         assert!(
-            jvm <= limit,
-            "flink {}: JVM process.size {jvm}m exceeds the container's {limit}m",
+            jvm >= floor,
+            "flink {}: JVM process.size {jvm}m is under the {floor}m its \
+             {limit}m container affords; Flink is being handicapped",
             container.name
         );
-        // Slack is required — the JVM's accounting does not cover everything in
-        // the container — but a large gap means Flink is being denied memory it
-        // was allocated, which is the defect above.
-        let slack = limit - jvm;
         assert!(
-            slack <= limit / 8,
-            "flink {}: JVM process.size {jvm}m leaves {slack}m of its {limit}m \
-             container unused; Flink is being handicapped",
+            jvm <= limit.min(OOPS_BOUNDARY_PROCESS_MIB),
+            "flink {}: JVM process.size {jvm}m exceeds its container's {limit}m \
+             or the compressed-oops boundary",
             container.name
         );
     }
@@ -178,15 +187,28 @@ fn kafka_connect_jvm_sizing_fits_its_declared_container() {
 
     let worker = kc.data_plane().expect("a data-plane container");
     let limit = mib(&worker.memory).expect("container memory parses");
+    // The same budgets as the Flink check: the 24 GiB-era total as the floor,
+    // and 35072m — a 31744m heap at the compressed-oops boundary plus direct
+    // memory and metaspace — as the ceiling.
+    const ERA_TOTAL_MIB: u64 = 21_504;
+    const OOPS_BOUNDARY_TOTAL_MIB: u64 = 35_072;
+    let floor = (limit - limit / 8).min(ERA_TOTAL_MIB);
     assert!(
-        jvm <= limit,
-        "kafka-connect: heap+direct+metaspace {jvm}m exceeds the container's {limit}m"
+        jvm >= floor,
+        "kafka-connect: heap+direct+metaspace {jvm}m is under the {floor}m its \
+         {limit}m container affords; Connect is being handicapped"
     );
-    let slack = limit - jvm;
     assert!(
-        slack <= limit / 8,
-        "kafka-connect: heap+direct+metaspace {jvm}m leaves {slack}m of its {limit}m \
-         container unused; Connect is being handicapped"
+        jvm <= limit.min(OOPS_BOUNDARY_TOTAL_MIB),
+        "kafka-connect: heap+direct+metaspace {jvm}m exceeds its container's \
+         {limit}m or the compressed-oops boundary"
+    );
+    let heap = flag("-Xmx");
+    assert!(
+        heap <= 31_744,
+        "kafka-connect: -Xmx{heap}m is past the compressed-oops boundary; every \
+         reference doubles there and the configuration is slower than a smaller \
+         heap"
     );
 }
 

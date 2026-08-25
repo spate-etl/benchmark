@@ -38,11 +38,15 @@ taskmanager:
   numberOfTaskSlots: 32
   memory:
     process:
-      # Total process memory in the 96 GiB data-plane container, from which Flink
-      # derives heap, direct and metaspace. `entrants_are_valid` refuses anything
-      # below 86016m (limit/8 slack), so this is a floor the harness imposes as
-      # much as a choice.
-      size: 86016m
+      # Total process memory, from which Flink derives heap, direct and
+      # metaspace. Deliberately NOT scaled with the container: measured on the
+      # 96 GiB envelope, this sizing (a ~17.5g heap) carries 2.9M rows/s where
+      # a 28.8g heap carries 1.0M and a bigger one is an OOM-kill — GC churn
+      # grows with the heap while the live set does not. The envelope's extra
+      # memory serves the page cache and native buffers instead.
+      # `entrants_are_valid` bounds this between what a 24 GiB container
+      # affords and the compressed-oops boundary.
+      size: 21504m
     managed:
       # Default 0.4 RESERVES managed memory whether or not anything uses it, and
       # a stateless job on the `hashmap` backend uses none — 5.7 GiB allocated
