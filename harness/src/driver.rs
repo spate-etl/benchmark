@@ -839,8 +839,14 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
             ) {
                 Ok(m) => {
                     emitted += 1;
+                    // Only the pair reaches the buckets: the control's twin is
+                    // the first arm, and a bucket holding every arm's lead
+                    // medians the sweep rather than the twin.
+                    let twin = arms.first().is_some_and(|f| std::ptr::eq(*arm, f));
                     if let Some(v) = m.lead {
-                        aa.entry(aa_label.map(str::to_owned)).or_default().push(v);
+                        if aa_label.is_some() || twin {
+                            aa.entry(aa_label.map(str::to_owned)).or_default().push(v);
+                        }
                         if aa_label.is_some() {
                             aa_sut = Some(m.sut.clone());
                         }
