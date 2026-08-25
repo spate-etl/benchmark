@@ -97,7 +97,7 @@ payload() {
   # messages was ~6s of backlog at the calibrated rate). Prefill deep enough
   # to feed an 8s window at rates well above the calibrated one.
   if [ "$MODE" = ceiling-bootstrap ]; then
-    run_step prefill "$bench" prefill --env "$ENV_ID" --batches 12000000
+    run_step prefill "$bench" prefill --env "$ENV_ID" --batches 30000000
   else
     run_step prefill "$bench" prefill --env "$ENV_ID"
   fi
