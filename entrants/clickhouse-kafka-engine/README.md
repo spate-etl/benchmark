@@ -5,14 +5,14 @@ held to [the fairness contract](../../methodology/), which is normative. Read
 that first; this file records only what is specific to this arm.
 
 The arm is a dedicated **ingest tier**: one ClickHouse container gets the
-whole 6 CPU / 24 GiB data-plane envelope and runs a Kafka engine table
+whole 32 CPU / 96 GiB data-plane envelope and runs a Kafka engine table
 (consume + AvroConfluent decode), a materialized view (flatten + filter +
 derive), and a Distributed table that forwards the finished rows —
 **synchronously** — to the shared infra ClickHouse that owns `sensor_events`
 for every arm. It is *not* a zero-hop baseline: the container does no
 MergeTree storage of its own, pays one network hop to storage like every arm,
 and is published as "ClickHouse as its own ETL tier". The alternative — local
-storage inside the 6-CPU envelope, paying merges the 16-CPU shared server
+storage inside the 32-CPU envelope, paying merges the 32-CPU shared server
 gives every other arm for free — would have been an unfair handicap dressed
 as a stronger claim.
 
@@ -45,7 +45,7 @@ SQL is exactly what runs, and what the driver set is exactly what
 
 | Knob | Value | Engine default | What it controls |
 |---|---|---|---|
-| `num_consumers` | **8** | 1 | `kafka_num_consumers`: one consumer per **partition** (8). Fewer leaves the slowest consumer owning two partitions — 6 measures like 4. Oversubscribed on the 6-CPU envelope exactly as Spate `threads = 8` and Flink `parallelism = 8` are. The CREATE-time cap on this value is `max(detected cores, 16)` and a violation throws at CREATE (`StorageKafkaUtils.cpp`, v26.3.17.4), so 8 fits on this 6-core cgroup with no escape hatch; the post-start check below guards a future cap change. |
+| `num_consumers` | **32** | 1 | `kafka_num_consumers`: one consumer per **partition** (32). Fewer leaves the slowest consumer owning two partitions and pacing the drain. Matched to the 32-CPU envelope exactly as Spate `threads = 32` and Flink `parallelism = 32` are. The CREATE-time cap on this value is `max(detected cores, 16)` and a violation throws at CREATE (`StorageKafkaUtils.cpp`, v26.3.17.4), so 32 clears it exactly on this 32-core cgroup; the post-start check below guards a future cap change. |
 | `block_msgs` | **16384** | 131,072 | `kafka_max_block_size`, in **messages**, not rows: 16384 messages ≈ 1.2M surviving rows per forwarded INSERT. Unset, the engine derives `max_insert_block_size / num_consumers` = 131,072 messages per consumer (`StorageKafka.cpp`, v26.3.17.4) — never reached at this corpus's rates, so under the default the flush timer always binds and block size stops being a knob. Sweep candidates: 8192 / 16384 / 32768. |
 | `flush_ms` | **5000** | 7500 | `kafka_flush_interval_ms` — **the commit cadence**: offsets commit once per flushed block. The engine's own default (7500, from `stream_flush_interval_ms`) would be a *laxer* durability interval than every other arm's 5 s, so 5000 is matched, not tuned. |
 | `poll_timeout_ms` | **500** | 500 | `kafka_poll_timeout_ms`, the stream thread's poll bound. Declared as a knob (at its default) so the `flush_ms > poll_timeout_ms` constraint in `entrant.toml` is checkable against stated values rather than an image default no record reports. |
@@ -93,7 +93,7 @@ By hand, which is what a reviewer runs to look inside the container:
 
 ```sh
 docker run -d --name spate-bench-ch-kafka --network spate-bench-net \
-  --cpus 6 --memory 24g --memory-swap 24g \
+  --cpus 32 --memory 96g --memory-swap 96g \
   spate-bench-ch-kafka
 ```
 
@@ -139,7 +139,7 @@ version string the image reports, so a base bump refuses the run.
 Each consumer's loop is strictly serial: poll → decode → ARRAY JOIN →
 **synchronous** remote insert → commit, with no in-flight pipelining — the
 remote-ack stall per block is dead time, and the arm is 8 such serial loops
-on 6 CPUs. If the number is X and not 2X, this is the first place to look,
+on 32 CPUs. If the number is X and not 2X, this is the first place to look,
 and it is the price of the setting that makes the guarantee real.
 
 ## Traps, verified

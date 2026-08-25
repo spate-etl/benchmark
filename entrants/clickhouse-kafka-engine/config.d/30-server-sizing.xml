@@ -3,7 +3,7 @@
      This node is an ingest tier: it consumes, decodes, transforms and
      forwards, and every MergeTree part it would otherwise merge lives on the
      shared server instead. The shipped defaults size caches and background
-     pools for a storage node, which on a 6 CPU / 24 GiB envelope would spend
+     pools for a storage node, which on a 32 CPU / 96 GiB envelope would spend
      the arm's budget on machinery this arm never exercises. Everything set
      here is either shrunk for that reason or is a shipped default recorded
      because the arm depends on it. -->
@@ -36,11 +36,12 @@
         <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>0</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
     </merge_tree>
 
-    <!-- The pool the Kafka engine's streaming jobs run in. SHIPPED default
-         (16), recorded rather than tuned: with kafka_thread_per_consumer = 1
-         the arm needs >= 8 of these threads for 8 consumers, so the value is
-         load-bearing and a future default change must not move it silently. -->
-    <background_message_broker_schedule_pool_size>16</background_message_broker_schedule_pool_size>
+    <!-- The pool the Kafka engine's streaming jobs run in. With
+         kafka_thread_per_consumer = 1 each of the 32 consumers holds one of
+         these threads for the life of the table, so the shipped default (16)
+         silently halves the consumer count. Sized at 2x the consumers, the
+         same ratio the shipped default held over the old 8. -->
+    <background_message_broker_schedule_pool_size>64</background_message_broker_schedule_pool_size>
 
     <!-- Distributed sends. With distributed_foreground_insert = 1 the forward
          happens on the MV's own insert thread, so this pool only carries
@@ -48,8 +49,8 @@
     <background_distributed_schedule_pool_size>4</background_distributed_schedule_pool_size>
 
     <!-- SHIPPED default, recorded because the envelope depends on it: the
-         server reads the cgroup limit (24 GiB), not host RAM, so the memory
-         ceiling is 0.9 * 24 GiB and the container cannot be OOM-killed by its
+         server reads the cgroup limit (96 GiB), not host RAM, so the memory
+         ceiling is 0.9 * 96 GiB and the container cannot be OOM-killed by its
          own accounting gap. -->
     <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
 

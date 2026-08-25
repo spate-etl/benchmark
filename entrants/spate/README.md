@@ -19,7 +19,7 @@ was in force.
 
 | Knob | Value | What it controls |
 |---|---|---|
-| `threads` | **8** | Hot-path threads, one per **partition**, not one per CPU. The drain is paced by the busiest consumer thread: 6 threads over an 8-partition topic leaves two threads owning two partitions each, and the arm measures the same as 4 threads (2.56M rows/s) — 8 threads oversubscribed on the 6-CPU envelope recover the scaling (3.67M rows/s, measured 2026-07-30 on c8g). |
+| `threads` | **32** | Hot-path threads, one per **partition**, not one per CPU. The drain is paced by the busiest consumer thread: any thread owning two partitions paces the drain at half rate, so the count matches the 32-partition topic on the 32-CPU envelope. |
 | `shards` | **8** | Independent workers, each with its own queue, encoder and in-flight permits. Several shards against one server is how a single-node target gets concurrent inserts, and width buys more than depth: sixteen concurrent INSERTs as 8 × 2 are worth **52% more** than the same sixteen as 2 × 8. |
 | `inflight` | **4** | Concurrent INSERTs per shard, so 32 in total. Where the curve flattens; 8 and 16 measure the same rate and hold more rows in flight. |
 | `linger_ms` | **500** | Batch timer, and a hard p99 floor in sustained mode. At these knobs a batch fills in ~364 ms, so it seals on rows and the timer does not fire. |
@@ -64,7 +64,7 @@ token is ever baked into an image layer.
 bench run spate --reps 3
 ```
 
-One container, the full 6 CPU / 24 GiB data-plane envelope, no control plane.
+One container, the full 32 CPU / 96 GiB data-plane envelope, no control plane.
 `FORMAT` selects `native` or `rowbinary`; the five knobs above arrive as
 `THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS` and `MAX_ROWS`.
 

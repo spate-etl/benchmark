@@ -35,13 +35,14 @@ taskmanager:
   bind-host: 0.0.0.0
   # One slot per subtask in a single TaskManager. Moves with parallelism.default
   # and never independently.
-  numberOfTaskSlots: 8
+  numberOfTaskSlots: 32
   memory:
     process:
-      # Total process memory in the 24 GiB data-plane container, from which Flink
+      # Total process memory in the 96 GiB data-plane container, from which Flink
       # derives heap, direct and metaspace. `entrants_are_valid` refuses anything
-      # below 21504m, so this is a floor the harness imposes as much as a choice.
-      size: 21504m
+      # below 86016m (limit/8 slack), so this is a floor the harness imposes as
+      # much as a choice.
+      size: 86016m
     managed:
       # Default 0.4 RESERVES managed memory whether or not anything uses it, and
       # a stateless job on the `hashmap` backend uses none — 5.7 GiB allocated
@@ -51,7 +52,7 @@ taskmanager:
       off-heap:
         # Headroom for the sink's socket I/O, so a burst surfaces as backpressure
         # rather than as `OutOfMemoryError: Direct buffer memory`.
-        size: 128m
+        size: 512m
   network:
     memory:
       buffer-debloat:
@@ -60,12 +61,11 @@ taskmanager:
         enabled: false
 
 parallelism:
-  # One subtask per PARTITION (8), oversubscribed on the 6-CPU data plane. The
-  # drain is paced by the busiest source subtask: 6 subtasks over 8 partitions
-  # leaves two owning two partitions each, which measures at 4-way pace; 8-way
-  # recovers the scaling (measured 2026-07-30 on c8g). A ninth subtask would
-  # never receive a split.
-  default: 8
+  # One subtask per PARTITION (32), matched to the 32-CPU data plane. The
+  # drain is paced by the busiest source subtask: any subtask owning two
+  # partitions paces the drain at half rate, and a 33rd subtask would never
+  # receive a split.
+  default: 32
 
 rest:
   address: 0.0.0.0

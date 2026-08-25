@@ -55,7 +55,7 @@ These are **per task**, so cross-arm quantities are products: up to
 | `ignorePartitionsWhenBatching` | `false` (default kept) | Per-partition batching is what keeps the connector's derived dedup token coherent. |
 | `client_version` | unset (effective `V1`) | RowBinary either way; the shipped default is measured. |
 | `clickhouseSettings` | unset | The connector sets `async_insert=0, wait_end_of_query=1` as non-overriding defaults on every insert (`ClickHouseSinkConfig.java:233-234`; a user-supplied value would win, and this arm supplies none) — exactly what server-side attribution requires. |
-| JVM sizing | `-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m` | 21504m in the 24 GiB container — the same figure and limit/8 slack rule as the Flink TaskManager, enforced by `entrants_are_valid`. GC is the launcher's shipped G1 (rule 1). |
+| JVM sizing | `-Xms82688m -Xmx82688m -XX:MaxDirectMemorySize=3072m -XX:MaxMetaspaceSize=256m` | 86016m in the 96 GiB container — the same figure and limit/8 slack rule as the Flink TaskManager, enforced by `entrants_are_valid`. Direct memory carries the consumers' fetch buffers and scales with `tasks`. GC is the launcher's shipped G1 (rule 1). |
 
 `GROUP_ID` is the **connector name**, not a consumer `group.id`: Connect derives
 a sink's consumer group as `connect-<name>`, so the fresh consumer group each
@@ -102,12 +102,12 @@ bench run kafka-connect --reps 3
 ```
 
 By hand, which is what a reviewer runs to look inside the container. One
-container, the full 6 CPU / 24 GiB data-plane envelope; standalone Connect has
+container, the full 32 CPU / 96 GiB data-plane envelope; standalone Connect has
 no control plane by design:
 
 ```sh
 docker run -d --name spate-bench-kafka-connect --network spate-bench-net \
-  --cpus 6 --memory 24g --memory-swap 24g \
+  --cpus 32 --memory 96g --memory-swap 96g \
   spate-bench-kafka-connect
 ```
 

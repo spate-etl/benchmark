@@ -137,18 +137,18 @@ ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     TOPIC=comparison-sensor-batches \
     GROUP_ID=comparison-kafka-connect \
     OFFSET_RESET=earliest \
-    TASKS_MAX=8 \
+    TASKS_MAX=32 \
     BUFFER_COUNT=2000 \
     BUFFER_FLUSH_MS=1000
 
-# JVM sizing for the 24 GiB container: 20480m heap + 768m direct (the consumer's
-# fetch buffers and the HTTP client's socket I/O) + 256m metaspace = 21504m,
+# JVM sizing for the 96 GiB container: 82688m heap + 3072m direct (the 32
+# consumers' fetch buffers and the HTTP client's socket I/O) + 256m metaspace = 86016m,
 # the same figure and the same limit/8 slack rule as the Flink TaskManager —
 # `entrants_are_valid` holds this line to the declared container. Xms = Xmx so
 # the heap never grows mid-measurement. The launcher's shipped G1
 # (KAFKA_JVM_PERFORMANCE_OPTS in kafka-run-class.sh) is kept: rule 1, the
 # system's own default collector.
-ENV KAFKA_HEAP_OPTS="-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m"
+ENV KAFKA_HEAP_OPTS="-Xms82688m -Xmx82688m -XX:MaxDirectMemorySize=3072m -XX:MaxMetaspaceSize=256m"
 
 # The GC log the descriptor's gc_log names. KAFKA_OPTS, not KAFKA_GC_LOG_OPTS:
 # kafka-run-class.sh assembles its own GC logging only behind the -loggc flag,
