@@ -75,3 +75,11 @@ broker_data     = "/mnt/bench-broker"
 # be published.
 [ceiling]
 file = "ceilings/c8gd-metal-24xl-ec2-docker.json"
+
+# Measured 2026-08-25 by a five-pair A/A calibration (the first arm against
+# itself, 40M batches): median pair spread 0.25% on rows_per_s_per_core, worst
+# single pair 0.92%. The declared threshold carries margin over the
+# observation: a sweep whose control pair disagrees by more than this has a
+# rig problem, and its timing verdicts are not evidence.
+[noise]
+aa_spread = 0.02
