@@ -28,16 +28,28 @@ The host is bare metal: the Nitro hypervisor is absent, not merely
 well-behaved.
 """
 
-# THESE CAPS ARE PROVISIONAL. Nothing may be published against them. A tuning
-# session sets them: partitions with the broker cap against the consume
-# ceiling, then ClickHouse at the smallest cap holding every arm at or below
-# 50% of its ingest ceiling, then the arm envelope takes what remains.
+# The measured split, from the 2026-08-25 tuning ladder on this host.
+#
+# The consume ceiling is flat across 8..32 partitions (1.09-1.11M msgs/s,
+# broker under 2 of 8 offered cores at every rung), so the widest topic is
+# free and it is what lets a 32-thread consumer spend its parallelism.
+# The broker cap measures within 1% of an 8-core one. ClickHouse ingest
+# plateaus at ~28 cores whatever the cap: RowBinary reaches 6.0M rows/s at
+# 16 cpus throttling, 11.0M at 32, and the same 11.0M at 48 and 64 with
+# cores idle — 32 is the smallest cap at that plateau, and every core past
+# it buys background merges rather than ceiling.
+#
+# CPU: 3 broker + 32 clickhouse + 32 arm envelope = 67 of 96, leaving 29
+# for the driver, the sampler and the host. Memory: 8g + 32g + 96g + 2g of
+# Flink control plane = 138 GiB of 188, leaving 50 for the page cache and
+# the driver. The largest measured arm peak is 56 GiB (vector) against the
+# 96 GiB envelope.
 #
 # Changing these caps, the partition count or the storage kind moves
 # `infra_digest`, and `Ceilings::gate` drops every ceiling not measured under
 # the new one.
 [infra]
-partitions = 8
+partitions = 32
 
 [infra.broker]
 kind     = "redpanda"
@@ -48,8 +60,8 @@ registry = "redpanda-builtin"
 
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.3"
-cpus   = "16"
-memory = "16g"
+cpus   = "32"
+memory = "32g"
 
 # `kind` is in `infra_digest`; the paths are not. A path that is not its own
 # mount fails the run before any container starts.
