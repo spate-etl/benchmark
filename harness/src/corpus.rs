@@ -1558,9 +1558,15 @@ pub fn run_gates(
     password: &str,
     max_batches: u64,
 ) -> Result<Gates, String> {
+    // The window is a share of the corpus, so the exact-distinct grows with it
+    // and outlives the default HTTP read timeout on a long corpus. The gate
+    // runs after the measurement window closes, so its patience costs nothing
+    // measured.
+    const GATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let sql = |q: &str| -> Result<Vec<String>, String> {
-        let body = crate::docker::clickhouse_sql(host, port, user, password, q)
-            .map_err(|e| format!("gate query failed ({q}): {e}"))?;
+        let body =
+            crate::docker::clickhouse_sql_slow(host, port, user, password, q, GATE_QUERY_TIMEOUT)
+                .map_err(|e| format!("gate query failed ({q}): {e}"))?;
         Ok(body.trim().split(['\t', '\n']).map(str::to_owned).collect())
     };
     let num = |s: &str| -> Result<i128, String> {
