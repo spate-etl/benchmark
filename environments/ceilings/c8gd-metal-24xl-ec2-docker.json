@@ -1,0 +1,407 @@
+{
+  "consume": {
+    "msgs_per_s": 845251,
+    "mb_per_s": 3436.4402199030214,
+    "message_bytes": 4065,
+    "partitions": 32,
+    "broker": "redpandadata/redpanda:v26.1.13, 3 CPU",
+    "threads": 4,
+    "client": "inside",
+    "window": {
+      "requested_s": 8.0,
+      "actual_s": 8.075196,
+      "messages_read": 6825565,
+      "topic_depth": 30000000,
+      "calibrated_msgs_per_s": 833872
+    },
+    "broker_cgroup": {
+      "cores": 1.328745367247096,
+      "cap_cores": 3.0,
+      "user_share": 0.31673568033961874,
+      "nr_throttled": 0,
+      "throttled_us": 0
+    },
+    "provenance": {
+      "date": "2026-08-25",
+      "dataset_version": "d2-60d7e5bb2a82",
+      "infra_digest": "6c8fc2dcbfeb",
+      "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+      "rig": "bench ceiling --measure --seconds 8 --threads 4 (raw ListOffsets and Fetch from a container on spate-bench-net, one forked consumer per thread over an assigned partition split, no consumer group and no offset ever committed; window sized against the backlog at 8.075s)"
+    }
+  },
+  "clickhouse": [
+    {
+      "format": "arrow_stream",
+      "rows_per_s": 31134999,
+      "mb_per_s": 3595.5934137562986,
+      "row_bytes": 115,
+      "threads": 32,
+      "clickhouse": "clickhouse/clickhouse-server:26.3, 32 CPU, 32g memory",
+      "client": "inside",
+      "sweep": [
+        {
+          "concurrency": 2,
+          "rows_per_s": 3244711
+        },
+        {
+          "concurrency": 4,
+          "rows_per_s": 6629610
+        },
+        {
+          "concurrency": 8,
+          "rows_per_s": 12139755
+        },
+        {
+          "concurrency": 16,
+          "rows_per_s": 23377477
+        },
+        {
+          "concurrency": 32,
+          "rows_per_s": 31134999
+        },
+        {
+          "concurrency": 64,
+          "rows_per_s": 30685942
+        },
+        {
+          "concurrency": 128,
+          "rows_per_s": 29361772
+        }
+      ],
+      "target_cgroup": {
+        "cores": 28.057655214156142,
+        "cap_cores": 32.0,
+        "user_share": 0.8636761897989657,
+        "nr_throttled": 37,
+        "throttled_us": 10044311
+      },
+      "landed": {
+        "posted": 254163000,
+        "counted": 254163000
+      },
+      "parts": {
+        "parts_written": 11185,
+        "rows_written": 1131606000,
+        "merges": 694,
+        "rows_merged": 634882760
+      },
+      "network": {
+        "inserts": 15396,
+        "duration_ms": 2070904.0,
+        "waiting_ms": 31830.594
+      },
+      "settle": {
+        "max_wait_s": 29.622522358,
+        "at_concurrency": 32,
+        "quiet_ms": 2000
+      },
+      "provenance": {
+        "date": "2026-08-25",
+        "dataset_version": "d2-60d7e5bb2a82",
+        "infra_digest": "6c8fc2dcbfeb",
+        "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+        "rig": "bench ceiling --measure --seconds 8 --ingest-max 256 (pre-encoded blocks of 1000 batches, POSTed concurrently over HTTP by a container on spate-bench-net into ceiling_sensor_events; concurrency swept, best at 32 inserters)"
+      }
+    },
+    {
+      "format": "json_each_row",
+      "rows_per_s": 10543322,
+      "mb_per_s": 2662.9049774422338,
+      "row_bytes": 252,
+      "threads": 128,
+      "clickhouse": "clickhouse/clickhouse-server:26.3, 32 CPU, 32g memory",
+      "client": "inside",
+      "sweep": [
+        {
+          "concurrency": 2,
+          "rows_per_s": 848673
+        },
+        {
+          "concurrency": 4,
+          "rows_per_s": 1701001
+        },
+        {
+          "concurrency": 8,
+          "rows_per_s": 3430356
+        },
+        {
+          "concurrency": 16,
+          "rows_per_s": 6659408
+        },
+        {
+          "concurrency": 32,
+          "rows_per_s": 8818184
+        },
+        {
+          "concurrency": 64,
+          "rows_per_s": 10135254
+        },
+        {
+          "concurrency": 128,
+          "rows_per_s": 10543322
+        },
+        {
+          "concurrency": 256,
+          "rows_per_s": 10502206
+        }
+      ],
+      "target_cgroup": {
+        "cores": 32.11042961300091,
+        "cap_cores": 32.0,
+        "user_share": 0.9143238395875073,
+        "nr_throttled": 84,
+        "throttled_us": 475665724
+      },
+      "landed": {
+        "posted": 89449500,
+        "counted": 89449500
+      },
+      "parts": {
+        "parts_written": 8461,
+        "rows_written": 448864500,
+        "merges": 591,
+        "rows_merged": 332723532
+      },
+      "network": {
+        "inserts": 6107,
+        "duration_ms": 4404576.0,
+        "waiting_ms": 141587.63
+      },
+      "settle": {
+        "max_wait_s": 30.381796571,
+        "at_concurrency": 256,
+        "quiet_ms": 2000
+      },
+      "provenance": {
+        "date": "2026-08-25",
+        "dataset_version": "d2-60d7e5bb2a82",
+        "infra_digest": "6c8fc2dcbfeb",
+        "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+        "rig": "bench ceiling --measure --seconds 8 --ingest-max 256 (pre-encoded blocks of 1000 batches, POSTed concurrently over HTTP by a container on spate-bench-net into ceiling_sensor_events; concurrency swept, best at 128 inserters)"
+      }
+    },
+    {
+      "format": "native",
+      "rows_per_s": 43227642,
+      "mb_per_s": 2835.290467099979,
+      "row_bytes": 65,
+      "threads": 64,
+      "clickhouse": "clickhouse/clickhouse-server:26.3, 32 CPU, 32g memory",
+      "client": "inside",
+      "sweep": [
+        {
+          "concurrency": 2,
+          "rows_per_s": 1814555
+        },
+        {
+          "concurrency": 4,
+          "rows_per_s": 5256115
+        },
+        {
+          "concurrency": 8,
+          "rows_per_s": 10408030
+        },
+        {
+          "concurrency": 16,
+          "rows_per_s": 25405704
+        },
+        {
+          "concurrency": 32,
+          "rows_per_s": 39512270
+        },
+        {
+          "concurrency": 64,
+          "rows_per_s": 43227642
+        },
+        {
+          "concurrency": 128,
+          "rows_per_s": 42472961
+        },
+        {
+          "concurrency": 256,
+          "rows_per_s": 40547162
+        }
+      ],
+      "target_cgroup": {
+        "cores": 25.556367607637085,
+        "cap_cores": 32.0,
+        "user_share": 0.9331155301556872,
+        "nr_throttled": 28,
+        "throttled_us": 10507306
+      },
+      "landed": {
+        "posted": 365883000,
+        "counted": 365883000
+      },
+      "parts": {
+        "parts_written": 12881,
+        "rows_written": 1798030500,
+        "merges": 604,
+        "rows_merged": 736869744
+      },
+      "network": {
+        "inserts": 24463,
+        "duration_ms": 4232369.0,
+        "waiting_ms": 31989.451
+      },
+      "settle": {
+        "max_wait_s": 21.760067746,
+        "at_concurrency": 128,
+        "quiet_ms": 2000
+      },
+      "provenance": {
+        "date": "2026-08-25",
+        "dataset_version": "d2-60d7e5bb2a82",
+        "infra_digest": "6c8fc2dcbfeb",
+        "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+        "rig": "bench ceiling --measure --seconds 8 --ingest-max 256 (pre-encoded blocks of 1000 batches, POSTed concurrently over HTTP by a container on spate-bench-net into ceiling_sensor_events; concurrency swept, best at 64 inserters)"
+      }
+    },
+    {
+      "format": "rowbinary",
+      "rows_per_s": 11289208,
+      "mb_per_s": 1056.4579055840768,
+      "row_bytes": 93,
+      "threads": 32,
+      "clickhouse": "clickhouse/clickhouse-server:26.3, 32 CPU, 32g memory",
+      "client": "inside",
+      "sweep": [
+        {
+          "concurrency": 2,
+          "rows_per_s": 904762
+        },
+        {
+          "concurrency": 4,
+          "rows_per_s": 1432254
+        },
+        {
+          "concurrency": 8,
+          "rows_per_s": 2812602
+        },
+        {
+          "concurrency": 16,
+          "rows_per_s": 5624753
+        },
+        {
+          "concurrency": 32,
+          "rows_per_s": 11289208
+        },
+        {
+          "concurrency": 64,
+          "rows_per_s": 11410840
+        },
+        {
+          "concurrency": 128,
+          "rows_per_s": 11213901
+        }
+      ],
+      "target_cgroup": {
+        "cores": 29.8484354575162,
+        "cap_cores": 32.0,
+        "user_share": 0.9743285359811962,
+        "nr_throttled": 45,
+        "throttled_us": 1819984
+      },
+      "landed": {
+        "posted": 91728000,
+        "counted": 91728000
+      },
+      "parts": {
+        "parts_written": 3180,
+        "rows_written": 375438000,
+        "merges": 422,
+        "rows_merged": 413388712
+      },
+      "network": {
+        "inserts": 5108,
+        "duration_ms": 2094941.0,
+        "waiting_ms": 9305.481
+      },
+      "settle": {
+        "max_wait_s": 2.004122145,
+        "at_concurrency": 8,
+        "quiet_ms": 2000
+      },
+      "provenance": {
+        "date": "2026-08-25",
+        "dataset_version": "d2-60d7e5bb2a82",
+        "infra_digest": "6c8fc2dcbfeb",
+        "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+        "rig": "bench ceiling --measure --seconds 8 --ingest-max 256 (pre-encoded blocks of 1000 batches, POSTed concurrently over HTTP by a container on spate-bench-net into ceiling_sensor_events; concurrency swept, best at 32 inserters)"
+      }
+    },
+    {
+      "format": "rowbinary_nt",
+      "rows_per_s": 11000755,
+      "mb_per_s": 1029.507992151672,
+      "row_bytes": 93,
+      "threads": 32,
+      "clickhouse": "clickhouse/clickhouse-server:26.3, 32 CPU, 32g memory",
+      "client": "inside",
+      "sweep": [
+        {
+          "concurrency": 2,
+          "rows_per_s": 889803
+        },
+        {
+          "concurrency": 4,
+          "rows_per_s": 1382464
+        },
+        {
+          "concurrency": 8,
+          "rows_per_s": 2754047
+        },
+        {
+          "concurrency": 16,
+          "rows_per_s": 5498458
+        },
+        {
+          "concurrency": 32,
+          "rows_per_s": 11000755
+        },
+        {
+          "concurrency": 64,
+          "rows_per_s": 11084752
+        },
+        {
+          "concurrency": 128,
+          "rows_per_s": 11021415
+        }
+      ],
+      "target_cgroup": {
+        "cores": 29.76408001925381,
+        "cap_cores": 32.0,
+        "user_share": 0.9737631484894788,
+        "nr_throttled": 43,
+        "throttled_us": 1563181
+      },
+      "landed": {
+        "posted": 89376000,
+        "counted": 89376000
+      },
+      "parts": {
+        "parts_written": 3088,
+        "rows_written": 364560000,
+        "merges": 416,
+        "rows_merged": 410512196
+      },
+      "network": {
+        "inserts": 4960,
+        "duration_ms": 2093664.0,
+        "waiting_ms": 8765.975
+      },
+      "settle": {
+        "max_wait_s": 2.004473849,
+        "at_concurrency": 64,
+        "quiet_ms": 2000
+      },
+      "provenance": {
+        "date": "2026-08-25",
+        "dataset_version": "d2-60d7e5bb2a82",
+        "infra_digest": "6c8fc2dcbfeb",
+        "host": "AWS EC2 c8gd.metal-24xl, 3 x 1,900 GB local NVMe SSD, EBS gp3 200 GiB root",
+        "rig": "bench ceiling --measure --seconds 8 --ingest-max 256 (pre-encoded blocks of 1000 batches, POSTed concurrently over HTTP by a container on spate-bench-net into ceiling_sensor_events; concurrency swept, best at 32 inserters)"
+      }
+    }
+  ]
+}
