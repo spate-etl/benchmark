@@ -71,7 +71,7 @@ the same values), so a hand-run container matches the numbers.
 
 | Knob | Shipped default | Ours | Why |
 |---|---|---|---|
-| `threads` | detected parallelism | **6** | `VECTOR_THREADS`, the tokio worker count. Vector's default uses `available_parallelism()`, which honors the cgroup quota, so inside the container it would likely land on 6 anyway — the knob makes the width a declared statement rather than a detection. Six is deliberate against the partition-count rule in [envelope.md](../../methodology/envelope.md): that rule guards partition-*owning* units, and here those are the eight sources, which multiplex freely over the workers — no partition pins to a starved thread, and more busy threads than the 6-CPU quota buys only throttling churn. The first tuning sweep should still test 8. |
+| `threads` | detected parallelism | **32** | `VECTOR_THREADS`, the tokio worker count. Vector's default uses `available_parallelism()`, which honors the cgroup quota, so inside the container it would likely land on 32 anyway — the knob makes the width a declared statement rather than a detection. The partition-count rule in [envelope.md](../../methodology/envelope.md) guards partition-*owning* units, and here those are the eight sources, which multiplex freely over the workers — the measured arm spends the full 32-CPU envelope through them. |
 | `batch_events` | ~40k rows effective (the 10 MiB byte bound seals first) | **262144** | Rows per INSERT, equal to Spate's cap so the cross-arm batch quantity is comparable, and inside a fixed 256 MiB byte cap raised so that **events** bind and the declared batch size is the one in force. |
 | `batch_timeout_secs` | 1 | **1** | Kept: it is the sustained-mode p99 floor; in drain, batches fill on size first. Sweepable. |
 | `request_concurrency` | `adaptive` | **8** | Fixed width over the adaptive (ARC) controller: a drain window is tens of seconds and ARC spends exactly that long probing its way up, so the measurement would be of the controller's warm-up. Eight is a starting width matched to the partition count, not a cross-arm constant — the other arms' insert-concurrency knobs count different things (Spate: inflight per shard; Flink: inflight per subtask), so no single number "matches" them. Sweepable. |
@@ -97,7 +97,7 @@ minutes into a cell.
 | 8 sources / 8 remaps | structural | One consumer per partition; one remap per source for structure, not parallelism (see Topology). |
 | `partition.assignment.strategy` | `cooperative-sticky` | Settles eight consumers on one partition each; incremental rebalance, so a late joiner does not stall the other seven. |
 | `fetch.message.max.bytes` | 8 MiB | Above the corpus's largest framed message; the 1 MiB default costs extra round-trips. |
-| `queued.max.messages.kbytes` | 262144 (= 256 MiB) | Per-consumer prefetch bound; in drain the consumer must never be the starved side. 8 × 256 MiB is small against 24 GiB. |
+| `queued.max.messages.kbytes` | 262144 (= 256 MiB) | Per-consumer prefetch bound; in drain the consumer must never be the starved side. 8 × 256 MiB is small against 96 GiB. |
 | `VECTOR_LOG` | `info` | Keeps a stalled arm diagnosable: consumer assignment and sink start-up log at INFO, per-request detail at DEBUG/TRACE, so the hot path stays quiet. |
 | `api.enabled` | `false` | No published figure comes from an arm's self-report; an idle API server is still a listener on the measured process. |
 
@@ -127,11 +127,11 @@ bench run vector --reps 3
 ```
 
 By hand, which is what a reviewer runs to look inside the container. One
-container, the full 6 CPU / 24 GiB data-plane envelope, no control plane:
+container, the full 32 CPU / 96 GiB data-plane envelope, no control plane:
 
 ```sh
 docker run -d --name spate-bench-sut-sut --network spate-bench-net \
-  --cpus 6 --memory 24g --memory-swap 24g \
+  --cpus 32 --memory 96g --memory-swap 96g \
   spate-bench-vector
 ```
 

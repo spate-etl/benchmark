@@ -328,13 +328,11 @@ pub const HEADROOM_LIMIT: f64 = 0.70;
 /// How far a ceiling's message size may differ from the corpus's before the
 /// harness refuses to gate against it.
 ///
-/// Five percent, and the number is chosen against the noise rather than against
-/// intuition. The reference environment's own profile records run-to-run spread
-/// reaching 14.5% on throughput, so a message-size difference inside this band
-/// cannot move a headroom share by more than the spread every chart already
-/// draws — while anything outside it is being extrapolated rather than measured.
-/// It is deliberately tighter than that noise floor: a rule whose tolerance is
-/// as wide as the noise is a rule that never fires.
+/// Five percent, chosen against the rig's noise rather than against intuition. A
+/// message-size difference inside this band cannot move a headroom share by more
+/// than the spread every chart already draws, while anything outside it is being
+/// extrapolated rather than measured. It stays tighter than any spread a sweep's
+/// A/A control has reported: a tolerance as wide as the noise never fires.
 ///
 /// The band is not a licence to interpolate. Inside it, [`Ceiling::headroom`]
 /// still compares the arm's **byte** rate against the measured byte rate as well
@@ -781,10 +779,18 @@ impl Ceilings {
 
     /// Writes a ceilings file, pretty-printed and newline-terminated.
     ///
+    /// Creates the parent directory: a repository whose every ceiling is
+    /// retired has no `environments/ceilings/`, and the first measured pass
+    /// must not fail at the write after paying for the measurement.
+    ///
     /// # Errors
     ///
-    /// If the file cannot be serialised or written.
+    /// If the directory cannot be created or the file cannot be serialised
+    /// or written.
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        }
         let mut json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("serialise {}: {e}", path.display()))?;
         json.push('\n');
@@ -2065,10 +2071,8 @@ const INGEST_CONCURRENCY_FROM: u64 = 2;
 /// Doubling, for two reasons. It bounds the pass at
 /// `log2(max / from) + 1` rungs — six at today's constants, a window each —
 /// where a linear ladder fine enough to be interesting would cost tens. And it
-/// keeps each rung's step far larger than this host's noise: the environment
-/// profile records run-to-run spread reaching 14.5% on throughput, so a ladder
-/// whose rungs were 10% apart would be reading noise as signal in both
-/// directions.
+/// keeps each rung's step far larger than the host's noise: a ladder whose rungs
+/// were 10% apart would be reading noise as signal in both directions.
 ///
 /// The cost of a coarse ladder is that the winning rung is the best of a handful
 /// of powers of two rather than the true optimum, so the figure can be slightly
@@ -2102,8 +2106,8 @@ pub const INGEST_CONCURRENCY_MAX: u64 = 256;
 
 /// How much a rung must beat the incumbent best by to count as an improvement.
 ///
-/// Three percent, and it is deliberately far *below* this host's 14.5% noise
-/// rather than above it. The two errors are not symmetric. Setting the margin
+/// Three percent, far *below* the host's noise rather than above it. The two
+/// errors are not symmetric. Setting the margin
 /// above the noise would stop the sweep at the first genuine-but-modest gain,
 /// producing exactly the too-low ceiling this sweep exists to prevent; setting
 /// it low means noise occasionally buys one more rung, which costs one window
@@ -2118,10 +2122,11 @@ const INGEST_SWEEP_MARGIN: f64 = 0.03;
 /// Consecutive rungs that must fail to improve before the sweep calls it a
 /// plateau.
 ///
-/// Two, because one is noise. At 14.5% spread a single rung landing below its
-/// predecessor says nothing at all, and a "first non-improvement wins" rule
-/// would stop one rung after the first unlucky sample — which is how a rig
-/// reports a ceiling the arms it gates go on to exceed.
+/// Two, because one is noise. A single rung landing below its predecessor says
+/// nothing at all against a spread of several percent, and a "first
+/// non-improvement wins" rule would stop one rung after the first unlucky
+/// sample — which is how a rig reports a ceiling the arms it gates go on to
+/// exceed.
 const INGEST_SWEEP_PATIENCE: usize = 2;
 
 /// Milliseconds of quiet between a settled table and the rung timed against it.
@@ -2131,26 +2136,9 @@ const INGEST_SWEEP_PATIENCE: usize = 2;
 /// ladder is climbed in ascending order, that error would fall entirely on the
 /// higher rungs and would manufacture a plateau out of the rig's own tidying.
 ///
-/// It is a floor on top of [`settle`]'s wait rather than the whole of the wait.
-/// A fixed sleep was sufficient while every repeated block was being
-/// deduplicated away and the table stayed at 800,000 rows; now that the rig's
-/// rows land, a rung leaves thousands of parts and a merge queue behind it, and
-/// two seconds of clock is not a statement about either. The server is asked
-/// instead.
-const INGEST_SETTLE_MS: u64 = 2_000;
-
 /// Seconds [`settle`] will wait for a truncated table to have no parts and no
 /// merges before giving up on the wait.
 ///
-/// Bounded because the alternative is a pass that hangs, and generous because
-/// the alternative to *that* is a rung charged for its predecessor. Exceeding it
-/// is recorded on the ceiling rather than swallowed: a target that cannot clear
-/// its own merge queue inside this is a finding about the target.
-const INGEST_SETTLE_MAX_S: u64 = 120;
-
-/// Milliseconds between polls while waiting for a table to settle.
-const INGEST_SETTLE_POLL_MS: u64 = 250;
-
 /// The concurrency ladder, and the decision about when to stop climbing it.
 ///
 /// Split out from the measurement so the rule is testable without a server. What
@@ -2806,7 +2794,7 @@ fn settle_reading(bursts: &[(u64, Burst)]) -> Option<Settle> {
     Some(Settle {
         max_wait_s,
         at_concurrency,
-        quiet_ms: INGEST_SETTLE_MS,
+        quiet_ms: crate::serverside::SETTLE_QUIET_MS,
     })
 }
 
@@ -3189,59 +3177,37 @@ impl Drop for CeilingTable<'_> {
 }
 
 /// Empties the ceiling table and waits until the server has nothing left to do
-/// about it.
+/// about it, returning the seconds waited.
 ///
-/// Returns the seconds waited, which is evidence rather than bookkeeping: it is
-/// how long the target needed to finish merging what the previous rung left, and
-/// therefore a measure of the work that fell outside the window that was timed.
-///
-/// The wait is on the server's own `system.parts` and `system.merges` rather
-/// than on a clock. A fixed sleep was sufficient while the rig's rows were being
-/// deduplicated away and the table never grew; now that they land, a rung leaves
-/// thousands of parts and a merge queue, and two seconds of quiet would be a
-/// guess. Since the ladder ascends, a guess that is too short lands entirely on
-/// the high rungs and manufactures a plateau out of the rig's own tidying.
+/// The wait is how long the target needed to finish merging what the previous
+/// rung left, so it measures work that fell outside the window that was timed.
+/// The ladder ascends, so an unpaid debt lands on the high rungs and
+/// manufactures a plateau out of the rig's own tidying.
 ///
 /// # Errors
 ///
 /// If the truncation is refused. A wait that runs past
-/// [`INGEST_SETTLE_MAX_S`] is **not** an error: the pass proceeds and the
-/// duration reaches the record through [`settle_note`], because a target that
-/// cannot clear its merge queue in two minutes is a finding rather than a
-/// malfunction.
+/// [`crate::serverside::SETTLE_MAX_S`] is not an error: the pass proceeds and
+/// the duration reaches the record through [`settle_note`].
 fn settle(ep: &Endpoints, table: &str) -> Result<f64, String> {
-    let sql = |s: &str| {
-        docker::try_clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, s)
-    };
-    let body = sql(&format!("TRUNCATE TABLE IF EXISTS {table}"))
-        .map_err(|e| format!("truncate {table}: {e}"))?;
+    let body = docker::try_clickhouse_sql(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        &format!("TRUNCATE TABLE IF EXISTS {table}"),
+    )
+    .map_err(|e| format!("truncate {table}: {e}"))?;
     if body.contains("DB::Exception") {
         return Err(format!("truncate {table}: {body}"));
     }
-
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(INGEST_SETTLE_MAX_S);
-    while Instant::now() < deadline {
-        let quiet = sql(&format!(
-            "SELECT (SELECT count() FROM system.parts WHERE table = '{table}' AND active) \
-             + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
-        ))
-        .ok()
-        .and_then(|b| b.trim().parse::<u64>().ok());
-        // An unreadable answer ends the wait rather than extending it: the
-        // system tables are a diagnostic, and a pass that hung because one of
-        // them stopped answering would be a worse failure than a rung that
-        // started slightly early.
-        if quiet.is_none_or(|n| n == 0) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(INGEST_SETTLE_POLL_MS));
-    }
-    // The floor, on top of the wait: a part that has just become inactive is
-    // still being unlinked, and the rung about to be timed should not be paying
-    // for that either.
-    std::thread::sleep(Duration::from_millis(INGEST_SETTLE_MS));
-    Ok(started.elapsed().as_secs_f64())
+    Ok(crate::serverside::wait_until_settled(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        table,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -5597,8 +5563,8 @@ mod tests {
         );
     }
 
-    /// Run-to-run spread on this host reaches 14.5%, so a single rung landing
-    /// below its predecessor is not evidence of anything. A rule that stopped at
+    /// A single rung landing below its predecessor is not evidence of anything
+    /// against the spread this host produces when nothing changes. A rule that stopped at
     /// the first non-improvement would end this sweep at 4 and report less than
     /// half of what the target absorbs.
     #[test]
@@ -6379,8 +6345,8 @@ mod tests {
         assert!(err.to_string().contains("consume_msgs_per_s"), "{err}");
     }
 
-    /// The committed reference ceiling, checked against the rule rather than
-    /// against a value.
+    /// Every committed ceiling, checked against the rule rather than against a
+    /// value.
     ///
     /// Pinning today's figures here would make this something to edit whenever a
     /// maintainer legitimately re-measures, and a test people edit is a test
@@ -6388,35 +6354,58 @@ mod tests {
     /// a consume ceiling reaches the gate only if it records the message size,
     /// the envelope and the side of the bench network it was taken on, and the
     /// size matches this corpus. The assertion is an equivalence, so it holds
-    /// whether the committed file currently satisfies the rule or is being
+    /// whether a committed file currently satisfies the rule or is being
     /// correctly refused until a pass is re-run.
+    ///
+    /// Discovered rather than named. This used to open one path spelled out in
+    /// full, which made retiring that environment fail a test about a rule the
+    /// environment had nothing to do with — and the fix a maintainer reaches for
+    /// under that pressure is to edit the literal, which is how the rule quietly
+    /// stops covering the file that replaced it. Iterating the directory means a
+    /// new ceiling is covered the moment it is committed, by nobody's decision.
+    ///
+    /// An empty directory passes, and that is correct rather than a hole: the
+    /// archive genuinely has no ceilings between retiring one environment and
+    /// measuring the next, and a test that failed then would be reporting the
+    /// absence of a measurement as a defect in a rule.
     #[test]
-    fn the_committed_reference_ceiling_reaches_the_gate_only_if_it_says_what_it_measured() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../environments/ceilings/c8g-8xl-ec2-docker.json");
-        let ceilings = Ceilings::load(&path).expect("the committed ceilings file parses");
-        let consume = ceilings
-            .consume
-            .as_ref()
-            .expect("the file records a consume ceiling");
-        assert_ne!(
-            consume.message_bytes, 0,
-            "a ceiling that does not record the message size it was measured at is the \
-             defect this file's shape exists to prevent"
-        );
+    fn every_committed_ceiling_reaches_the_gate_only_if_it_says_what_it_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../environments/ceilings");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let ceilings =
+                Ceilings::load(&path).unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
+            let Some(consume) = ceilings.consume.as_ref() else {
+                continue;
+            };
+            assert_ne!(
+                consume.message_bytes,
+                0,
+                "{}: a ceiling that does not record the message size it was measured at is \
+                 the defect this file's shape exists to prevent",
+                path.display()
+            );
 
-        // Its own recorded envelope, so the only thing left to disagree is the
-        // message size.
-        let gate = ceilings.gate(corpus_message_bytes(), &consume.provenance.infra_digest);
-        assert_eq!(
-            gate.consume_msgs_per_s > 0,
-            !consume.provenance.infra_digest.is_empty()
-                && location_named(&consume.client) == Some(Location::Inside)
-                && !size_differs_materially(consume.message_bytes, corpus_message_bytes()),
-            "the committed ceiling must reach the gate exactly when it says what it was \
-             measured against: {:?}",
-            gate.refusals()
-        );
+            // Its own recorded envelope, so the only thing left to disagree is
+            // the message size.
+            let gate = ceilings.gate(corpus_message_bytes(), &consume.provenance.infra_digest);
+            assert_eq!(
+                gate.consume_msgs_per_s > 0,
+                !consume.provenance.infra_digest.is_empty()
+                    && location_named(&consume.client) == Some(Location::Inside)
+                    && !size_differs_materially(consume.message_bytes, corpus_message_bytes()),
+                "{}: a committed ceiling must reach the gate exactly when it says what it \
+                 was measured against: {:?}",
+                path.display(),
+                gate.refusals()
+            );
+        }
     }
 
     #[test]

@@ -27,9 +27,9 @@ import {
  *
  * The mark is the interval — a capsule from the smallest repetition to the
  * largest, notched at the median — and that is not decoration to be dropped when
- * the table gets long. Run-to-run spread on the reference environment reaches 14.5%,
- * which is wider than most differences on this page, so a bare median invites a
- * reader to believe a ranking the data does not support. The capsule shrinks
+ * the table gets long. Run-to-run spread is routinely wider than the differences
+ * on this page, so a bare median invites a reader to believe a ranking the data
+ * does not support. The capsule shrinks
  * from 18px to 10px and stays.
  *
  * WHY THE DISCLOSURE IS A `:target` ROW

@@ -13,7 +13,7 @@ Everything published comes from outside the system under test:
 | Quantity | Source |
 |---|---|
 | Throughput | `SELECT count()` against ClickHouse, polled by the driver, over the sampler's own window |
-| CPU | cgroup v2 `cpu.stat` (`usage_usec`, `user_usec`, `system_usec`), sampled at 1 Hz by a sidecar container |
+| CPU | cgroup v2 `cpu.stat` (`usage_usec`, `user_usec`, `system_usec`), sampled at 10 Hz by a sidecar container |
 | Memory | cgroup v2 peak **anonymous** memory, plus `memory.peak` and (for JVM arms) configured vs used heap |
 | Latency | `ingest_ts - send_ts` computed in ClickHouse, where `ingest_ts` is a `MATERIALIZED now64(6)` column. Sustained mode only |
 | Server-side cost | ClickHouse's own `ProfileEvents` CPU-per-row, via `system.query_log` |
@@ -30,7 +30,14 @@ old the backlog was; a drain record carries no latency metric at all, and the
 harness makes that structural rather than conventional. **Server-side cost
 excludes background merges**, which live in `system.part_log` and are
 arm-dependent: 25,000-row batches make far more parts than 262,144-row ones, and
-that cost lands nowhere in this figure. **A GC number exists only for JVM arms**
+that cost lands nowhere in this figure. The exclusion is from that figure only.
+Merges run on the same cores and the same disk as the measurement, so they reach
+throughput while being charged to nobody. Two things bound them. Every
+repetition waits for the target to report no active parts and no running merges
+before its window opens, so a repetition pays for its own merges rather than for
+its predecessor's; and `ch_rows_merged`, `ch_merge_duration_us` and
+`ch_settle_us` are on every record, so the merge work a window ran against is
+visible rather than inferred. **A GC number exists only for JVM arms**
 — and only for a container whose descriptor declares `gc_log`; a JVM container
 that declares none records no GC figures, an absence, not a zero. The absence is
 never a zero in the other direction either: a Rust arm has no collector, so a
@@ -67,18 +74,47 @@ regardless of base image.
 ## What the instrument can resolve
 
 The drain's window comes from the sampler's own timestamps, and the sampler runs
-at 1 Hz. So a drain is measured in whole seconds, and **a throughput difference
-smaller than one sampler tick is not a difference this instrument can see**. On a
-26-second drain one tick is 3.8%; on a 40-second one it is 2.5%. This was found by
-a configuration sweep in which fifty-eight windows all landed within 70 ms of a
-whole second and twenty-four distinct configurations resolved to five distinct
-rates.
+at 10 Hz. So **a throughput difference smaller than one sampler tick is not a
+difference this instrument can see**.
 
-That limit is throughput's. The per-core figure divides CPU by rows rather than
-by time, so the window cancels and the tick does not quantise it. It is not
-independent of the sampler: both ends of the CPU delta are sampler readings, so
-a window truncated at either end understates the CPU while the row count stays
-the full corpus, and the reading comes out flatteringly low.
+How large that is depends on the arm, not on the rig. A drain's window is the
+corpus divided by throughput, so it shrinks as arms get faster and has no lower
+bound of its own — a faster arm is measured more coarsely, and the error is
+systematic rather than random, because a fixed row count divided by a smaller
+window reads high. Two things bound it. The corpus is sized so that the fastest
+arm's window clears a declared floor of **120 seconds**, at which one tick is
+0.08%; and every record carries `window_resolution`, the tick as a fraction of
+the window it was actually read over, so a reading taken at 0.08% is
+distinguishable from one taken at 7%. A window below the floor carries
+`short_window` beside `reused_infra` and `cpu_cap_throttled`.
+
+The per-core figure divides CPU by rows rather than by time, so the window
+cancels and the tick does not quantise it. It is not independent of the sampler:
+both ends of the CPU delta are sampler readings while a drain's row count is the
+whole corpus, so a window clipped at either end understates the CPU and the
+reading comes out flatteringly low. Raising the rate bounds that clipping; it
+does not remove it, and the residual is why the floor exists as well.
+
+## What the rig does when nothing changes
+
+Every sweep measures its own first arm a second time, under a second label, in
+the same interleave as any other pair. The two halves differ by everything two
+arms differ by — container recreation, the truncate, the settle, position in the
+rotation — and by nothing else, so the difference between them is the spread this
+rig produces when the system under test does not change. Repetitions of one arm
+cannot answer that: they never cross the path along which two arms differ.
+
+The control is the sweep's first arm rather than a named one. Naming an entrant
+would make one system the rig's reference, which is not something a benchmark run
+by one of its entrants should hand itself.
+
+The pair's difference is published as a `verdict` record for the sweep, joined to
+its measurements by `invocation_id`. It is not a row in the comparison and the
+control is not an entrant: the number exists to be differenced, not to be ranked.
+The environment profile declares the spread above which a sweep's differences are
+not to be believed; until it declares one, the figure is recorded as an
+observation and nothing calls it acceptable. **An A/A control that reports a
+difference is a bug in the harness or the environment rather than a finding.**
 
 It is a separate limit from run-to-run spread, and the two are often confused.
 Spread says how much a repeated measurement wanders; quantisation says how finely

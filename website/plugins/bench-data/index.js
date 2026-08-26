@@ -280,7 +280,23 @@ function worstStatus(recs) {
 function summarise(records) {
   const byKey = new Map();
   const byAttempt = new Map();
+  /** Measured A/A spread, by the sitting whose control produced it. */
+  const aaBySitting = new Map();
   for (const rec of records) {
+    // Only measurements are arms. A `verdict` is a conclusion drawn across
+    // arms — the sweep's A/A control is one — and rendering it as a row would
+    // put a statement about the rig in a table of systems. Its number is kept
+    // against the sitting it describes, so the rows from that sweep can say
+    // what the rig was doing while they were taken.
+    if ((rec.kind ?? 'measurement') !== 'measurement') {
+      const floor = rec.metrics?.aa_spread?.value;
+      if (typeof floor === 'number') aaBySitting.set(sittingKey(rec), floor);
+      continue;
+    }
+    // The A/A control is the same arm measured a second time to difference
+    // against itself. Its number is evidence about the rig and would be a
+    // duplicate entrant in the comparison.
+    if ((rec.flags ?? []).includes('aa_control')) continue;
     if (!CARRIES_METRICS.has(rec.status)) {
       // Attempted and produced no publishable number. Surfaced as an explicit
       // gap rather than an absence a reader would read as "not tried".
@@ -365,9 +381,10 @@ function summarise(records) {
         // range, so a site drawing `value ± spread / 2` would draw an interval
         // whose ends the harness never observed — and would do it worst exactly
         // where the repetitions are most skewed, which is where a reader most
-        // needs the truth. The environment's own caveat records run-to-run
-        // spread reaching 14.5%, which is wider than most of the differences
-        // this page exists to show, so the interval is not decoration.
+        // needs the truth. A sweep's own A/A control measures the spread the
+        // rig produces when nothing changes, and it is routinely wider than the
+        // differences this page exists to show, so the interval is not
+        // decoration.
         //
         // At three repetitions `lo`, `value` and `hi` ARE the three
         // measurements; `values` carries them explicitly so the site keeps
@@ -446,6 +463,10 @@ function summarise(records) {
       // picking sentences out of a harness-authored string would be doing a
       // worse version of that.
       note: (reason ?? newest).note ?? null,
+      // What the rig's own control measured during this sweep, when the sweep
+      // ran one. The spread a reader is warned about is then this sweep's
+      // measured floor rather than a figure quoted from somewhere else.
+      aa_spread: aaBySitting.get(sittingKey(newest)) ?? null,
       metrics,
     });
   }

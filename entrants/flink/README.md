@@ -25,7 +25,7 @@ equal to the published values so a hand-run container matches the numbers.
 
 | Knob | Value | Reaches Flink as | What it controls |
 |---|---|---|---|
-| `parallelism` | **8** | `FLINK_PROPERTIES`, `TASK_MANAGER_NUMBER_OF_TASK_SLOTS` | Subtasks, one per **partition** (8), oversubscribed on the 6-CPU data plane. The drain is paced by the busiest source subtask: 6 subtasks over 8 partitions leaves two owning two partitions each, which measures at 4-way pace (2026-07-30, c8g). `KafkaSource` gives one partition to one subtask, so a ninth would never receive a split. |
+| `parallelism` | **32** | `FLINK_PROPERTIES`, `TASK_MANAGER_NUMBER_OF_TASK_SLOTS` | Subtasks, one per **partition** (32), matched to the 32-CPU data plane. The drain is paced by the busiest source subtask: any subtask owning two partitions paces the drain at half rate. `KafkaSource` gives one partition to one subtask, so a 33rd would never receive a split. |
 | `max_rows` | **50,000** | `SINK_MAX_BATCH_ROWS` | Rows per INSERT, inside ClickHouse's recommended 10k–100k. The connector's own default is **500**, two orders of magnitude off. |
 | `buffered_rows` | **100,000** | `SINK_MAX_BUFFERED_ROWS` | Rows a subtask may hold. Must be *strictly* greater than `max_rows` or `AsyncSinkWriter` refuses to construct; `[[constraints]]` in `entrant.toml` catches that before a container starts. |
 | `inflight` | **2** | `SINK_MAX_IN_FLIGHT` | Concurrent INSERTs per subtask. The connector's default is **50**, which at parallelism 8 would permit 400 concurrent INSERTs and a corresponding flood of parts. |
@@ -50,7 +50,7 @@ before `max_rows` does; `SINK_MAX_ROW_BYTES` is 1 MiB and must be no larger.
 
 | Key | Value | Why |
 |---|---|---|
-| `taskmanager.memory.process.size` | `21504m` | Total process memory in the 24 GiB container, 3 GiB slack. `entrants_are_valid` refuses anything below `21504m`, so this is partly a floor the harness imposes. |
+| `taskmanager.memory.process.size` | `21504m` | Deliberately not scaled with the 96 GiB container: this sizing (~17.5g heap) measured 2.9M rows/s where a 28.8g heap measured 1.0M — GC churn grows with the heap while the live set does not. `entrants_are_valid` bounds it between the 24 GiB-era sizing and the compressed-oops boundary. |
 | `taskmanager.memory.managed.fraction` | **`0.0`** | The default `0.4` *reserves* 5.7 GiB whether or not anything uses it, and a stateless job on the `hashmap` backend uses none. |
 | `taskmanager.memory.task.off-heap.size` | `128m` | Headroom for the sink's socket I/O, so a burst is backpressure rather than `OutOfMemoryError: Direct buffer memory`. |
 | `jobmanager.memory.process.size` | `1920m` | 2 GiB container, 128 MiB slack. Deliberately generous: the control plane must never be what limits the arm, and its *measured* cost is what gets published. |
@@ -97,7 +97,7 @@ bench run flink --reps 3
 ```
 
 By hand, which is what a reviewer runs to look inside the container. Flink splits
-across two containers: the TaskManager gets the full 6 CPU / 24 GiB data-plane
+across two containers: the TaskManager gets the full 32 CPU / 96 GiB data-plane
 envelope, and the JobManager's 1 CPU / 2 GiB is allocated **on top** as control
 plane, with its measured consumption published beside the arm's total rather than
 pre-charged against it.
@@ -118,7 +118,7 @@ docker run -d --name spate-bench-flink-jm --network spate-bench-net \
 
 # TaskManager: the full data-plane envelope.
 docker run -d --name spate-bench-flink-tm --network spate-bench-net \
-  --cpus 6 --memory 24g --memory-swap 24g \
+  --cpus 32 --memory 96g --memory-swap 96g \
   -e JOB_MANAGER_RPC_ADDRESS=spate-bench-flink-jm \
   -v spate-bench-flink-cp:/opt/flink/checkpoints \
   spate-bench-flink taskmanager

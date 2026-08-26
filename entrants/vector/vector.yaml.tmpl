@@ -1,5 +1,5 @@
 # The Vector arm's whole topology: 8 kafka sources -> 8 remap transforms -> 1
-# clickhouse sink, in one process on the 6 CPU / 24 GiB envelope.
+# clickhouse sink, in one process on the 32 CPU / 96 GiB envelope.
 #
 # This file is a TEMPLATE. `__AVRO_SCHEMA_JSON__` is replaced at image build
 # with the committed workload/schema/sensor_batch.avsc, minified and embedded as
@@ -70,8 +70,8 @@ sources:
         schema: __AVRO_SCHEMA_JSON__
         strip_schema_id_prefix: true
     librdkafka_options:
-      # Eight consumers, eight partitions: cooperative-sticky settles at one
-      # partition per consumer and rebalances incrementally rather than
+      # Eight consumers over 32 partitions: cooperative-sticky settles at four
+      # partitions per consumer and rebalances incrementally rather than
       # stop-the-world, so a late-joining consumer does not stall the other
       # seven at start-up.
       "partition.assignment.strategy": "cooperative-sticky"
@@ -82,7 +82,7 @@ sources:
       # 256 MiB of prefetch per consumer (the option is in KILOBYTES). The
       # shipped default (~64 MiB in 0.57's librdkafka) is a prefetch bound, and
       # in drain mode the consumer must never be the starved side: 8 x 256 MiB
-      # is still small against the 24 GiB envelope.
+      # is still small against the 96 GiB envelope.
       "queued.max.messages.kbytes": "262144"
   in-1: *kafka_source
   in-2: *kafka_source
@@ -220,7 +220,7 @@ sinks:
       # a starting width matched to the partition count, not a cross-arm
       # constant (each arm's insert-concurrency knob means something different:
       # Spate holds inflight-per-shard, Flink inflight-per-subtask). Sweepable.
-      concurrency: ${SINK_REQUEST_CONCURRENCY:-8}
+      concurrency: ${SINK_REQUEST_CONCURRENCY:-32}
     buffer:
       type: memory
       # The shipped default is 500 EVENTS, which cannot even feed one

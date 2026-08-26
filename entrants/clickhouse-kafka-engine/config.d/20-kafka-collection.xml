@@ -34,12 +34,12 @@
                  so exposing it would only manufacture broken sweep cells. -->
             <kafka_thread_per_consumer>1</kafka_thread_per_consumer>
 
-            <!-- One consumer per partition (8), oversubscribed on 6 CPUs
-                 exactly as spate threads=8 and flink parallelism=8 are. The
+            <!-- One consumer per partition (32), matched to the 32-CPU cgroup
+                 exactly as spate threads=32 and flink parallelism=32 are. The
                  CREATE-time cap on this value is max(detected cores, 16) at
                  this version (StorageKafkaUtils.cpp, v26.3.17.4-lts) and a
                  violation THROWS at CREATE — loud, in initdb, never a silent
-                 clamp — so 8 needs no escape hatch on this 6-core cgroup.
+                 clamp — so 32 clears it exactly on this 32-core cgroup.
                  20_assert.sh checks the value the collection carries, and the
                  README's post-start count of system.kafka_consumers guards
                  against a future version moving the cap. -->

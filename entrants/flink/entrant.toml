@@ -42,13 +42,13 @@ context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-flink"
 
-# Flink splits across two containers. The data plane gets the full 6 CPU / 24 GiB
+# Flink splits across two containers. The data plane gets the full 32 CPU / 96 GiB
 # envelope — the same budget every other arm gets — and the JobManager is
 # allocated on top as control plane. Its measured consumption (0.07–0.21 cores)
 # is published beside the arm's total rather than pre-charged against it.
 [envelope]
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [[envelope.container]]
 role   = "control-plane"
@@ -64,8 +64,8 @@ gc_log = "/opt/flink/log/gc-jm.log"
 [[envelope.container]]
 role   = "data-plane"
 name   = "tm"
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 args   = ["taskmanager"]
 # Where config.yaml's env.java.opts.taskmanager sends -Xlog:gc*.
 gc_log = "/opt/flink/log/gc.log"
@@ -74,7 +74,7 @@ gc_log = "/opt/flink/log/gc.log"
 # budgeted on top of the envelope must be declared as a deviation with
 # "envelope" in `affects`, and validation refuses the descriptor without it.
 [[deviations]]
-what    = "Runs as two containers: the 6 CPU / 24 GiB data plane, plus a JobManager control-plane container (1 CPU / 2 GiB) allocated on top of the envelope."
+what    = "Runs as two containers: the 32 CPU / 96 GiB data plane, plus a JobManager control-plane container (1 CPU / 2 GiB) allocated on top of the envelope."
 why     = "Flink cannot run a standalone job without a JobManager. Its measured consumption (0.07–0.21 cores) is published beside the arm's totals rather than silently pre-charged against the data plane's budget."
 affects = ["envelope"]
 
@@ -112,11 +112,10 @@ SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
 # a slot, so parallelism above the slot count does not schedule and slots above
 # the parallelism are reserved and idle.
 #
-# The value is one subtask per PARTITION (8), not one per CPU: the drain is
-# paced by the busiest source subtask, and 6-way parallelism over an
-# 8-partition topic leaves two subtasks reading two partitions each — measured
-# at 4-way pace. 8-way oversubscribed on the 6-CPU envelope recovers the
-# scaling (1.6M -> 2.1M rows/s, 2026-07-30 on c8g).
+# The value is one subtask per PARTITION (32), not one per CPU: the drain is
+# paced by the busiest source subtask, and any subtask reading two partitions
+# paces the whole drain at half rate. On this envelope the two rules land on
+# the same number, 32 subtasks on 32 CPUs.
 FLINK_PROPERTIES                  = "parallelism.default: {{knob:parallelism}}"
 TASK_MANAGER_NUMBER_OF_TASK_SLOTS = "{{knob:parallelism}}"
 
@@ -150,5 +149,5 @@ id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
 approach = "realistic"
 default  = true
-knobs    = { parallelism = 8, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
+knobs    = { parallelism = 32, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
 reports  = { wire_format = "rowbinary_nt" }

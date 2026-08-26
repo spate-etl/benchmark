@@ -47,14 +47,14 @@ image      = "spate-bench-vector"
 # not a JVM, so there is no GC log to collect and the record carries an absence
 # rather than a zero.
 [envelope]
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "sut"
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [guarantees]
 delivery    = "at-least-once"
@@ -136,7 +136,7 @@ label    = "Vector · ArrowStream"
 approach = "realistic"
 default  = true
 env      = { FORMAT = "arrow_stream" }
-knobs    = { threads = 6, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 8, buffer_events = 524288, compression = "none" }
+knobs    = { threads = 32, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
 reports  = { wire_format = "arrow_stream" }
 
 # The GA wire-format control. Vector's clickhouse sink wrote JSONEachRow only
@@ -148,5 +148,5 @@ id       = "json-each-row"
 label    = "Vector · JSONEachRow"
 approach = "realistic"
 env      = { FORMAT = "json_each_row" }
-knobs    = { threads = 6, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 8, buffer_events = 524288, compression = "none" }
+knobs    = { threads = 32, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
 reports  = { wire_format = "json_each_row" }

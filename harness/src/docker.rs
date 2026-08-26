@@ -153,6 +153,34 @@ pub fn try_clickhouse_sql(
     Ok(body)
 }
 
+/// Like [`clickhouse_sql`] but with an explicit read timeout, for statements
+/// whose result is legitimately slow to produce.
+///
+/// # Errors
+///
+/// If the request cannot be made, or the server answers with an exception.
+pub fn clickhouse_sql_slow(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    sql: &str,
+    read_timeout: std::time::Duration,
+) -> std::io::Result<String> {
+    let body = crate::http::post_slow(
+        host,
+        port,
+        &format!("/?user={user}&password={password}"),
+        sql,
+        read_timeout,
+    )?;
+    assert!(
+        !body.contains("DB::Exception"),
+        "clickhouse error for {sql:?}: {body}"
+    );
+    Ok(body)
+}
+
 /// Run one SQL statement, panicking on a server exception so a misconfigured
 /// bench fails loudly instead of producing a zero-row "result".
 pub fn clickhouse_sql(

@@ -43,12 +43,11 @@ while IFS= read -r f; do
     # every published number at once.
     harness/*|workload/*|rust-toolchain.toml|.github/aws/*)
       all=true ;;
-    # Only the cloud environment's own profile or ceilings force a
-    # re-measurement on that environment — and the ceilings live one directory
-    # deeper (environments/ceilings/c8g-*.json), so they need their own arm of
-    # this pattern or a re-measured admission envelope would propose nothing.
-    # Other environments' files describe hosts this pipeline does not run on.
-    environments/c8g-*|environments/ceilings/c8g-*)
+    # A profile or a ceilings file forces a re-measurement on its environment.
+    # Matched by directory rather than by an id prefix: a prefix stops matching
+    # the moment an environment is renamed, and the failure is silent — the
+    # pipeline proposes nothing for the file that changed.
+    environments/*|environments/ceilings/*)
       all=true ;;
     # The lockfile and root manifest pin every harness dependency, and each arm
     # is built `--locked` against them: a dependency bump moves codegen and thus

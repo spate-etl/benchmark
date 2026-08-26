@@ -70,6 +70,32 @@ pub fn post(host: &str, port: u16, path: &str, body: &str) -> std::io::Result<St
     post_typed(host, port, path, None, body)
 }
 
+/// Like [`post`] but with an explicit read timeout, for requests whose
+/// response is legitimately slow — a gate query over a window that grows with
+/// the corpus outlives the default before the server has misbehaved at all.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error if the connection or read fails.
+pub fn post_slow(
+    host: &str,
+    port: u16,
+    path: &str,
+    body: &str,
+    read_timeout: Duration,
+) -> std::io::Result<String> {
+    let mut stream = std::net::TcpStream::connect((host, port))?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    Ok(decode(&raw))
+}
+
 /// Like [`post`] but with an explicit `Content-Type`.
 ///
 /// ClickHouse ignores the header, which is why the plain form omits it — but a

@@ -87,6 +87,10 @@ pub struct Endpoints {
 
 const BROKER: &str = "spate-bench-redpanda";
 const CLICKHOUSE: &str = "spate-bench-clickhouse";
+/// Where ClickHouse keeps the data an arm's inserts land in.
+const CLICKHOUSE_DATA: &str = "/var/lib/clickhouse";
+/// Where Redpanda keeps the segments the prefilled corpus is read out of.
+const BROKER_DATA: &str = "/var/lib/redpanda/data";
 /// ClickHouse's HTTP port inside the container. Published as 18123 on the host,
 /// and reached unpublished at this number from anywhere on [`NETWORK`].
 const CLICKHOUSE_HTTP_PORT: u16 = 8123;
@@ -103,6 +107,7 @@ const CLICKHOUSE_HTTP_PORT: u16 = 8123;
 /// If the docker CLI itself fails.
 pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec<Flag>), String> {
     let mut flags = Vec::new();
+    assert_storage(&env.spec.infra.storage)?;
     docker::ensure_network();
 
     let b = &env.spec.infra.broker;
@@ -131,12 +136,12 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
     if reused_broker {
         docker::attach_to_network(BROKER);
     } else {
-        start_broker(b)?;
+        start_broker(b, &env.spec.infra.storage)?;
     }
     if reused_clickhouse {
         docker::attach_to_network(CLICKHOUSE);
     } else {
-        start_clickhouse(c)?;
+        start_clickhouse(c, &env.spec.infra.storage)?;
     }
     if reused_broker || reused_clickhouse {
         flags.push(Flag::ReusedInfra);
@@ -223,6 +228,7 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
         clickhouse_cpus: ch_cpus,
         clickhouse_memory: ch_memory,
         partitions: env.spec.infra.partitions,
+        storage: env.spec.infra.storage.kind.as_str().to_owned(),
         registry: b.registry.clone(),
         ceiling_msgs_per_s,
         ceiling_bytes_per_s,
@@ -235,6 +241,78 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
     };
 
     Ok((endpoints, infra, flags))
+}
+
+/// Fails the run unless each declared data path is its own mount, distinct from
+/// the root filesystem and from the other.
+///
+/// Read on the host. Inside a container a bind mount reports a different device
+/// from the overlay root whether or not the host path is its own device, so the
+/// in-container reading cannot tell a mounted NVMe device from an ordinary
+/// directory — which is what Docker creates when the source is missing.
+///
+/// An unreadable answer is a refusal.
+fn assert_storage(storage: &crate::environment::Storage) -> Result<(), String> {
+    if storage.kind != crate::environment::Kind::LocalNvme {
+        return Ok(());
+    }
+    let source = |path: &str| -> Result<String, String> {
+        let out = std::process::Command::new("findmnt")
+            .args(["-no", "SOURCE", "--target", path])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "[infra.storage] declares kind = \"local-nvme\", which this harness \
+                     verifies with findmnt(8), and it could not be run ({e}). Either the \
+                     host is not the one the profile describes, or the profile should \
+                     declare kind = \"shared-root\"."
+                )
+            })?;
+        if !out.status.success() {
+            return Err(format!("findmnt could not resolve {path}"));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+
+    let root = source("/")?;
+    let ch = source(&storage.clickhouse_data)?;
+    let broker = source(&storage.broker_data)?;
+
+    let refuse = |what: &str| {
+        Err(format!(
+            "REFUSED: {what}\n  /                      -> {root}\n  {} -> {ch}\n  {} -> {broker}\n\
+             The profile declares kind = \"local-nvme\" and infra_digest records that, so \
+             every number from this run would be described as measured on separate local \
+             devices. Check that the box formatted and mounted its instance store before \
+             Docker started, or declare kind = \"shared-root\".",
+            storage.clickhouse_data, storage.broker_data
+        ))
+    };
+    if ch == root {
+        return refuse("ClickHouse's data path is on the root filesystem.");
+    }
+    if broker == root {
+        return refuse("the broker's data path is on the root filesystem.");
+    }
+    if ch == broker {
+        return refuse("ClickHouse and the broker are on the SAME device.");
+    }
+
+    eprintln!("storage: clickhouse {ch}, broker {broker}, root {root}");
+    Ok(())
+}
+
+/// The `-v host:container` argument for a measured data path. `None` under
+/// `shared-root`, where the container writes to its own layer.
+fn data_volume(
+    storage: &crate::environment::Storage,
+    host_path: &str,
+    container_path: &str,
+) -> Option<String> {
+    if storage.kind != crate::environment::Kind::LocalNvme {
+        return None;
+    }
+    Some(format!("{host_path}:{container_path}"))
 }
 
 fn running(name: &str) -> bool {
@@ -257,7 +335,10 @@ fn reused_description(broker: bool, clickhouse: bool) -> &'static str {
     }
 }
 
-fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
+fn start_broker(
+    b: &crate::environment::Broker,
+    storage: &crate::environment::Storage,
+) -> Result<(), String> {
     let _ = docker::docker_try(&["rm", "-f", BROKER]);
     eprintln!("starting {BROKER} ({}, --cpus={}) ...", b.image, b.cpus);
 
@@ -270,8 +351,9 @@ fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
     let rp_memory = "4G";
     let advertise = format!("EXTERNAL://localhost:9092,INTERNAL://{BROKER}:29092");
     let smp = b.cpus.clone();
+    let volume = data_volume(storage, &storage.broker_data, BROKER_DATA);
 
-    let args: Vec<&str> = vec![
+    let mut args: Vec<&str> = vec![
         "run",
         "-d",
         "--name",
@@ -289,6 +371,11 @@ fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
         &cpus,
         &mem,
         &swap,
+    ];
+    if let Some(v) = volume.as_deref() {
+        args.extend_from_slice(&["-v", v]);
+    }
+    args.extend_from_slice(&[
         &b.image,
         "redpanda",
         "start",
@@ -309,7 +396,7 @@ fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
         rp_memory,
         "--reserve-memory",
         "0M",
-    ];
+    ]);
     docker::docker(&args);
 
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -324,14 +411,18 @@ fn start_broker(b: &crate::environment::Broker) -> Result<(), String> {
     Ok(())
 }
 
-fn start_clickhouse(c: &crate::environment::ClickHouse) -> Result<(), String> {
+fn start_clickhouse(
+    c: &crate::environment::ClickHouse,
+    storage: &crate::environment::Storage,
+) -> Result<(), String> {
     let _ = docker::docker_try(&["rm", "-f", CLICKHOUSE]);
     eprintln!("starting {CLICKHOUSE} ({}, --cpus={}) ...", c.image, c.cpus);
 
     let cpus = format!("--cpus={}", c.cpus);
     let mem = format!("--memory={}", c.memory);
     let swap = format!("--memory-swap={}", c.memory);
-    let args: Vec<&str> = vec![
+    let volume = data_volume(storage, &storage.clickhouse_data, CLICKHOUSE_DATA);
+    let mut args: Vec<&str> = vec![
         "run",
         "-d",
         "--name",
@@ -346,15 +437,14 @@ fn start_clickhouse(c: &crate::environment::ClickHouse) -> Result<(), String> {
         "CLICKHOUSE_PASSWORD=bench",
         "--ulimit",
         "nofile=262144:262144",
-        // Deliberately no volume mount. ClickHouse writes to the container's own
-        // writable layer, which is already VM-local; the VirtioFS penalty on
-        // macOS applies to bind mounts from the host filesystem, and the rule
-        // for this harness is never to bind-mount a measured path.
         &cpus,
         &mem,
         &swap,
-        &c.image,
     ];
+    if let Some(v) = volume.as_deref() {
+        args.extend_from_slice(&["-v", v]);
+    }
+    args.push(&c.image);
     docker::docker(&args);
 
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -656,6 +746,45 @@ mod tests {
             reused_description(false, true),
             "ClickHouse, with the broker recreated"
         );
+    }
+
+    #[test]
+    fn a_shared_root_profile_mounts_nothing_and_local_nvme_mounts_both() {
+        use crate::environment::{Kind, Storage};
+
+        let shared = Storage::default();
+        assert_eq!(data_volume(&shared, "", CLICKHOUSE_DATA), None);
+
+        let nvme = Storage {
+            kind: Kind::LocalNvme,
+            clickhouse_data: "/mnt/bench-clickhouse".to_owned(),
+            broker_data: "/mnt/bench-broker".to_owned(),
+        };
+        assert_eq!(
+            data_volume(&nvme, &nvme.clickhouse_data, CLICKHOUSE_DATA).as_deref(),
+            Some("/mnt/bench-clickhouse:/var/lib/clickhouse")
+        );
+        assert_eq!(
+            data_volume(&nvme, &nvme.broker_data, BROKER_DATA).as_deref(),
+            Some("/mnt/bench-broker:/var/lib/redpanda/data")
+        );
+    }
+
+    #[test]
+    fn only_a_declared_nvme_layout_is_verified() {
+        use crate::environment::{Kind, Storage};
+
+        assert!(assert_storage(&Storage::default()).is_ok());
+
+        // `/` resolves to the root source on any host, so this fails wherever
+        // the test runs.
+        let bogus = Storage {
+            kind: Kind::LocalNvme,
+            clickhouse_data: "/".to_owned(),
+            broker_data: "/".to_owned(),
+        };
+        let e = assert_storage(&bogus).expect_err("must refuse");
+        assert!(e.starts_with("REFUSED") || e.contains("findmnt"), "{e}");
     }
 
     #[test]

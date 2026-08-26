@@ -45,14 +45,14 @@ image      = "spate-bench-ch-kafka"
 # (system logs, scheduler, an idle SQL endpoint); that is declared below as a
 # deviation rather than smoothed away.
 [envelope]
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "sut"
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [guarantees]
 delivery    = "at-least-once"
@@ -111,7 +111,7 @@ id       = "distributed"
 label    = "ClickHouse Kafka engine · Distributed forward"
 approach = "realistic"
 default  = true
-knobs    = { num_consumers = 8, block_msgs = 16384, flush_ms = 5000, poll_timeout_ms = 500 }
+knobs    = { num_consumers = 32, block_msgs = 16384, flush_ms = 5000, poll_timeout_ms = 500 }
 reports  = { wire_format = "native" }
 
 [[deviations]]

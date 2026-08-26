@@ -134,7 +134,7 @@ USER flink
 # from outside: ClickHouse for throughput and latency, cgroup v2 for CPU and
 # memory, /opt/flink/log/gc.log for GC.
 ENV BOOTSTRAP=spate-bench-redpanda:29092 \
-    EXPECT_PARALLELISM=8 \
+    EXPECT_PARALLELISM=32 \
     TOPIC=comparison-sensor-batches \
     GROUP_ID=comparison-flink \
     STARTING_OFFSETS=earliest \

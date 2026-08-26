@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The benchmark box's payload. Executed by the user-data stub from a checkout
 # of this repository at the approved SHA, as root, on a fresh Ubuntu 24.04
-# arm64 c8g.8xlarge. Everything it needs arrives in the environment
+# arm64 c8gd.metal-24xl. Everything it needs arrives in the environment
 # (RUN_ID/SHA/ENV_ID/SELECTOR/REPS/TRIGGER/MODE/BUCKET/TTL_HOURS); everything
 # it produces leaves via s3://$BUCKET/incoming/$RUN_ID/.
 #
@@ -11,6 +11,11 @@
 #   - overrun: the `timeout` below kills the payload two hours before the
 #     reaper's TTL would, so the box still ships its logs and self-terminates
 #     rather than being reaped.
+#
+# MODE=tuning is the infrastructure search (.github/aws/tune.sh). It edits the
+# environment profile on the box and writes nothing to results/: what it
+# produces is a ladder of measurements a maintainer reads, not a published
+# number.
 set -euo pipefail
 
 : "${RUN_ID:?}" "${SHA:?}" "${ENV_ID:?}" "${SELECTOR:?}" "${REPS:?}"
@@ -71,12 +76,20 @@ payload() {
     -p spate-benchmark-harness --bin bench
   local bench="$REPO/target/release/bench"
 
+  # The infrastructure search. No arm images: it measures what the broker and
+  # ClickHouse absorb at a ladder of caps, and none of that runs an entrant.
+  # Building six of them would be most of the box time for nothing.
+  if [ "$MODE" = tuning ]; then
+    run_step tune bash "$REPO/.github/aws/tune.sh"
+    return 0
+  fi
+
   # The selector may be several selectors ('spate flink'); split on purpose.
   local -a sel
   read -ra sel <<< "$SELECTOR"
 
   run_step build-entrants "$bench" build "${sel[@]}"
-  # The run-mode corpus depth (the 1.5M default) is part of what an arm
+  # The run-mode corpus depth (the 40M default) is part of what an arm
   # measures — arms replay the topic to exhaustion — so it is not touched
   # here. The ceiling pass is different: its corpus is fuel for a measurement
   # window, and the consume pass REFUSES (DRAINED) when the backlog cannot
@@ -84,7 +97,7 @@ payload() {
   # messages was ~6s of backlog at the calibrated rate). Prefill deep enough
   # to feed an 8s window at rates well above the calibrated one.
   if [ "$MODE" = ceiling-bootstrap ]; then
-    run_step prefill "$bench" prefill --env "$ENV_ID" --batches 12000000
+    run_step prefill "$bench" prefill --env "$ENV_ID" --batches 30000000
   else
     run_step prefill "$bench" prefill --env "$ENV_ID"
   fi

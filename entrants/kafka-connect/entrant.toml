@@ -59,14 +59,14 @@ image      = "spate-bench-kafka-connect"
 # offset storage file standalone requires is a StandaloneConfig formality,
 # otherwise unused for sinks.
 [envelope]
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "worker"
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 # Where the Dockerfile's KAFKA_OPTS aims -Xlog:gc*. The harness copies this out
 # after a run; `entrants_are_valid` checks the path against the Dockerfile.
 gc_log = "/opt/kafka/logs/gc.log"
@@ -136,7 +136,7 @@ id       = "rowbinary-mv"
 label    = "Kafka Connect · clickhouse-kafka-connect · RowBinary + MV"
 approach = "realistic"
 default  = true
-knobs    = { tasks = 8, buffer_count = 2000, buffer_flush_ms = 1000 }
+knobs    = { tasks = 32, buffer_count = 2000, buffer_flush_ms = 1000 }
 # Verified in the v1.4.0 source: inserts go as RowBinary
 # (ClickHouseWriter.java:1066; RowBinaryWithDefaults only when the target has
 # DEFAULT columns, and the landing table has none).

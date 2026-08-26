@@ -307,15 +307,48 @@ fn unrunnable_knobs(
     problems
 }
 
-/// Seconds a drain may take before it is abandoned.
+/// Seconds a drain of the reference corpus may take before it is abandoned.
 ///
-/// 600 is 2.5x the slowest drain any arm has needed (236 s), so it is
-/// unreachable by a working one — it bounds what a broken one wastes.
-const DRAIN_MAX_S: u64 = 600;
+/// 2.5x the slowest drain any arm has needed at 1,500,000 batches, so a working
+/// one cannot reach it. [`drain_max_s`] scales it with the corpus, which is a
+/// variant knob.
+const DRAIN_MAX_REFERENCE_S: u64 = 600;
+
+/// Batches [`DRAIN_MAX_REFERENCE_S`] was calibrated against.
+const DRAIN_MAX_REFERENCE_BATCHES: u64 = 1_500_000;
+
+/// Milliseconds between row-count polls while a drain runs.
+///
+/// The poll decides when the window closes, so its period is post-drain idle
+/// inside the window. It is also a query against the system under test, so a
+/// tighter poll competes with the arm — which is why it is not the sampler's
+/// interval. Against [`MIN_WINDOW_S`] this contributes at most 0.2%.
+const DRAIN_POLL_MS: u64 = 250;
+
+/// The figure the comparison leads on, and therefore the one an A/A control
+/// differences.
+const LEAD_METRIC: &str = "rows_per_s_per_core";
+
+/// The label the A/A control's half of the pair carries.
+const AA_LABEL: &str = "control";
+
+/// Seconds a drain window must reach for the reading to be treated as precise.
+///
+/// The window is `corpus / throughput`, so it shrinks as arms get faster and has
+/// no lower bound of its own. Below this, [`Flag::ShortWindow`] marks the record
+/// and `window_resolution` says what it was read at.
+pub const MIN_WINDOW_S: f64 = 120.0;
+
+/// The drain deadline for a corpus of `batches`.
+fn drain_max_s(batches: u64) -> u64 {
+    DRAIN_MAX_REFERENCE_S
+        .saturating_mul(batches.max(1))
+        .saturating_div(DRAIN_MAX_REFERENCE_BATCHES)
+        .max(DRAIN_MAX_REFERENCE_S)
+}
 /// Seconds to wait for the pipeline to settle before gating.
 const QUIESCE_MAX_S: u64 = 900;
-/// Sampler interval.
-const SAMPLE_INTERVAL_S: f64 = 1.0;
+
 /// Consecutive row-count probes that may fail before an arm is abandoned.
 ///
 /// A probe reads `SELECT count()` over HTTP, so it can fail for reasons that
@@ -332,19 +365,55 @@ const LOG_SEPARATOR: &str = "\nLogs:\n";
 /// Characters of a refusal that reach a record's `note`.
 const NOTE_MAX_CHARS: usize = 400;
 
-/// Batches the correctness gate examines, counted down from the top of the range.
+/// Share of the corpus the correctness gate examines, counted down from the top
+/// of the range.
 ///
-/// Bounded because exact-distinct needs a hash set proportional to cardinality,
-/// and running it over the full 150M-row corpus asked ClickHouse for 10.45 GiB
-/// against a 10.8 GiB limit and was killed — taking a completed, valid
-/// measurement down with it.
+/// A share rather than a count. The count this replaces was calibrated against
+/// a 1,500,000-batch corpus, where it covered 6.7%; the corpus is a variant
+/// knob, so a fixed count means the gate covers less of a longer one — and a
+/// longer corpus is exactly what raises the number of rows an arm could lose
+/// without the gate noticing.
+const GATE_SHARE: f64 = 0.067;
+
+/// Bytes of ClickHouse memory one batch of the gate's exact-distinct costs.
 ///
-/// The slice is taken from the TOP of the range because that is the part
-/// produced during and after the measurement window, and it is still ten million
-/// rows: a system that drops, duplicates or mis-transforms does so
-/// systematically rather than once. The window is recorded in the record's note,
-/// so the gate is visibly a sample rather than silently one.
-const GATE_MAX_BATCHES: u64 = 100_000;
+/// Exact-distinct needs a hash set proportional to cardinality, and the gate's
+/// is `(batch_id, event_seq)` over the rows in its window. One observation
+/// backs this: `uniqExact` over the full 150M-row, 1,500,000-batch corpus asked
+/// for 10.45 GiB, which is ~7.5 KiB per batch.
+const GATE_BYTES_PER_BATCH: u64 = 7_500;
+
+/// Fraction of ClickHouse's memory the gate may plan to occupy.
+///
+/// The run that established [`GATE_BYTES_PER_BATCH`] was killed at 10.45 GiB
+/// against a 10.8 GiB limit, taking a completed, valid measurement with it. The
+/// gate is a check on a measurement already taken, so it is sized to lose that
+/// race rather than to win it.
+const GATE_MEMORY_SHARE: f64 = 0.25;
+
+/// Batches the correctness gate examines for a corpus of `batches`, against a
+/// ClickHouse allocation of `ch_memory_bytes`.
+///
+/// The slice is taken from the top of the range because that is the part
+/// produced during and after the measurement window. The window is recorded in
+/// the record's note, so the gate is visibly a sample rather than silently one.
+fn gate_window_batches(batches: u64, ch_memory_bytes: u64) -> u64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "batch counts and byte budgets are far below f64's exact range"
+    )]
+    let want = (batches as f64 * GATE_SHARE) as u64;
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "as above"
+    )]
+    let affordable = ((ch_memory_bytes as f64 * GATE_MEMORY_SHARE) as u64) / GATE_BYTES_PER_BATCH;
+    want.min(affordable).max(1)
+}
 
 /// Seconds a sustained measurement window is held open, unless asked otherwise.
 ///
@@ -495,7 +564,13 @@ pub fn prefill(root: &Path, opts: &RunOptions) -> Result<(), String> {
     // `batch_id`. The round-trip unit tests only prove the encoder and decoder
     // agree with each other; this proves the wire matches the contract, which is
     // what every competitor arm actually reads.
-    let verified = corpus::verify_corpus(&ep.bootstrap, &opts.topic, schema_id, 64);
+    // Partition 0 holds every `partitions`-th batch, so a corpus shallower
+    // than 64 x partitions cannot offer 64 messages there.
+    let sample = opts
+        .batches
+        .div_ceil(u64::try_from(env.spec.infra.partitions).unwrap_or(1).max(1))
+        .min(64);
+    let verified = corpus::verify_corpus(&ep.bootstrap, &opts.topic, schema_id, sample);
     eprintln!("verified {verified} messages against the contract");
 
     // The integer-only count. The full `expected` formats a string
@@ -538,18 +613,43 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     let _ceilings = env.ceilings()?;
     let ceiling = env.ceiling()?;
 
+    // The A/A control: the sweep's first arm, run a second time under a second
+    // label. Always, rather than on a flag — a control somebody has to remember
+    // to ask for is a control that is missing from the sweep that needed it.
+    //
+    // The first arm rather than a named one. Naming an entrant in a profile or a
+    // constant would make one system the rig's reference, which is not something
+    // a benchmark run by one of its entrants should hand itself.
+    //
+    // It runs in the interleave like any other arm, so the pair differs by
+    // everything two arms differ by — container recreation, truncate, settle,
+    // position in the rotation — and by nothing else. Repetitions of one arm
+    // never cross that path and so cannot see a bias in it.
+    let mut order: Vec<(&Arm<'_>, Option<&str>)> = arms.iter().map(|a| (a, None)).collect();
+    if let Some(first) = arms.first() {
+        order.push((first, Some(AA_LABEL)));
+    }
+
     // The plan, printed before anything is spent. A full sweep costs hours, so
     // "which arms will this actually run?" has to be answerable in advance
     // rather than inferred afterwards from what appeared.
     eprintln!(
         "plan: {} arm(s) x {} rep(s) = {} run(s), interleaved, in {} mode, on {} [{}]",
-        arms.len(),
+        order.len(),
         opts.reps,
-        arms.len() * opts.reps as usize,
+        order.len() * opts.reps as usize,
         opts.mode.name(),
         env.spec.id,
         format!("{:?}", env.spec.class).to_lowercase()
     );
+    if let Some(first) = arms.first() {
+        eprintln!(
+            "  the A/A control is {}:{} measured a second time as {AA_LABEL:?}; its \
+             number is not a system's, it is the difference against its twin",
+            first.entrant.id(),
+            first.variant.id
+        );
+    }
     if let Mode::Sustained {
         offered_msgs_per_s,
         window_s,
@@ -707,12 +807,15 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     let mut refusals = Vec::new();
     let mut emitted = 0usize;
 
+    let mut aa: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
+    let mut aa_sut: Option<Sut> = None;
+
     // Interleaved, not batched. Running all of one arm and then all of another
     // has already manufactured a fake 30% difference in a related project: the
     // machine is not in the same state at the end of a long run as at the start,
     // and batching aliases that drift onto whichever arm went last.
     for rep in 1..=opts.reps {
-        for arm in arms {
+        for (arm, aa_label) in &order {
             let expected_rows = corpus_rows;
             eprintln!(
                 "\n=== rep {rep}/{} — {}:{} ===",
@@ -732,9 +835,22 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
                 expected_rows,
                 schema_id,
                 &base_flags,
+                *aa_label,
             ) {
                 Ok(m) => {
                     emitted += 1;
+                    // Only the pair reaches the buckets: the control's twin is
+                    // the first arm, and a bucket holding every arm's lead
+                    // medians the sweep rather than the twin.
+                    let twin = arms.first().is_some_and(|f| std::ptr::eq(*arm, f));
+                    if let Some(v) = m.lead {
+                        if aa_label.is_some() || twin {
+                            aa.entry(aa_label.map(str::to_owned)).or_default().push(v);
+                        }
+                        if aa_label.is_some() {
+                            aa_sut = Some(m.sut.clone());
+                        }
+                    }
                     // The refusal is printed and counted exactly as an
                     // unrecorded one is. A recorded refusal is not a quiet one:
                     // the record exists so a consumer can see the gap, not so
@@ -761,6 +877,11 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
         }
     }
 
+    if let Some(path) = record_aa_verdict(root, &env, &infra, opts, &aa, aa_sut)? {
+        emitted += 1;
+        eprintln!("A/A verdict recorded in {}", path.display());
+    }
+
     eprintln!(
         "\n{emitted} record(s) written, {} refusal(s)",
         refusals.len()
@@ -771,6 +892,113 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     Ok(())
 }
 
+/// Writes the sweep's A/A verdict, or `None` when the sweep produced no pair.
+///
+/// A `Verdict` rather than a measurement: it is a conclusion drawn across arms
+/// and not an observation of a system. It cannot be a field on the measurements
+/// themselves, because those are appended as each repetition finishes and the
+/// difference is not known until the last of them has been.
+///
+/// The record carries the delta and the environment's declared threshold; it
+/// does not carry a pass or a fail. The threshold is a property of the
+/// environment and can be re-measured, and a judgement baked into the record
+/// would be frozen at whatever was declared on the day.
+///
+/// # Errors
+///
+/// If the record cannot be appended.
+fn record_aa_verdict(
+    root: &Path,
+    env: &Environment,
+    infra: &Infra,
+    opts: &RunOptions,
+    aa: &BTreeMap<Option<String>, Vec<f64>>,
+    sut: Option<Sut>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let (Some(a), Some(b), Some(sut)) = (aa.get(&None), aa.get(&Some(AA_LABEL.to_owned())), sut)
+    else {
+        return Ok(None);
+    };
+    let (Some(ma), Some(mb), Some(spread)) = (median(a), median(b), aa_spread(a, b)) else {
+        return Ok(None);
+    };
+
+    let declared = env.spec.noise.aa_spread;
+    let verdict = match declared {
+        Some(t) if spread > t => {
+            eprintln!(
+                "A/A: {:.2}% spread, over the {:.2}% this environment declares. The rig \
+                 moved between two measurements of the same thing, so this sweep's \
+                 differences are not evidence.",
+                spread * 100.0,
+                t * 100.0
+            );
+            "over the declared floor: this sweep's differences are not evidence"
+        }
+        Some(t) => {
+            eprintln!(
+                "A/A: {:.2}% spread, within the declared {:.2}%",
+                spread * 100.0,
+                t * 100.0
+            );
+            "within the declared floor"
+        }
+        None => {
+            eprintln!(
+                "A/A: {:.2}% spread. This environment declares no floor, so there is \
+                 nothing to call it acceptable against.",
+                spread * 100.0
+            );
+            "no floor is declared for this environment, so this figure is the observation \
+             and not a verdict"
+        }
+    };
+
+    let mut report = Report::new(
+        "kafka_avro_clickhouse",
+        Kind::Verdict,
+        Status::Ok,
+        sut,
+        RunMeta::new(&env.spec.id, &env.digest, opts.trigger, infra.clone()),
+    )
+    .note(format!(
+        "A/A control: the sweep's first arm measured twice, {ma:.0} against {mb:.0} \
+         {LEAD_METRIC}; {verdict}"
+    ))
+    .metric("aa_spread", Metric::minimize(spread, "ratio"));
+    if let Some(t) = declared {
+        report = report.metric("aa_spread_declared", Metric::minimize(t, "ratio"));
+    }
+
+    let path = results::append(&results::root_for(root, opts.trigger), &report)
+        .map_err(|e| format!("append A/A verdict: {e}"))?;
+    Ok(Some(path))
+}
+
+/// The relative difference between the two halves of an A/A pair.
+///
+/// Medians rather than means, so one outlying repetition moves the floor by less
+/// than it moves the reading it is a floor for. Relative to the midpoint of the
+/// two, so the figure does not depend on which half is called which.
+fn aa_spread(a: &[f64], b: &[f64]) -> Option<f64> {
+    let (ma, mb) = (median(a)?, median(b)?);
+    let mid = f64::midpoint(ma, mb);
+    if mid <= 0.0 {
+        return None;
+    }
+    Some((ma - mb).abs() / mid)
+}
+
+/// The middle value of a set of readings.
+fn median(xs: &[f64]) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(f64::total_cmp);
+    Some(v[v.len() / 2])
+}
+
 /// What one repetition appended, and whether what it appended was a refusal.
 struct Measured {
     /// The results file the record went into.
@@ -779,6 +1007,10 @@ struct Measured {
     status: Status,
     /// The refusal that made this a [`Status::Failed`] record, if it is one.
     refusal: Option<String>,
+    /// The lead figure this repetition published, when it published one.
+    lead: Option<f64>,
+    /// What was measured, carried so a sweep-level verdict can name it.
+    sut: Sut,
 }
 
 /// What one measurement window produced, when it produced anything at all.
@@ -798,6 +1030,9 @@ struct Measurement {
     rows_per_s: f64,
     /// Duplicate rows the correctness gate counted in its window.
     duplicates: u64,
+    /// Seconds the target needed to have no active parts and no running merges
+    /// after this repetition's truncate, before the window opened.
+    settle_s: f64,
     /// `Ok`, or `InfraBound` when the arm outran a proven ceiling.
     status: Status,
     /// What the record's `note` should say about how it was measured.
@@ -1061,6 +1296,7 @@ fn measure(
     expected_rows: u64,
     schema_id: u32,
     base_flags: &[Flag],
+    aa_label: Option<&str>,
 ) -> Result<Measured, String> {
     let image = arm
         .image
@@ -1125,6 +1361,15 @@ fn measure(
     if outcome.as_ref().is_ok_and(|d| d.cost.was_throttled()) {
         flags.push(Flag::CpuCapThrottled);
     }
+    if outcome
+        .as_ref()
+        .is_ok_and(|d| d.cost.window_s < MIN_WINDOW_S)
+    {
+        flags.push(Flag::ShortWindow);
+    }
+    if aa_label.is_some() {
+        flags.push(Flag::AaControl);
+    }
     // Whatever the measurement itself established — today only
     // `Flag::Saturated`, decided by `Sustained::kept_up` and by nothing else.
     if let Ok(d) = &outcome {
@@ -1166,6 +1411,27 @@ fn measure(
     .variant("mode", opts.mode.name())
     .variant("partitions", i64::from(env.spec.infra.partitions))
     .variant("batches", i64::try_from(opts.batches).unwrap_or(i64::MAX));
+
+    // The data-plane envelope the arm ran under. In the variant map, so two
+    // envelopes are never medianed together as run-to-run spread — the same
+    // reason the sustained rate and window are there.
+    //
+    // The declared totals, and they are proof rather than a claim: validation
+    // asserts the data-plane containers sum to them, and `assert_arm_caps` reads
+    // each container's cap back out of its cgroup, so a record carrying these
+    // ran under them or did not run.
+    if let Some(e) = arm.entrant.spec.envelope.as_ref() {
+        report = report
+            .variant("envelope_cpus", e.cpus.clone())
+            .variant("envelope_memory", e.memory.clone());
+    }
+    // The control half of the A/A pair. In the variant map so the two halves are
+    // never medianed together as repetitions of one arm, and flagged so a
+    // consumer can drop it from the comparison: it is not a system, it is the
+    // rig measured against itself.
+    if let Some(label) = aa_label {
+        report = report.variant("aa_label", label.to_owned());
+    }
 
     // The offered rate and the window length are configuration, not measurement:
     // two sustained runs of one arm at different rates are different
@@ -1214,7 +1480,7 @@ fn measure(
             )
             .metric("cores_used", Metric::minimize(d.cost.cores_used, "cores"))
             .metric(
-                "rows_per_s_per_core",
+                LEAD_METRIC,
                 Metric::maximize(
                     if d.cost.cores_used > 0.0 {
                         d.rows_per_s / d.cost.cores_used
@@ -1268,6 +1534,20 @@ fn measure(
                 report = report.metric(key, metric);
             }
         }
+        // How long the target took to go quiet before this window opened.
+        // Minimised: it is merge work the previous repetition left, and a rising
+        // figure across a sweep is the drift `ch_rows_merged` exists to expose.
+        report = report.metric("ch_settle_us", Metric::minimize(d.settle_s * 1e6, "us"));
+        // One sampler tick as a fraction of the window this reading was taken
+        // over. A reader cannot otherwise tell a figure read at 0.1% from one
+        // read at 7%, and the two are not the same evidence.
+        report = report.metric(
+            "window_resolution",
+            Metric::minimize(
+                crate::sampler::INTERVAL_S / d.cost.window_s.max(f64::EPSILON),
+                "ratio",
+            ),
+        );
         // GC pauses and heap, for the JVM arms and no others. Emitted only
         // where the quantity exists: a Rust binary has no collector, and a bar
         // of length zero would say it paused for 0 ms, which is a claim about a
@@ -1299,6 +1579,8 @@ fn measure(
     Ok(Measured {
         path,
         status,
+        lead: report.metrics.get(LEAD_METRIC).map(|m| m.value),
+        sut: report.sut.clone(),
         refusal: outcome.err(),
     })
 }
@@ -1529,6 +1811,25 @@ fn run_arm(
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
 
+    // Wait for the server to finish acting on that truncate before the window
+    // opens. `TRUNCATE` drops parts asynchronously and leaves a merge queue, and
+    // `system.part_log` records a merge at COMPLETION — so merges started by one
+    // repetition and finishing inside the next are charged to the next. The loop
+    // is `for rep { for arm }`, so the debt lands on whichever arm runs first in
+    // each repetition, every time.
+    //
+    // Here rather than at the top of the sweep: this truncate is the largest
+    // single source of the churn, and no arm container exists yet, so the wait is
+    // outside the window at both ends.
+    let settle_s = crate::serverside::wait_until_settled(
+        &ep.ch_host,
+        ep.ch_port,
+        &ep.ch_user,
+        &ep.ch_password,
+        corpus::TABLE,
+    );
+    eprintln!("  settled in {settle_s:.1}s");
+
     // The arm's objects, recreated from the committed file every repetition so
     // no state — not a stale view definition, not an implicitly kept setting —
     // survives from one repetition into the next. The workload's own DDL is
@@ -1589,6 +1890,7 @@ fn run_arm(
             &mut containers,
             &rows_now,
             expected_rows,
+            opts.batches,
         )?,
         Mode::Sustained {
             offered_msgs_per_s,
@@ -1913,12 +2215,16 @@ fn run_arm(
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
+    let gate_batches = gate_window_batches(
+        opts.batches,
+        crate::entrant::parse_memory(&env.spec.infra.clickhouse.memory).unwrap_or(0),
+    );
     let gates = corpus::run_gates(
         &ep.ch_host,
         ep.ch_port,
         &ep.ch_user,
         &ep.ch_password,
-        GATE_MAX_BATCHES,
+        gate_batches,
     )
     .map_err(|e| with_logs(&e, &logs))?;
     if let Some(why) = gates.failure() {
@@ -1943,7 +2249,7 @@ fn run_arm(
         ));
     }
     note.push_str(&format!(
-        "; gate window {GATE_MAX_BATCHES} batches, quiesced at {} rows{}",
+        "; gate window {gate_batches} batches, quiesced at {} rows{}",
         settled.rows,
         if settled.settled {
             ""
@@ -1973,6 +2279,7 @@ fn run_arm(
         rows: rows_f,
         rows_per_s,
         duplicates: gates.duplicates,
+        settle_s,
         status,
         note,
         flags,
@@ -2008,13 +2315,15 @@ fn hold_drain_window(
     containers: &mut ArmContainers,
     rows_now: &dyn Fn() -> Option<u64>,
     expected_rows: u64,
+    batches: u64,
 ) -> Result<(Vec<(String, crate::sampler::Samples)>, Held), String> {
-    let samplers = sampler::sample_arm(names, SAMPLE_INTERVAL_S);
+    let deadline_s = drain_max_s(batches);
+    let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
     let started = Instant::now();
     let mut rows = 0u64;
     let mut probe_failures = 0u32;
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(DRAIN_POLL_MS));
 
         if let Some(why) = dead_container(names, data_plane_name, "the drain") {
             let logs = containers.stop();
@@ -2045,11 +2354,11 @@ fn hold_drain_window(
         if rows >= expected_rows {
             break;
         }
-        if started.elapsed() > Duration::from_secs(DRAIN_MAX_S) {
+        if started.elapsed() > Duration::from_secs(deadline_s) {
             let logs = containers.stop();
             return Err(with_logs(
                 &format!(
-                    "the drain did not finish within {DRAIN_MAX_S}s \
+                    "the drain did not finish within {deadline_s}s \
                      ({rows} of {expected_rows} rows)"
                 ),
                 &logs,
@@ -2168,7 +2477,7 @@ fn hold_sustained_window(
     // The window. Fixed length, because a sustained stream has no natural end —
     // this is the one place in the harness where a window has to be *sized*, and
     // `SUSTAINED_WINDOW_S` records why the size is what it is.
-    let samplers = sampler::sample_arm(names, SAMPLE_INTERVAL_S);
+    let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
     let opened = Instant::now();
     let mut probe_failures = 0u32;
     while opened.elapsed() < Duration::from_secs(window_s) {
@@ -3408,6 +3717,68 @@ fn assert_arm_caps(name: &str, declared: &Container, meta: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floor is the difference between two measurements of the same thing,
+    /// so it cannot depend on which of them is called the control.
+    #[test]
+    fn the_aa_spread_is_symmetric_and_relative() {
+        let a = [100.0, 102.0, 101.0];
+        let b = [110.0, 108.0, 109.0];
+        let ab = aa_spread(&a, &b).expect("a spread");
+        let ba = aa_spread(&b, &a).expect("a spread");
+        assert!((ab - ba).abs() < 1e-12, "{ab} vs {ba}");
+        // Medians are 101 and 109; the midpoint is 105.
+        assert!((ab - 8.0 / 105.0).abs() < 1e-12, "{ab}");
+
+        // Two measurements that agree are a floor of zero, not an absence.
+        assert_eq!(aa_spread(&a, &a), Some(0.0));
+
+        // Nothing to difference, and nothing invented from it.
+        assert_eq!(aa_spread(&[], &b), None);
+        assert_eq!(aa_spread(&a, &[]), None);
+        assert_eq!(aa_spread(&[0.0], &[0.0]), None);
+    }
+
+    /// At the corpus the old fixed count was calibrated against, the share
+    /// reproduces it — so this changes coverage only where the corpus moved.
+    #[test]
+    fn the_gate_window_is_a_share_of_the_corpus_bounded_by_memory() {
+        let sixteen_gib = 16 * 1024 * 1024 * 1024;
+        let reference = gate_window_batches(1_500_000, sixteen_gib);
+        assert!(
+            (99_000..=102_000).contains(&reference),
+            "expected ~100,000 at the reference corpus, got {reference}"
+        );
+
+        // Twenty times the corpus does not mean a twentieth of the coverage.
+        let long = gate_window_batches(30_000_000, 32 * 1024 * 1024 * 1024);
+        assert!(long > reference * 10, "{long} vs {reference}");
+
+        // Memory is the binding constraint, not the share, once the corpus is
+        // long enough — the gate is a check on a measurement already taken, so
+        // it loses that race rather than winning it.
+        assert!(gate_window_batches(u64::MAX, sixteen_gib) < 600_000);
+
+        // A window of zero batches would gate nothing while reporting a gate.
+        assert_eq!(gate_window_batches(1, 0), 1);
+    }
+
+    /// The deadline bounds what a broken drain wastes, so it has to move with
+    /// the corpus a working one has to get through.
+    #[test]
+    fn the_drain_deadline_scales_with_the_corpus() {
+        assert_eq!(
+            drain_max_s(DRAIN_MAX_REFERENCE_BATCHES),
+            DRAIN_MAX_REFERENCE_S
+        );
+        assert_eq!(
+            drain_max_s(DRAIN_MAX_REFERENCE_BATCHES * 20),
+            DRAIN_MAX_REFERENCE_S * 20
+        );
+        // Never below the calibrated floor, however small the corpus.
+        assert_eq!(drain_max_s(1), DRAIN_MAX_REFERENCE_S);
+        assert_eq!(drain_max_s(0), DRAIN_MAX_REFERENCE_S);
+    }
 
     /// A variant carrying the Flink arm's sink knobs, for the tuning tests.
     fn tunable_variant() -> Variant {

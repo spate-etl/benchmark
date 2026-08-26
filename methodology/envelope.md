@@ -4,21 +4,34 @@ Part of [the fairness contract](README.md). What each system is given, what
 the infrastructure around it is given, and the headroom rule that decides
 whether a number describes the system or the rig.
 
-**6 CPUs and 24 GiB of _data plane_ per system.** A system's control plane — a
+**32 CPUs and 96 GiB of _data plane_ per system.** A system's control plane — a
 Flink JobManager, a Connect worker's coordinator — is allocated **on top** of that
 budget, and its **measured** consumption is published alongside the arm's total
 rather than pre-charged against it.
 
-This is a deviation from the more obvious rule ("6 CPU / 24 GiB total, control
+The envelope is a **fairness constraint between arms, not a share of the host**,
+and it is sized from the host and the partition count — never from any arm's
+scaling curve, which would size the contract to one entrant. It is 32 because
+the host affords one envelope CPU per partition for every arm identically:
+32 partitions bound how much consumer parallelism an arm can spend, and a wider
+envelope than the topic cannot be spent. On the retired 32-core host the
+envelope was 6 — what remained beside the infrastructure — and at 6 CPUs
+against 8 partitions no arm exercised vertical scaling at all, which penalised
+the frameworks built for parallelism hardest. The 96-core host inverts that
+arithmetic, and the arms that gain are exactly the ones the old cap bound:
+vector spends 31.8 of the 32 CPUs the moment they exist.
+
+This is a deviation from the more obvious rule ("32 CPU / 96 GiB total, control
 plane included"), it is deliberate, and it is disclosed here and on the site
 because it favours the multi-process arms:
 
 > Charging a whole JobManager against a single TaskManager is an artefact of
 > running one TaskManager. In production one JobManager serves an entire cluster,
-> so a per-TM share of it is a rounding error. Measurement bears this out — across
-> the published Flink runs the JobManager consumed **0.066 to 0.088 cores**, so
-> charging it a full core would have taxed Flink roughly 13× its real cost, and
-> the resulting "win" would have been an artefact of our own accounting.
+> so a per-TM share of it is a rounding error. Measurement bears this out — the
+> JobManager consumed **0.030 cores** at `parallelism = 32` on the current rig
+> (0.066–0.088 at `parallelism = 8` on the retired one), so charging it a full
+> core would tax Flink over 30× its real cost, and the resulting "win" would
+> be an artefact of our own accounting.
 
 Every arm therefore publishes two figures: the arm total, and
 `data_plane_cores_used` / `data_plane_peak_anon_bytes` for the data plane alone. A
@@ -36,9 +49,17 @@ instead of hiding in a swapfile.
 
 ## Why memory is generous, and what that does to the memory number
 
-CPU is the scarce resource here and memory is not: one arm runs at a time, and
-no arm in this workload needs more than a couple of gigabytes to do its job. So
-every arm gets 24 GiB — several times what any of them will touch.
+CPU is the scarce resource here and memory is not: one arm runs at a time, so
+the host's memory only ever holds one envelope beside the infrastructure. Every
+arm gets 96 GiB — 3 GiB per envelope CPU — against a largest measured peak of
+56 GiB (vector, whose prefetch and in-flight batches scale with its request
+concurrency). JVM process totals keep their 24 GiB-era
+sizing rather than scaling with the container: on this envelope every larger
+heap tried measured slower — GC churn grows with the heap while the live set
+does not, and past ~32g the JVM also drops compressed references — so the
+envelope's extra memory serves the page cache and native buffers instead.
+`entrants_are_valid` bounds each JVM between that era sizing and the
+compressed-oops boundary.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would
@@ -59,31 +80,31 @@ minimum footprint. "How small can this run?" is a different question, and
 answering it properly means a separate sweep that tightens each arm until it
 degrades. That would be worth publishing; it is not what these numbers are.
 
-Every arm publishes `peak_anon` and `memory.peak`. JVM arms are specified to
-publish configured versus actually-used heap as well, so that the gap between
-allocation and use is visible rather than implied; that part is not yet measured
-and is marked as such in the table below.
+Every arm publishes `peak_anon` and `memory.peak`. JVM arms publish configured,
+committed and live heap beside them (`jvm_heap_*`), so the gap between
+allocation and use is visible rather than implied.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(3 CPUs, 8 GiB) and ClickHouse (16 CPUs, 16 GiB) in the committed environment
+(3 CPUs, 8 GiB) and ClickHouse (32 CPUs, 32 GiB) in the committed environment
 profile.
 
-Those two numbers are the output of a measured search rather than a guess: the
-broker's cap was swept against the measured consume ceiling until it was the
-smallest allocation that does not constrain it (one core fewer costs 24% of the
-ceiling — the broker runs a reactor shard per core — while the cap above it
-measures identically), and ClickHouse was given the cores that freed, since its
-ingest ceiling scales near-linearly with every core it is offered. The host
-bounds the total: the arm's 6 CPUs, the driver and the sampler must still fit
-beside the infrastructure.
+Those numbers are the output of a measured ladder rather than a guess. The
+consume ceiling is flat from 8 to 32 partitions and from a 3-core broker cap to
+an 8-core one (the broker never uses 2 full cores while serving it), so the
+broker keeps the smallest cap that does not constrain it. ClickHouse ingest
+stops scaling at about 28 cores — RowBinary reaches 6.0M rows/s at a throttled
+16-core cap, 11.0M at 32, and the same 11.0M at 48 and 64 with the extra cores
+idle — so it gets 32, the smallest cap at that plateau. Every core past the
+plateau buys background merges rather than ceiling, which is contention inside
+the measurement, not headroom. The host bounds the total: 3 + 32 + 32 leaves 29
+of 96 cores for the driver, the sampler and the operating system.
 
-One consequence of an 8-partition topic worth stating normatively: a consumer
+One consequence of a 32-partition topic worth stating normatively: a consumer
 thread count below the partition count leaves the slowest consumer owning two
-partitions, and the drain runs at that consumer's pace — a 6-thread arm on 8
-partitions measures the same as a 4-thread one. Per-entrant parallelism knobs
-are therefore sized to the **partition count**, oversubscribed on the envelope's
-CPUs, not to the CPU count.
+partitions, and the drain runs at that consumer's pace. Per-entrant parallelism
+knobs are therefore sized to the **partition count**, not to the CPU count — on
+this rig the two rules land on the same number.
 
 The Schema Registry is **Redpanda's built-in, Confluent-compatible one** on port
 8081 rather than a separate Confluent container. That removes a second JVM from

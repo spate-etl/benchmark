@@ -43,19 +43,19 @@ context    = "../.."
 dockerfile = "Dockerfile"
 image      = "spate-bench-spate"
 
-# 24 GiB, the same as every other arm, and far more than this arm will use. The
+# 96 GiB, the same as every other arm, and far more than this arm will use. The
 # point is that no system is memory-bound: a GC-managed runtime that has to
 # collect more often than it otherwise would is being measured on our allocation
 # choice rather than on its own design.
 [envelope]
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [[envelope.container]]
 role   = "data-plane"
 name   = "sut"
-cpus   = "6"
-memory = "24g"
+cpus   = "32"
+memory = "96g"
 
 [guarantees]
 delivery    = "at-least-once"
@@ -99,7 +99,7 @@ label    = "Spate · Native"
 approach = "realistic"
 default  = true
 env      = { FORMAT = "native" }
-knobs    = { threads = 8, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144 }
 reports  = { wire_format = "native" }
 
 # The wire-format control, and the arm to read against Flink: it separates "the
@@ -111,5 +111,5 @@ id       = "rowbinary"
 label    = "Spate · RowBinary"
 approach = "realistic"
 env      = { FORMAT = "rowbinary" }
-knobs    = { threads = 8, shards = 8, inflight = 4, linger_ms = 500, max_rows = 262144 }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144 }
 reports  = { wire_format = "rowbinary" }

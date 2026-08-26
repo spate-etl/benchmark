@@ -31,9 +31,11 @@ for seq in 0..100:
 `(batch_id, seq)` is the row identity. `uniqExact((batch_id, event_seq))` is
 therefore the loss gate and `count() - uniqExact(...)` the duplicate count — both
 exact, and both taken over a **bounded window** rather than the whole corpus. The
-window is the top 100,000 batches of the landed range, which against the published
-1,500,000-batch corpus is 6.7% of it, about ten million rows before the
-workload's filters.
+window is the top of the landed range, sized as a share: 6.7% of the corpus,
+bounded by what a quarter of ClickHouse's memory allows at the measured ~7.5 KiB
+per batch. Against the published 40,000,000-batch corpus and the 32 GiB
+allocation the memory bound decides, about 1.15M batches — and the window each
+run actually used is written into its record's note.
 
 The bound is not a convenience. Exact-distinct needs a hash set proportional to
 cardinality, and running it across the full 150M-row corpus asked ClickHouse for
@@ -105,6 +107,7 @@ asserts it stays in step with the constant in `harness/src/report.rs`.
 
 | Version | Date | Change |
 |---|---|---|
+| 2 | 2026-08-24 | Every repetition waits for the target to report no active parts and no running merges before its window opens, so a repetition pays for its own merges rather than its predecessor's. Sampler at 10 Hz, drain polled at 250 ms, and a 120-second floor on the measurement window with `window_resolution` and `short_window` on every record. Every sweep measures its own first arm a second time under a second label and publishes the difference as a `verdict` record. The correctness gate examines a share of the corpus bounded by ClickHouse's memory rather than a fixed count. The arm envelope a number was measured under is on the record. `infra_digest` covers the storage layout. |
 | 1 | 2026-07-29 | Initial protocol. One measurement window — throughput, mean cores and CPU-per-row divide by the sampler's own window. Headroom gated against both ceilings, with a ceiling measured at the wrong message size or under a different infrastructure envelope refused rather than extrapolated. Gate set covers row count and every derived column. Sustained mode and latency. Peak memory is what an arm held at one instant across its containers. Server-side cost, GC pauses and JVM heap measured. |
 
 What each change was and why is in the commit that made it; this table exists to
@@ -147,12 +150,12 @@ produces a diff confined to one file.
 
 ## Host caveat
 
-Published measurements run on `c8g-8xl-ec2-docker`: a fresh, single-tenant EC2
-c8g.8xlarge per run — Linux, 32 homogeneous physical cores with no SMT, no VM
-between the harness and the kernel. Its environment profile declares
-`class = "authoritative"`, and the exact machine, storage provisioning and
-launch pipeline are committed in this repository, so the environment is
-reproducible with an AWS account rather than with access to anyone's hardware.
+Published measurements run on `c8gd-metal-24xl-ec2-docker`: a fresh EC2
+c8gd.metal-24xl per run — bare-metal Linux, 96 homogeneous physical cores with
+no SMT and no hypervisor. Its environment profile declares
+`class = "authoritative"`, and the exact machine, storage layout and launch
+pipeline are committed in this repository, so the environment is reproducible
+with an AWS account rather than with access to anyone's hardware.
 
 The site shows run-to-run spread on every chart and carries full environment
 provenance in every record. Environments are never drawn on one axis: results

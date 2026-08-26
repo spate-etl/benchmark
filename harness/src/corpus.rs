@@ -1263,37 +1263,71 @@ pub fn prefill(
     );
 
     let start = Instant::now();
-    let mut bytes = 0u64;
-    for batch_id in 0..batches {
-        let datum = encode_batch(batch_id, send_ts_us_prefill(batch_id));
-        let payload = frame_confluent(schema_id, &datum);
-        bytes += payload.len() as u64;
-        let key = sensor_of(batch_id);
-        let partition =
-            i32::try_from(batch_id % u64::try_from(partitions).expect("partitions > 0"))
-                .expect("partition fits i32");
-        loop {
-            match producer.send(
-                BaseRecord::to(topic)
-                    .partition(partition)
-                    .key(&key)
-                    .payload(&payload),
-            ) {
-                Ok(()) => break,
-                Err((e, _))
-                    if e.rdkafka_error_code()
-                        == Some(rdkafka::types::RDKafkaErrorCode::QueueFull) =>
-                {
-                    producer.poll(Duration::from_millis(5));
+
+    // One thread per partition, and the shape is what makes it safe.
+    //
+    // A message's partition is `batch_id % partitions`, computed here rather
+    // than left to a partitioner, so partition `p` holds exactly the batch ids
+    // `p, p + partitions, p + 2*partitions, …` in increasing order. Giving each
+    // partition its own thread reproduces that sequence exactly: the same bytes,
+    // in the same partitions, in the same order within each. Sharding by a
+    // contiguous batch-id range instead would interleave the writers inside a
+    // partition and change the log's order.
+    //
+    // `encode_batch` and the generator it calls are untouched, and this function
+    // sits outside the `dataset-version` region, so nothing here moves
+    // `DATASET_VERSION`.
+    let bytes = std::sync::atomic::AtomicU64::new(0);
+    std::thread::scope(|scope| {
+        for p in 0..partitions {
+            let bytes = &bytes;
+            scope.spawn(move || {
+                // A producer per thread: `BaseProducer` is not shared, and one
+                // queue per partition is also what keeps a slow partition from
+                // stalling the others behind a full shared queue.
+                let producer: BaseProducer = ClientConfig::new()
+                    .set("bootstrap.servers", bootstrap)
+                    .set("linger.ms", "20")
+                    .set("batch.size", "1048576")
+                    .set("compression.type", "none")
+                    .create()
+                    .expect("prefill producer");
+                let stride = u64::try_from(partitions).expect("partitions > 0");
+                let mut local = 0u64;
+                let mut batch_id = u64::try_from(p).expect("partition fits u64");
+                while batch_id < batches {
+                    let datum = encode_batch(batch_id, send_ts_us_prefill(batch_id));
+                    let payload = frame_confluent(schema_id, &datum);
+                    local += payload.len() as u64;
+                    let key = sensor_of(batch_id);
+                    loop {
+                        match producer.send(
+                            BaseRecord::to(topic)
+                                .partition(p)
+                                .key(&key)
+                                .payload(&payload),
+                        ) {
+                            Ok(()) => break,
+                            Err((e, _))
+                                if e.rdkafka_error_code()
+                                    == Some(rdkafka::types::RDKafkaErrorCode::QueueFull) =>
+                            {
+                                producer.poll(Duration::from_millis(5));
+                            }
+                            Err((e, _)) => panic!("prefill produce: {e}"),
+                        }
+                    }
+                    if batch_id.is_multiple_of(4096) {
+                        producer.poll(Duration::ZERO);
+                    }
+                    batch_id += stride;
                 }
-                Err((e, _)) => panic!("prefill produce: {e}"),
-            }
+                producer.flush(Duration::from_secs(300)).expect("flush");
+                bytes.fetch_add(local, std::sync::atomic::Ordering::Relaxed);
+            });
         }
-        if batch_id.is_multiple_of(4096) {
-            producer.poll(Duration::ZERO);
-        }
-    }
-    producer.flush(Duration::from_secs(300)).expect("flush");
+    });
+    let bytes = bytes.load(std::sync::atomic::Ordering::Relaxed);
 
     let landed = topic_depth(&producer, topic, partitions);
     assert_eq!(
@@ -1524,9 +1558,15 @@ pub fn run_gates(
     password: &str,
     max_batches: u64,
 ) -> Result<Gates, String> {
+    // The window is a share of the corpus, so the exact-distinct grows with it
+    // and outlives the default HTTP read timeout on a long corpus. The gate
+    // runs after the measurement window closes, so its patience costs nothing
+    // measured.
+    const GATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let sql = |q: &str| -> Result<Vec<String>, String> {
-        let body = crate::docker::clickhouse_sql(host, port, user, password, q)
-            .map_err(|e| format!("gate query failed ({q}): {e}"))?;
+        let body =
+            crate::docker::clickhouse_sql_slow(host, port, user, password, q, GATE_QUERY_TIMEOUT)
+                .map_err(|e| format!("gate query failed ({q}): {e}"))?;
         Ok(body.trim().split(['\t', '\n']).map(str::to_owned).collect())
     };
     let num = |s: &str| -> Result<i128, String> {

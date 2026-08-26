@@ -51,7 +51,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// numbers?" is a judgement; a content hash would answer yes to every typo fix
 /// and shatter every comparability group in the archive. `methodology/`
 /// carries a row per version and CI asserts the two stay in step.
-pub const HARNESS_VERSION: u32 = 1;
+pub const HARNESS_VERSION: u32 = 2;
 
 /// Version of the **corpus**: the Avro schema, the ClickHouse DDL, and the
 /// generator constants.
@@ -252,6 +252,21 @@ pub enum Flag {
     UnpublishableEnvironment,
     /// Infrastructure containers were reused rather than recreated.
     ReusedInfra,
+    /// One half of the sweep's A/A control: the same arm measured a second time
+    /// under a second label.
+    ///
+    /// Not a system in the comparison. Its number exists to be differenced
+    /// against its twin's, and the difference is the spread the rig produces
+    /// when nothing changes.
+    AaControl,
+    /// The measurement window fell below the floor the protocol declares.
+    ///
+    /// A drain's window is `corpus / throughput`, so it shrinks as arms get
+    /// faster and has no lower bound of its own. Both ends of the CPU delta are
+    /// sampler readings while the row count is the whole corpus, so a short
+    /// window reads flatteringly low. `window_resolution` on the same record
+    /// says what it was read at.
+    ShortWindow,
 }
 
 /// One measured quantity, carrying its unit and its direction of goodness.
@@ -404,8 +419,9 @@ pub struct Sut {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Infra {
     /// Stable hash over the envelope-defining subset only — cpus, memory,
-    /// partitions, broker family. Deliberately excludes versions, so a
-    /// ClickHouse patch release does not split a comparability group.
+    /// partitions, broker family, storage layout. Deliberately excludes
+    /// versions, so a ClickHouse patch release does not split a comparability
+    /// group.
     pub digest: String,
     /// Broker family, e.g. `redpanda`.
     pub broker: String,
@@ -427,6 +443,14 @@ pub struct Infra {
     pub clickhouse_memory: String,
     /// Topic partition count.
     pub partitions: i32,
+    /// What the measured data paths sat on: `shared-root` or `local-nvme`.
+    /// Part of `digest` above.
+    ///
+    /// Additive: [`SCHEMA_VERSION`] stays at 2 and this is `#[serde(default)]`,
+    /// so a record without the field still deserialises, with an empty string
+    /// meaning "not stated".
+    #[serde(default)]
+    pub storage: String,
     /// Schema Registry implementation, e.g. `redpanda-builtin`.
     pub registry: String,
     /// The measured consume ceiling this run was gated against, in **messages**
@@ -724,6 +748,7 @@ mod tests {
             clickhouse_cpus: "500000 100000".to_owned(),
             clickhouse_memory: "12884901888".to_owned(),
             partitions: 8,
+            storage: "local-nvme".to_owned(),
             registry: "redpanda-builtin".to_owned(),
             ceiling_msgs_per_s: 305_554,
             ceiling_bytes_per_s: 256_700_000,

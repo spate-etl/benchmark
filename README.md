@@ -62,12 +62,13 @@ system does not re-run or overwrite any other.
 
 ## Current state
 
-Measurements are produced on `c8g-8xl-ec2-docker`: a fresh, single-tenant EC2
-c8g.8xlarge per run — Linux, 32 homogeneous physical cores, no SMT, no VM
-between the harness and the kernel — launched by an approval-gated pipeline and
-terminated when the run ends. Its profile declares `class = "authoritative"`,
-and that label is rendered from the environment's declared class rather than
-hardcoded anywhere in the site.
+Measurements are produced on `c8gd-metal-24xl-ec2-docker`: a fresh EC2
+c8gd.metal-24xl per run — bare-metal Linux, 96 homogeneous physical cores, no
+SMT, no hypervisor, ClickHouse and the broker each on their own local NVMe
+device — launched by an approval-gated pipeline and terminated when the run
+ends. Its profile declares `class = "authoritative"`, and that label is
+rendered from the environment's declared class rather than hardcoded anywhere
+in the site.
 
 ## Repository layout
 
