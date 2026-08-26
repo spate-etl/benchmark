@@ -99,13 +99,19 @@ label    = "Spate · Native"
 approach = "realistic"
 default  = true
 env      = { FORMAT = "native" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144 }
+# `linger_ms` exceeds the time a shard takes to fill `max_rows`, so a batch
+# seals on rows. Below that the linger seals it first and caps the batch
+# regardless of `max_rows`.
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576 }
 reports  = { wire_format = "native" }
 
-# The wire-format control, and the arm to read against Flink: it separates "the
-# framework is faster" from "we chose a faster wire format". ClickHouse's
+# The arm to read against Flink, which writes the same wire format: ClickHouse's
 # official Flink connector can only write RowBinaryWithNamesAndTypes because the
 # Java client has no Native writer (clickhouse-java#2509).
+#
+# Its batching differs from the Native variant's, so the pair separates "the
+# framework is faster" from "we chose a faster wire format" only once both
+# carry the same batch settings.
 [[variants]]
 id       = "rowbinary"
 label    = "Spate · RowBinary"
