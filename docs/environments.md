@@ -48,7 +48,7 @@ hardware.
 
 ## The envelope
 
-**Per system: 6 CPUs and 24 GiB of data plane.** A control plane — a Flink
+**Per system: 32 CPUs and 96 GiB of data plane.** A control plane — a Flink
 JobManager, a Connect coordinator — is allocated on top, with its *measured*
 consumption published alongside the arm's total rather than pre-charged against
 it. Swap is disabled so memory pressure surfaces rather than hiding.

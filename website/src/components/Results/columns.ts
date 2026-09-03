@@ -81,7 +81,7 @@ const CATALOGUE_LIST: MetricSpec[] = [
     id: 'peak_anon_bytes',
     label: 'Peak memory',
     gloss:
-      'Peak anonymous memory under a deliberately generous 24 GiB cap — what a system chooses to use, not a minimum footprint.',
+      'Peak anonymous memory under a deliberately generous 96 GiB cap — what a system chooses to use, not a minimum footprint.',
     placement: 'default',
   },
   {

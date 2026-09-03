@@ -173,11 +173,40 @@ pub enum Kind {
     LocalNvme,
 }
 
+/// Which broker family serves the corpus.
+///
+/// An enum rather than a string because `methodology/comparability.md` now
+/// claims that a different broker family is a different comparability group,
+/// and a free-text field cannot be held to that: `kind = "redpanda "` would
+/// silently be a fourth family with a digest of its own.
+///
+/// It is also the deliberate act. Adding a variant here is the same edit that
+/// moves [`Environment::infra_digest`], so a second broker cannot be introduced
+/// without somebody passing through the code that decides what may be compared
+/// with what — the same reason [`Class::publication_bar`] is an exhaustive
+/// match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrokerKind {
+    /// Redpanda, with its built-in Confluent-compatible registry.
+    Redpanda,
+}
+
+impl BrokerKind {
+    /// The digest token, and the word a reader sees on every record.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Redpanda => "redpanda",
+        }
+    }
+}
+
 /// The broker and its built-in registry.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Broker {
-    pub kind: String,
+    pub kind: BrokerKind,
     pub image: String,
     pub cpus: String,
     pub memory: String,
@@ -319,7 +348,7 @@ impl Environment {
         short_digest(
             format!(
                 "{}|{}|{}|{}|{}|{}|{}",
-                i.broker.kind,
+                i.broker.kind.as_str(),
                 i.broker.cpus,
                 i.broker.memory,
                 i.clickhouse.cpus,
@@ -439,7 +468,7 @@ mod tests {
         Infra {
             partitions: 8,
             broker: Broker {
-                kind: "redpanda".to_owned(),
+                kind: BrokerKind::Redpanda,
                 image: "redpandadata/redpanda:v26.1.13".to_owned(),
                 cpus: "3".to_owned(),
                 memory: "8g".to_owned(),

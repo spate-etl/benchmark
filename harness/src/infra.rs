@@ -218,7 +218,7 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
 
     let infra = Infra {
         digest: env.infra_digest(),
-        broker: b.kind.clone(),
+        broker: b.kind.as_str().to_owned(),
         broker_version: broker_version(),
         broker_image_digest: image_digest(BROKER),
         broker_cpus,
