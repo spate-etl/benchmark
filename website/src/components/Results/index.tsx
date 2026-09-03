@@ -226,7 +226,7 @@ export default function Results(): React.JSX.Element {
           then straight into the table. No verdict: the reader makes their own. */}
       <div className="bench-strip">
         <p className="bench-strip__what">
-          <strong>Kafka → Avro → ClickHouse.</strong> 6 CPU and 24 GiB of data plane per
+          <strong>Kafka → Avro → ClickHouse.</strong> 32 CPU and 96 GiB of data plane per
           system, at-least-once. Every system consumes the same topic, decodes and flattens
           each message, applies the same two filters and two derived columns, and lands the
           surviving rows in ClickHouse.

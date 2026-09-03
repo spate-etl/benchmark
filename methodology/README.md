@@ -44,9 +44,9 @@ as marketing and convinces nobody.
 
 ## The pipeline
 
-Consume one Kafka topic of Confluent-framed Avro `SensorBatch` messages, decode
-them, flatten each message's `events` array into one row per event, and insert
-those rows into ClickHouse.
+Consume one topic of Confluent-framed Avro `SensorBatch` messages from the
+broker the environment declares, decode them, flatten each message's `events`
+array into one row per event, and insert those rows into ClickHouse.
 
 - Schema: [`workload/schema/sensor_batch.avsc`](workload/schema/sensor_batch.avsc)
   — read this file, do not re-declare the schema inline. The `events` array
@@ -57,7 +57,13 @@ those rows into ClickHouse.
   the `sensor_events` table. Column order is the wire contract.
 - Wire format: Confluent framing (`0x00` + big-endian u32 schema id + datum),
   subject `comparison-sensor-batches-value` — the topic-name-strategy name for
-  the topic — against a live Schema Registry.
+  the topic — against a live Schema Registry. The framing belongs to the
+  environment rather than to the pipeline: a broker that ships no registry
+  carries the bare datum instead. That is the same decode over the same bytes,
+  and the arm declares it under rule 4.
+- Source: the broker is whichever one the environment profile declares. It is
+  not a free choice per arm, and two broker families are never compared —
+  see [what makes two numbers comparable](comparability.md).
 
 **The transform**, applied to every decoded row, in this order — drop rows where
 `unit = 'drop'` (the sentinel); drop rows where `quality` is non-null and
