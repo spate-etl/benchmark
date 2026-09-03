@@ -1,0 +1,71 @@
+schema = 1
+
+[entrant]
+id       = "iggy"
+name     = "Apache Iggy connectors"
+homepage = "https://iggy.apache.org"
+repo     = "https://github.com/apache/iggy"
+docs     = "https://iggy.apache.org/docs/connectors/overview"
+licence  = "Apache-2.0"
+vendor   = "apache"
+kind     = "connector-runtime"
+language = ["rust"]
+runtime  = "native"
+status   = "planned"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 70
+hue   = 100
+short = "Iggy"
+
+[planned]
+tracking = "https://github.com/spate-etl/benchmark/issues/62"
+
+# Read against apache/iggy at commit 412014a (2026-09-03). Every line reference
+# below is that tree. All three findings are about Iggy's CONNECTOR RUNTIME
+# (iggy-connectors 0.5.0-edge.6, connector SDK 0.4.0-edge.3) and say nothing
+# about the Iggy broker, which this suite has never measured.
+blockers = """
+Its connector runtime cannot deliver a decoded Avro payload to any sink. The
+runtime labels a batch with the decoder's schema rather than the type the
+decoder produced (core/connectors/runtime/src/sink.rs:362), while the bytes
+beside it are the decoded payload — JSON, because every converting decoder
+renders to JSON. The SDK rebuilds the payload from that label
+(core/connectors/sdk/src/sink.rs:199), so the ClickHouse sink is handed a
+Payload::Avro holding JSON and drops it: both its body builders match
+Payload::Json alone (sinks/clickhouse_sink/src/body.rs:44-58 and :76-86). The
+empty body then returns Ok(()), so nothing surfaces as an error. The same
+defect hits proto and flatbuffer; only json, text and raw round-trip. No shipped
+configuration avoids it, and no test in that tree exercises a non-JSON schema
+through a sink.
+
+Its consumer is at-most-once, which this suite compares guarantee-for-guarantee.
+The runtime hard-codes AutoCommit::When(AutoCommitWhen::PollingMessages)
+(core/connectors/runtime/src/sink.rs:522), documented upstream as sending "the
+commit with the poll request itself, before your code sees the batch"
+(core/sdk/src/clients/consumer.rs:501). A crash between poll and insert loses
+the batch. No sink or stream config field exposes auto-commit, and upstream's
+own docs name the crash-safe alternative the runtime does not use. An arm
+cannot honestly declare [guarantees] delivery = "at-least-once", and the
+contract has no slot for a system whose only shipped mode is weaker than that.
+
+Its fetch path cannot use the envelope. The runtime builds one consumer client
+for the whole process (core/connectors/runtime/src/stream.rs:68-75) and creates
+every stream consumer from it, and that connection is lockstep — one request in
+flight per client (core/sdk/src/tcp/tcp_client.rs:1403). So one poll is
+outstanding at a time however many [[streams]] entries are configured, and a
+32-CPU envelope cannot be spent. Unlike the two above this is a legitimate
+architectural result rather than a defect, and would be worth publishing on its
+own — but not as one asterisk among three.
+
+Taken together an arm would measure our own patched build, running a weaker
+delivery guarantee than every other arm, bounded by a connection limit no tuning
+reaches. Rule 7 is the test: sending that configuration upstream and asking
+"did we handicap you?" has no good answer. Revisit when the runtime propagates
+the payload's schema and exposes offset-commit semantics, and when the Spate
+connectors (spate-etl/spate#358, #359) exist to compare against.
+"""
