@@ -73,7 +73,7 @@ hand-maintained.
 
 ## What invalidates a comparison
 
-Three properties are **hard**: records that differ in any of them are never drawn
+Four properties are **hard**: records that differ in any of them are never drawn
 on the same axis, and the site renders an explicit "not comparable" note instead of
 quietly averaging them.
 
@@ -81,7 +81,8 @@ quietly averaging them.
 |---|---|---|
 | `harness_version` | The measurement protocol changes in a way that moves numbers — the definition of the measurement window, the drain protocol, sampler semantics, the gate set, envelope enforcement. Not when a log message changes. | Whole result set split |
 | `dataset_version` | The corpus changes. Derived — from the parsed values of `workload.toml`, the bytes of the Avro schema, the normalised DDL, and the marked generator region of `harness/src/corpus.rs` — so it moves when the generator's *arithmetic* changes and not when a comment does. It cannot be forgotten. | Whole result set split |
-| `env_id` | Different hardware or a different infrastructure envelope. | Comparable only within an environment |
+| `env_id` | Different hardware or a different infrastructure envelope. Because a profile declares exactly one broker, a different broker family is necessarily a different environment. | Comparable only within an environment |
+| `infra_digest` | The **shape** of the shared infrastructure changes: broker family, the broker and ClickHouse CPU and memory caps, the partition count, the storage layout. Derived in `Environment::infra_digest`, and deliberately excluding versions — a ClickHouse patch release is soft provenance. | Whole result set split |
 
 One further axis is never drawn on one scale, and it is a property of the
 experiment rather than of the protocol, so it does not version the archive — the
@@ -97,6 +98,37 @@ Softer provenance — a ClickHouse patch release, a compiler version, a broker
 version — is recorded on every record and rendered as a footnote. Refusing to
 compare across a ClickHouse patch would make the suite unusable; refusing across a
 protocol change is the entire point.
+
+### The source system
+
+The pipeline names a broker only as the one the environment declares, so an arm
+reading something other than Kafka is running this benchmark rather than a
+different one. It is still never compared with the Kafka arms, and it does not
+need a new mechanism to say so: an environment profile declares exactly one
+broker, so a second broker family is a second profile and therefore a second
+`env_id`, which is already hard. `infra_digest` guards the same fact from the
+other direction — against a profile edited in place to swap its broker — and
+`Ceilings::gate` refuses any ceiling measured under a different one.
+
+**The corpus does not move, and that is deliberate.** `dataset_version` is
+derived from what the data *is*: the generator's arithmetic, the Avro schema, the
+tunables and the DDL. A second producer that reuses `encode_batch` from the
+marked region of `harness/src/corpus.rs` puts byte-identical datums on a
+different broker, so the version correctly stands still. Versioning the corpus to
+record a fact about *transport* would split every published record to say
+something the corpus does not contain. What the arm owes instead is the
+correctness gate, which compares landed rows against closed-form expectations
+derived from `batch_id` and is indifferent to how they arrived.
+
+The wire framing is the environment's rather than the pipeline's. Confluent
+framing is a pointer into a registry, and a broker that ships no registry carries
+the bare datum instead — the same decode over the same bytes, declared by the arm
+under rule 4.
+
+The consequence a reader has to know is that the 70% headroom rule needs one
+consume ceiling **per broker**. A ceiling measured against one broker says
+nothing about another, `Ceilings::gate` refuses it rather than scaling it, and
+until one exists the arm publishes with its headroom unproven.
 
 ### Harness versions
 
