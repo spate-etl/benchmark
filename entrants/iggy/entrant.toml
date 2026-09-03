@@ -23,7 +23,7 @@ hue   = 100
 short = "Iggy"
 
 [planned]
-tracking = "https://github.com/spate-etl/benchmark/issues/62"
+tracking = "https://github.com/spate-etl/benchmark/issues/65"
 
 # Read against apache/iggy at commit 412014a (2026-09-03). Every line reference
 # below is that tree. All three findings are about Iggy's CONNECTOR RUNTIME
