@@ -7,13 +7,6 @@
 # Maven build output for the Flink entrant.
 entrants/*/target
 
-# Docusaurus site (website/)
-website/node_modules
-website/build
-website/.docusaurus
-website/.cache-loader
-npm-debug.log*
-yarn-error.log
 
 # Result shards under website/static/bench are GENERATED from results/ at build
 # time. The JSONL in results/ is the source of truth and is committed; the
