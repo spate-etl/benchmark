@@ -3,7 +3,7 @@
 A published, reproducible comparison of streaming ETL systems on one fixed
 pipeline: **Kafka → Avro → ClickHouse**.
 
-Results: **https://spate-benchmark.kainth.dev**
+Results: **https://spate.kainth.dev/benchmarks/**
 
 ## Who runs this, and why that matters
 
@@ -79,8 +79,12 @@ entrants/      one directory per system. Adding a system touches nothing else.
 workload/      the one canonical workload: Avro schema, ClickHouse DDL, generator.
 environments/  hardware profiles, referenced by id from every record.
 results/       append-only JSONL, partitioned by environment and system.
-website/       the published site.
 ```
+
+The results site is part of the [Spate site](https://spate.kainth.dev/benchmarks/),
+which includes this repository as a git submodule and renders `results/`,
+`entrants/`, `environments/`, `methodology/` and `docs/` from it. A new
+measurement reaches the site when that pin moves.
 
 **[methodology/](methodology/) is normative.** Every implementation here,
 including Spate's own, conforms to it. It is the complete specification for an
