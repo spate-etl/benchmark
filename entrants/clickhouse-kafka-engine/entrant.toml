@@ -21,7 +21,7 @@ review_url        = ""
 [display]
 order = 50
 hue   = 55
-short = "CH Kafka"
+short = "ClickHouse Kafka"
 
 [version]
 # Resolved by running the built image: `clickhouse local` prints the server
@@ -108,7 +108,7 @@ interval the record declares would not be the one in force.
 # format against Spate's `native`, not Flink's `rowbinary_nt`.
 [[variants]]
 id       = "distributed"
-label    = "ClickHouse Kafka engine · Distributed forward"
+label    = "ClickHouse Kafka · Distributed forward"
 approach = "realistic"
 default  = true
 knobs    = { num_consumers = 32, block_msgs = 16384, flush_ms = 5000, poll_timeout_ms = 500 }

@@ -28,7 +28,7 @@ reviewed_upstream = false
 [display]
 order = 40
 hue   = 275
-short = "Connect"
+short = "Kafka Connect"
 
 [version]
 # Read from the jar filenames that actually run: the Connect runtime jar in the
