@@ -91,23 +91,17 @@ test('the separator goes with the prefix, whichever one the descriptor used', ()
   assert.equal(armLabel(system('Vector', 'Vector'), arm('arrow', 'Vector:ArrowStream'), 'arrow'), 'ArrowStream');
 });
 
-// Fails against `armLabel` as written: the match tests only `startsWith`, so a
-// prefix that ends mid-word is taken as the system name and the tail of that
-// word is rendered as the arm. Today this renders "ised batch · RowBinary".
+// The prefix has to end where a word ends, so a short that runs out mid-word
+// does not strip. Every case above ends its prefix on whitespace or a
+// separator, Flink's " 2.2.1 …" included, so the boundary is invisible to them.
 //
-// The guard is to require the prefix to end on a word boundary before
-// stripping — with `next = label.slice(prefix.length)`, proceed only when
-// `next === '' || /^[\s·:—-]/.test(next)`. That leaves every case above
-// unchanged, Flink's " 2.2.1 …" included, because each of those ends the
-// prefix on whitespace or a separator.
-//
-// It does not cover a prefix that ends on a word boundary but is followed by
-// more of the system's own name — "ClickHouse Kafka" against "ClickHouse Kafka
-// engine · Distributed forward" stripped to "engine · Distributed forward".
-// Nothing syntactic separates that from Flink's " 2.2.1 · RowBinary", which is
-// stripped on purpose, so the descriptor states a label the short is an exact
-// prefix of instead.
-test('a label that merely opens with the same letters as the short is left alone', {todo: 'armLabel matches on startsWith, with no word boundary'}, () => {
+// The boundary does not reach a prefix that ends on a real word ending and is
+// followed by more of the system's own name. "ClickHouse Kafka" against
+// "ClickHouse Kafka engine · Distributed forward" strips to "engine ·
+// Distributed forward", and nothing syntactic separates that from Flink's
+// " 2.2.1 · RowBinary", which strips on purpose. That one is answered in the
+// descriptor, by a variant label the short is an exact prefix of.
+test('a label that merely opens with the same letters as the short is left alone', () => {
   assert.equal(
     armLabel(system('Vector', 'Vector'), arm('batched', 'Vectorised batch · RowBinary'), 'batched'),
     'Vectorised batch · RowBinary',

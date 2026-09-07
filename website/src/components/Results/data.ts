@@ -399,7 +399,12 @@ export function armLabel(
   if (!label) return fallback;
   for (const prefix of [e?.entrant.name, e?.display?.short].filter(Boolean) as string[]) {
     if (label.toLowerCase().startsWith(prefix.toLowerCase())) {
-      const rest = label.slice(prefix.length).replace(/^\s*[·:—-]\s*/, '').trim();
+      const next = label.slice(prefix.length);
+      // The prefix has to end where a word ends. Without this a short that runs
+      // out mid-word — "Vector" against "Vectorised batch" — is taken for the
+      // system name and the rest of that word renders as the arm.
+      if (next !== '' && !/^[\s·:—-]/.test(next)) continue;
+      const rest = next.replace(/^\s*[·:—-]\s*/, '').trim();
       if (rest) return rest;
     }
   }
