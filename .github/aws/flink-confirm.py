@@ -94,7 +94,20 @@ def medians(records, flag="aa_control"):
     return {k: statistics.median(v) for k, v in out.items()}
 
 
-def select_candidate(records, defaults):
+def sweep_threshold(records):
+    """The noise floor a cell in THIS sweep must clear.
+
+    Taking the loudest A/A across every sweep let one noisy sweep set the bar
+    for all of them: session three's Java 21 leg spread 15.6% and pushed the
+    threshold from 1.77% to 15.64%, which came within two points of rejecting a
+    cell its own sweep had measured cleanly at +18.6%.
+    """
+    aa = [r["metrics"]["aa_spread"]["value"] for r in records
+          if r["kind"] == "verdict" and "aa_spread" in r.get("metrics", {})]
+    return max([SCREEN_FLOOR, *aa])
+
+
+def select_candidate(sweeps, defaults):
     """The probe whose margin over the reference clears the screen's own noise.
 
     Not the maximum of the cells: a cell has one repetition, so ranking them
@@ -103,21 +116,21 @@ def select_candidate(records, defaults):
     and `SCREEN_FLOOR` is not a mechanism. With nothing clearing it the reference
     is the candidate, which is still the session-1 result.
     """
-    scored = medians(records)
-    aa = [r["metrics"]["aa_spread"]["value"] for r in records
-          if r["kind"] == "verdict" and "aa_spread" in r.get("metrics", {})]
-    threshold = max([SCREEN_FLOOR, *aa])
-    reference = scored.get(REFERENCE)
+    scored, thresholds, qualifying = {}, {}, {}
+    reference = medians(sweeps[0]).get(REFERENCE)
     cases = dict(screen_cases(defaults))
-    qualifying = {}
-    if reference:
-        for name, value in scored.items():
-            if name != REFERENCE and value / reference - 1 > threshold:
+    for records in sweeps:
+        threshold = sweep_threshold(records)
+        for name, value in medians(records).items():
+            scored[name] = value
+            thresholds[name] = threshold
+            if name != REFERENCE and reference and value / reference - 1 > threshold:
                 qualifying[name] = value / reference - 1
     chosen = max(qualifying, key=qualifying.get) if qualifying else REFERENCE
     return dict(name=chosen, knobs=cases.get(chosen, reference_knobs(defaults)),
                 image=IMAGE if chosen.startswith("java21") else None,
-                threshold=threshold, reference_rows_per_s_per_core=reference,
+                threshold=thresholds.get(chosen), thresholds=thresholds,
+                reference_rows_per_s_per_core=reference,
                 margins=qualifying, screened=scored)
 
 
@@ -137,7 +150,7 @@ def plan(defaults):
         baseline=baseline_knobs(defaults),
         reference=reference_knobs(defaults),
         screen=screen_cases(defaults),
-        selection=f"margin over {REFERENCE} greater than both the sweep A/A spread and {SCREEN_FLOOR}",
+        selection=f"margin over {REFERENCE} greater than both its OWN sweep's A/A spread and {SCREEN_FLOOR}",
         deferred_contract_probes=[
             ("width16-large-batch", dict(baseline_knobs(defaults), parallelism=16, slots=16,
                 max_rows=262144, buffered_rows=524288, inflight=1, max_batch_bytes=67108864)),
@@ -186,9 +199,9 @@ def execute(session):
     # run twelve hours whatever the plan asks for, so a window derived only from
     # the deadline would hand the screen most of the session.
     screen_end = min(recovery_start, time.monotonic() + SCREEN_S)
-    screened = session.sweep("screen-java17", java17_cases(session.defaults), deadline=screen_end)
-    screened += session.sweep("screen-java21", java21_cases(session.defaults),
-                              image=IMAGE, deadline=screen_end)
+    screened = [session.sweep("screen-java17", java17_cases(session.defaults), deadline=screen_end),
+                session.sweep("screen-java21", java21_cases(session.defaults),
+                              image=IMAGE, deadline=screen_end)]
     candidate = select_candidate(screened, session.defaults)
     (session.directory / "candidate.json").write_text(json.dumps(candidate, indent=2))
     knobs, image = candidate["knobs"], candidate["image"]

@@ -91,6 +91,22 @@ class ReviewTests(unittest.TestCase):
             "the declared budget must hold every phase cap it promises",
         )
 
+    def test_a_noisy_sweep_does_not_set_the_bar_for_a_quiet_one(self):
+        # Session three: the Java 21 leg spread 15.6%, which raised the shared
+        # threshold to 15.64% and came within two points of rejecting a cell its
+        # own sweep had measured at +18.6% against a 1.77% control.
+        def measured(name, value):
+            return dict(kind="measurement", status="ok", sut={"variant_id": name},
+                        flags=[], metrics={"rows_per_s_per_core": {"value": value}})
+        quiet = [measured(confirm.REFERENCE, 100), measured("specific-avro", 118),
+                 dict(kind="verdict", metrics={"aa_spread": {"value": 0.0177}})]
+        loud = [measured("java21-g1", 90),
+                dict(kind="verdict", metrics={"aa_spread": {"value": 0.1564}})]
+        chosen = confirm.select_candidate([quiet, loud], self.defaults)
+        self.assertEqual(chosen["name"], "specific-avro")
+        self.assertAlmostEqual(chosen["threshold"], confirm.SCREEN_FLOOR)
+        self.assertAlmostEqual(chosen["thresholds"]["java21-g1"], 0.1564)
+
     def test_a_screening_cell_is_selected_on_margin_rather_than_on_being_largest(self):
         def measured(name, value, flags=()):
             return dict(kind="measurement", status="ok", sut={"variant_id": name},
@@ -99,21 +115,21 @@ class ReviewTests(unittest.TestCase):
         reference = measured(confirm.REFERENCE, 100)
 
         # Largest, but inside the floor: one repetition cannot separate it.
-        noise = confirm.select_candidate([reference, measured("network256m", 104)] + aa, self.defaults)
+        noise = confirm.select_candidate([[reference, measured("network256m", 104)] + aa], self.defaults)
         self.assertEqual(noise["name"], confirm.REFERENCE)
         self.assertEqual(noise["image"], None)
 
         # Clear of both the floor and the sweep's own A/A spread.
         won = confirm.select_candidate(
-            [reference, measured("network256m", 104), measured("java21-zgc", 130)] + aa, self.defaults)
+            [[reference, measured("network256m", 104), measured("java21-zgc", 130)] + aa], self.defaults)
         self.assertEqual(won["name"], "java21-zgc")
         self.assertEqual(won["image"], confirm.IMAGE)
         self.assertNotIn("network256m", won["margins"])
 
         # A noisy sweep raises the bar rather than lowering the candidate's.
         loud = confirm.select_candidate(
-            [reference, measured("java21-zgc", 130)]
-            + [dict(kind="verdict", metrics={"aa_spread": {"value": 0.5}})], self.defaults)
+            [[reference, measured("java21-zgc", 130)]
+             + [dict(kind="verdict", metrics={"aa_spread": {"value": 0.5}})]], self.defaults)
         self.assertEqual(loud["name"], confirm.REFERENCE)
 
         # An A/A twin is not a repetition of the arm it shadows.

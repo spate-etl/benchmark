@@ -257,7 +257,7 @@ class Session:
             prefix = os.environ["S3_RUN"] + "/logs/flink-review/"
             run_command(["aws", "s3", "cp", str(archive),
                          prefix + "artifacts.tar.gz", "--only-show-errors"], env=environment, timeout=240)
-            for name in ("session.json", "candidate.json"):
+            for name in ("session.json", "candidate.json", "verdict.json"):
                 if (self.directory / name).exists():
                     run_command(["aws", "s3", "cp", str(self.directory / name),
                                  prefix + name, "--only-show-errors"], env=environment, timeout=60)
