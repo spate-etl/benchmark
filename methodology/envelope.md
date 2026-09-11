@@ -39,10 +39,16 @@ reader who disagrees with this rule can apply the stricter one from the publishe
 numbers; a reader given only a blended total could not.
 
 Each entrant declares its containers with roles in `[[envelope.container]]`, and
-validation asserts that exactly one is `data-plane` and that the data-plane
+validation asserts that at least one is `data-plane` and that the data-plane
 containers sum to the declared `[envelope]` totals. The driver applies exactly
 what is declared, then **reads the caps back out of the running containers' cgroups
 and asserts they match**. A mismatch fails the run; it does not warn.
+
+The data plane may be split across several processes within those same totals.
+For example, four 8-CPU/24-GiB TaskManagers receive the same budget as one
+32-CPU/96-GiB TaskManager. This option applies to every entrant. Data-plane CPU
+includes every such process; memory uses their simultaneous samples. JVM GC
+figures remain per process because their pauses and heap peaks can overlap.
 
 Swap is disabled (`--memory-swap` equals `--memory`) so memory pressure surfaces
 instead of hiding in a swapfile.

@@ -47,7 +47,7 @@ strict on purpose — unknown keys are an error, not something ignored:
   unique.
 - `[version]` — how to learn what actually ran. Prefer `strategy = "command"`
   against the built image; a version a human typed in is not provenance.
-- `[envelope]` and `[[envelope.container]]` — exactly one `data-plane`
+- `[envelope]` and `[[envelope.container]]` — one or more `data-plane`
   container, and the data-plane containers must sum to the declared
   `[envelope]` totals. A `control-plane` container is allowed and is budgeted on
   top, but it requires a `[[deviations]]` entry with `"envelope"` in `affects`,
