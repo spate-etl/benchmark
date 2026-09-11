@@ -97,69 +97,41 @@ BATCHES=$SCREEN_BATCHES
 note "prefilling $BATCHES batches for the screen"
 "$BENCH" prefill --env "$ENV_ID" --batches "$BATCHES" >>"$LOG" 2>&1
 
-# Every possible cell dry-run first, including the gated ones that may never
-# run: --dry-run checks the entrant's [[constraints]] without starting a
-# container, and this is the last chance to catch a typo'd knob before
-# spending box time on it.
-for spec in "" \
-  "max_rows=25000,buffered_rows=50000" \
-  "max_rows=50000,buffered_rows=100000" \
-  "max_rows=75000,buffered_rows=150000" \
-  "max_rows=100000,buffered_rows=200000,max_batch_bytes=32000000"; do
+# Both cells dry-run first: --dry-run checks the entrant's [[constraints]]
+# without starting a container, and this is the last chance to catch a
+# typo'd knob before spending box time on it.
+for spec in "" "sink_parallelism=8,max_rows=50000,buffered_rows=100000"; do
   mapfile -t args < <(knob_args_for "$spec")
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --trigger tuning --dry-run "${args[@]}" >>"$LOG" 2>&1
 done
-note "all cells validated dry-run"
+note "both cells validated dry-run"
 
 CANDIDATES=/tmp/candidates.jsonl
 : > "$CANDIDATES"
 add_candidate() { $DECIDE add_candidate "$1" "$2" "$3" >> "$CANDIDATES"; }
-is_safe() { $DECIDE is_safe "$1" "$2"; }
 
 cell baseline /tmp/cell-baseline.jsonl ""
-cell batch-25k /tmp/cell-25k.jsonl "max_rows=25000,buffered_rows=50000"
-cell batch-50k /tmp/cell-50k.jsonl "max_rows=50000,buffered_rows=100000"
+cell sink-8 /tmp/cell-sink-8.jsonl "sink_parallelism=8,max_rows=50000,buffered_rows=100000"
 
 base=$($DECIDE score /tmp/cell-baseline.jsonl)
-c25=$($DECIDE score /tmp/cell-25k.jsonl)
-c50=$($DECIDE score /tmp/cell-50k.jsonl)
-add_candidate batch_25k "max_rows=25000,buffered_rows=50000" "$c25"
-add_candidate batch_50k "max_rows=50000,buffered_rows=100000" "$c50"
+sink8=$($DECIDE score /tmp/cell-sink-8.jsonl)
+# max_rows=50000/buffered_rows=100000 at sink_parallelism=8 gives the SAME
+# 8x(100000+50000)=1.2M total retained payloads as baseline's
+# 32x(25000+12500)=1.2M — the point of this cell is to hold that total fixed
+# while each sink instance's own batch grows 4x, isolating "does fewer/larger
+# buffers help" from "does the total retained set matter", which the batch-
+# size-only ladder measured earlier this session could not separate (see
+# issue #86's own follow-up discussion).
+add_candidate sink_parallelism_8 "sink_parallelism=8,max_rows=50000,buffered_rows=100000" "$sink8"
 
-# Gated climb past batch_50k. batch_50k carries the SAME max_rows/buffered_rows
-# as the known collapse configuration (differing only by inflight), so this
-# is not an unconditional ladder past this point — see the threshold comment
-# in tune-entrant-decide.py for the live-payload math.
-if is_safe "$c50" "$base"; then
-  note "batch_50k safe relative to baseline; climbing to batch_75k"
-  cell batch-75k /tmp/cell-75k.jsonl "max_rows=75000,buffered_rows=150000"
-  c75=$($DECIDE score /tmp/cell-75k.jsonl)
-  add_candidate batch_75k "max_rows=75000,buffered_rows=150000" "$c75"
-
-  if is_safe "$c75" "$base"; then
-    note "batch_75k safe relative to baseline; climbing to batch_100k"
-    cell batch-100k /tmp/cell-100k.jsonl "max_rows=100000,buffered_rows=200000,max_batch_bytes=32000000"
-    c100=$($DECIDE score /tmp/cell-100k.jsonl)
-    add_candidate batch_100k "max_rows=100000,buffered_rows=200000,max_batch_bytes=32000000" "$c100"
-  else
-    note "batch_75k NOT safe relative to baseline (GC/throttle over threshold); stopping before batch_100k"
-  fi
-else
-  note "batch_50k NOT safe relative to baseline (GC/throttle over threshold); stopping before batch_75k"
-fi
-
-note "screen results (baseline, then each cell actually run):"
+note "screen results (baseline, then the candidate actually run):"
 echo "$base" | tee -a "$LOG" >> "$RUNGS"
 cat "$CANDIDATES" | tee -a "$LOG" >> "$RUNGS"
 
-# Diagnostic only — not a gate, because the acceptance thresholds are fixed
-# above and this ladder doesn't add a new one after seeing results. If a
-# cell's achieved rows/INSERT sits well under the max_rows it was given,
-# max_batch_bytes or linger_ms is capping the batch before max_rows gets to,
-# and raising max_rows accomplished nothing for that cell — worth knowing
-# before writing the promotion PR either way. This is exactly the check that
-# matters for batch_100k, whose max_batch_bytes was raised specifically to
-# keep max_rows the binding cap.
+# Diagnostic only — not a gate. If the candidate's achieved rows/INSERT sits
+# well under the max_rows it was given, max_batch_bytes or linger_ms is
+# capping the batch before max_rows gets to, and raising max_rows accomplished
+# nothing — worth knowing before writing the promotion PR either way.
 $DECIDE check_batch_caps "$CANDIDATES" | tee -a "$LOG"
 
 decision=$($DECIDE decide "$base" "$CANDIDATES")
