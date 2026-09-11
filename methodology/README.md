@@ -122,22 +122,46 @@ site renders them beside the numbers.
    expert could beat, without saying so, is the failure mode that destroys a
    comparison page's credibility.
 
-3. **Only realistic configurations.** Use what a competent user would actually
-   deploy. No pre-computing work outside the measured window; no dropping
-   durability.
+3. **Publish every system's best, and say what it cost to get there.** Use what
+   a competent user would actually deploy — no pre-computing work outside the
+   measured window, no dropping durability — and where harder tuning goes
+   faster, publish that too, beside it and labelled.
 
-   Each variant declares `approach`, and the site defaults every chart to
-   `realistic`:
+   Each variant declares `approach`, and the site shows both publishable classes
+   by default:
 
    | `approach` | Meaning |
    |---|---|
-   | `realistic` | Rules 1 and 3 satisfied. Headline-eligible. |
-   | `tuned` | Rule-1 compliant, but a configuration a typical user would not deploy. Shown, filterable, never the headline. |
-   | `stripped` | Uses code the project does not ship, or drops a guarantee. Never the headline; exists to quantify a specific effect. |
+   | `realistic` | Rules 1 and 3 satisfied: what a competent user would deploy. Headline-eligible. |
+   | `tuned` | Rule-1 compliant, but a configuration a typical user would not deploy — an experimental runtime, a setting found by a search rather than by a manual. Headline-eligible, and labelled everywhere it appears. |
+   | `stripped` | Uses code the project does not ship, or drops a guarantee. Shown and filterable, never ranked; exists to quantify a specific effect. |
 
-   The valve is not decorative: a hand-written replacement for a decoder a
-   system ships is code *we* wrote, so rule 1 bars it from the headline even
-   when it makes that system look better.
+   `tuned` was once barred from the headline. That was the wrong instinct for a
+   benchmark run by one of its entrants. Rule 2 already obliges us to tune every
+   competitor as hard as an expert who wanted it to win, and hiding the result
+   of having done so — in a view nobody switches on — made that obligation
+   invisible exactly where a sceptical reader looks. A page that shows a
+   competitor at its measured best, and still reports our own number beside it,
+   is a stronger claim than one that shows competitors only at their defaults;
+   it is also the one a maintainer of that system can check under rule 7.
+
+   Two things hold this honest, and both are load-bearing:
+
+   - **Every arm keeps a `realistic` row.** Exactly one variant is `default` and
+     it must be `realistic`, so no arm can present a tuned best and quietly drop
+     the figure a user would actually get. "How does this behave out of the box"
+     and "how fast can this be made to go" are different questions, and the page
+     has to answer both or it answers neither.
+   - **`tuned` is a disclosure, not a demotion.** It reaches the reader as a
+     label on the row, not as a filter they must find. An arm that carries it is
+     saying "this number is real and this configuration is not our
+     recommendation", which is a claim about deployment rather than about
+     measurement.
+
+   `stripped` stays out of the ranking, and the valve is not decorative: a
+   hand-written replacement for a decoder a system ships is code *we* wrote, so
+   rule 1 bars it from the ranking even when it makes that system look better —
+   including when the system is ours.
 
 4. **Record every deviation.** If the system cannot express part of the spec, put
    it in `[[deviations]]` in the descriptor — machine-readable, so the site renders
