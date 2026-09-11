@@ -145,7 +145,8 @@ def plan(defaults):
                 max_rows=25000, buffered_rows=50000)),
             ("four-taskmanagers", dict(baseline_knobs(defaults), slots=8, taskmanagers=4,
                 max_rows=12500, buffered_rows=25000, inflight=1))],
-        controls="None. Every arm is measured together by the published run this search feeds")
+        controls="None. This search tunes one arm; the other arms keep the numbers "
+                 "they were last published with, on the same hard comparability keys")
 
 
 # `maxsize` is load-bearing, not tidiness. JFR writes the destination file only

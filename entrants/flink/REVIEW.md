@@ -164,6 +164,20 @@ consumer width to the 32-partition topic, and even partition ownership at width
 four-TaskManager records of session one remain historical evidence that nothing
 here is selected from.
 
+## Comparability of the published re-run
+
+The re-measurement this search feeds runs **Flink alone**, so its record lands
+beside numbers the other arms were measured with earlier. Every hard key
+matches: `env_id`, `env_digest` `2aba9d60a529`, `harness_version` 2,
+`dataset_version` `d2-60d7e5bb2a82` and `infra_digest` `6c8fc2dcbfeb`.
+
+ClickHouse has moved from `26.3.22.7` and `26.3.23.7` to `26.3.33.24`.
+`infra_digest` excludes versions by design — a ClickHouse patch release is soft
+provenance, recorded per record and rendered as a footnote — and the archive
+already spans two of them. The jump is wider than the last one, and ClickHouse
+is the shared sink, so if its ingest behaviour moved then this arm's number
+carries that and the others' do not. Stated here rather than left implicit.
+
 ## Cost moved to the server
 
 Smaller batches mean more INSERTs: 12,374 rows per INSERT against roughly
