@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,20 @@ def verify_gc_flags(directory, cases):
         return True
     logs = list(directory.glob("*-sut-tm*-gc.log"))
     return bool(logs) and all(all(item in log.read_text() for item in expected) for log in logs)
+
+
+def metrics_queries(ids, size=24):
+    """Encoded `?get=` query strings for a vertex's metric ids.
+
+    An operator-scoped id carries the operator's name, and this job chains into
+    one vertex named `Source: kafka-sensor-batches -> flatten-events -> …`.
+    Appended raw, its spaces and `>` malform the request line and Netty's router
+    answers 404 rather than matching the route. Chunked as well as encoded: the
+    set is 32 subtasks wide and the query has a length limit of its own.
+    """
+    for start in range(0, len(ids), size):
+        yield urllib.parse.urlencode({"get": ",".join(ids[start:start + size])},
+                                     quote_via=urllib.parse.quote)
 
 
 def docker_output(*args):
@@ -137,8 +152,14 @@ class Observe(threading.Thread):
         self.captured = set()
 
     def request(self, address, path):
-        with urllib.request.urlopen(f"http://{address}:8081{path}", timeout=5) as response:
-            return json.load(response)
+        url = f"http://{address}:8081{path}"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return json.load(response)
+        except OSError as error:
+            # The bare status was all `observer.log` carried, so a 404 said
+            # nothing about which endpoint produced it.
+            raise OSError(f"{error} for {url[:300]}") from error
 
     def run(self):
         while not self.done.is_set():
@@ -194,9 +215,12 @@ class Observe(threading.Thread):
                             available = self.request(address, path)
                             ids = [m["id"] for m in available if any(k in m["id"] for k in (
                                 "busyTime", "backPressured", "numBytes", "actualRecords", "triggeredBy", "numRequest", "writeLatency"))]
-                            if ids:
-                                metrics = self.request(address, path + "?get=" + ",".join(ids))
-                                (self.directory / f"{stamp}-{jid}-{vertex['id']}-metrics.json").write_text(json.dumps(metrics))
+                            collected = []
+                            for query in metrics_queries(ids):
+                                collected += self.request(address, f"{path}?{query}")
+                            if collected:
+                                (self.directory / f"{stamp}-{jid}-{vertex['id']}-metrics.json").write_text(
+                                    json.dumps(collected))
             except (subprocess.SubprocessError, OSError, ValueError, StopIteration) as error:
                 with (self.directory / "observer.log").open("a") as out:
                     out.write(f"{time.time()} {error}\n")

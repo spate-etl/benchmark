@@ -133,6 +133,24 @@ class ReviewTests(unittest.TestCase):
             log.write_text("Parallel Workers: 8\nConcurrent Workers: 2\n")
             self.assertTrue(review.verify_gc_flags(directory, cases))
 
+    def test_a_vertex_metrics_query_is_encoded_and_chunked(self):
+        # The observer asked for these unencoded and got a 404 on every poll of
+        # session three, so the run carried no busy/backpressure evidence.
+        ids = [f"{i}.Source: kafka-sensor-batches -> flatten-events.writeLatency"
+               for i in range(50)]
+        queries = list(review.metrics_queries(ids))
+        self.assertEqual(len(queries), 3, "50 ids at 24 per request")
+        for q in queries:
+            self.assertNotIn(" ", q)
+            self.assertNotIn(">", q)
+            self.assertTrue(q.startswith("get="))
+        from urllib.parse import parse_qs
+        self.assertEqual(
+            sum(len(parse_qs(q)["get"][0].split(",")) for q in queries), len(ids),
+            "chunking must not drop an id",
+        )
+        self.assertEqual(list(review.metrics_queries([])), [])
+
     def test_recording_is_refreshed_after_empty_destination_and_preserved_on_failure(self):
         import subprocess
         import tempfile
