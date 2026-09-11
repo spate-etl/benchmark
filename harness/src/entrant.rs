@@ -692,17 +692,6 @@ impl Entrant {
     pub fn variant(&self, id: &str) -> Option<&Variant> {
         self.spec.variants.iter().find(|v| v.id == id)
     }
-
-    /// The single data-plane container.
-    #[must_use]
-    pub fn data_plane(&self) -> Option<&Container> {
-        self.spec
-            .envelope
-            .as_ref()?
-            .containers
-            .iter()
-            .find(|c| c.role == Role::DataPlane)
-    }
 }
 
 /// Loads and validates every descriptor under `dir`.
@@ -1151,10 +1140,7 @@ fn validate_envelope(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
         .filter(|c| c.role == Role::DataPlane)
         .collect();
     if data.len() != 1 {
-        errs.push(at(format!(
-            "expected exactly one data-plane container, found {}",
-            data.len()
-        )));
+        errs.push(at("expected exactly one data-plane container".to_owned()));
         return;
     }
 

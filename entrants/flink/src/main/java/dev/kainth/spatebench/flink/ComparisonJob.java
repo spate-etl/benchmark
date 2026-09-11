@@ -4,6 +4,7 @@ import com.clickhouse.data.ClickHouseFormat;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.connector.clickhouse.convertor.ClickHouseConvertor;
 import org.apache.flink.connector.clickhouse.convertor.DataMapper;
@@ -94,24 +95,29 @@ public final class ComparisonJob {
 
         final KafkaSource<GenericRecord> source = kafkaSource(schema, startingOffsets);
 
-        // No per-operator setParallelism anywhere in this job: every operator runs
-        // at the cluster's resolved parallelism.default — config.yaml's value, or
-        // the driver's override of it — which is what keeps the whole pipeline
-        // FORWARD-connected and therefore in one chain. A per-operator value here
-        // would break the chain and cost an Avro serialization round trip per
-        // message; it would also be a second place parallelism is decided.
+        pipeline(env, source, sink(SensorRow.class, new SensorRowMapper(), table), schemaJson, table);
+
+        env.execute("comparison-flink");
+    }
+
+    /** Assemble the same graph in production and in topology/type tests. */
+    static void pipeline(StreamExecutionEnvironment env, KafkaSource<GenericRecord> source,
+                         Sink<SensorRow> sink, String schemaJson, String table) {
         final DataStreamSource<GenericRecord> batches =
                 env.fromSource(source, WatermarkStrategy.noWatermarks(), "kafka-sensor-batches");
         batches.uid("kafka-sensor-batches");
-
-        batches.flatMap(new FlattenEvents(schemaJson))
+        // Inheriting the same width permits forward edges; the generated job graph
+        // determines chaining. Encoding and checkpoint serialization still happen.
+        // Specific records implement GenericRecord, but their PojoTypeInfo fails
+        // Flink's reflective input-type validation against that interface. Supply
+        // the unchanged output POJO type through the public flatMap overload.
+        batches.flatMap(new FlattenEvents(schemaJson),
+                        org.apache.flink.api.common.typeinfo.TypeInformation.of(SensorRow.class))
                 .name("flatten-events")
                 .uid("flatten-events")
-                .sinkTo(sink(SensorRow.class, new SensorRowMapper(), table))
+                .sinkTo(sink)
                 .name("clickhouse-" + table)
                 .uid("clickhouse-sink");
-
-        env.execute("comparison-flink");
     }
 
     /**
@@ -169,21 +175,31 @@ public final class ComparisonJob {
     // non-deprecated way to express "resume, else earliest" through the connector's
     // public API. Suppressed rather than avoided so the STARTING_OFFSETS=committed
     // path keeps Spate's exact semantics available.
-    @SuppressWarnings("deprecation")
-    private static KafkaSource<GenericRecord> kafkaSource(Schema schema, String startingOffsets) {
+    static KafkaSource<GenericRecord> kafkaSource(Schema schema, String startingOffsets) {
+        return kafkaSource(schema, startingOffsets,
+                Cfg.oneOf("AVRO_MODE", "generic", "generic", "specific"));
+    }
+
+    @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
+    static KafkaSource<GenericRecord> kafkaSource(Schema schema, String startingOffsets, String avroMode) {
 
         final String registryUrl = Cfg.str("REGISTRY_URL", "http://spate-bench-redpanda:8081");
 
-        // setValueOnlyDeserializer, not setDeserializer: the pipeline needs nothing
-        // from the Kafka record envelope, and the value-only path skips wrapping each
-        // record in a ConsumerRecord view.
+        // The pipeline needs only the Kafka value. The value-only adapter passes
+        // that payload to the Avro deserializer; Kafka still creates ConsumerRecords.
         //
         // The produced type is GenericRecordAvroTypeInfo, so a chain break here
         // would cost Avro serialization rather than Kryo — but it would still
         // serialize the schema-resolved record on every hop, which is why the job
         // is one chain.
+        // SpecificRecordBase implements GenericRecord, so the same application
+        // transform handles both shipped deserializers. The generated classes
+        // come from the canonical schema, never a second workload definition.
         final DeserializationSchema<GenericRecord> valueSchema =
-                ConfluentRegistryAvroDeserializationSchema.forGeneric(schema, registryUrl);
+                "specific".equals(avroMode)
+                ? (DeserializationSchema) ConfluentRegistryAvroDeserializationSchema.forSpecific(
+                        rs.etl.bench.SensorBatch.class, registryUrl)
+                : ConfluentRegistryAvroDeserializationSchema.forGeneric(schema, registryUrl);
 
         final OffsetsInitializer offsets = "committed".equals(startingOffsets)
                 // Same semantics as the Spate arm's auto.offset.reset=earliest with a
@@ -203,6 +219,9 @@ public final class ComparisonJob {
                 // The topic's partition count is fixed for the whole comparison, so
                 // rediscovery would only add a metadata request every 5 minutes.
                 .setProperty("partition.discovery.interval.ms", "-1")
+                .setProperty("max.poll.records", Integer.toString(Cfg.i("KAFKA_MAX_POLL_RECORDS", 500)))
+                .setProperty("max.partition.fetch.bytes", Integer.toString(Cfg.i("KAFKA_MAX_PARTITION_FETCH_BYTES", 1_048_576)))
+                .setProperty("fetch.max.bytes", Integer.toString(Cfg.i("KAFKA_FETCH_MAX_BYTES", 52_428_800)))
                 .build();
     }
 
@@ -237,17 +256,19 @@ public final class ComparisonJob {
         final Map<String, String> serverSettings = new LinkedHashMap<>();
         serverSettings.put("async_insert", "0");
         clientConfig.setServerSettings(serverSettings);
+        clientConfig.setOptions(Map.of(
+                "max_open_connections", Integer.toString(Cfg.i("CLICKHOUSE_MAX_CONNECTIONS", 10)),
+                "client_network_buffer_size", Integer.toString(Cfg.i("CLICKHOUSE_NETWORK_BUFFER_BYTES", 300_000))));
 
         // Typed (POJO) mode. The connector forces RowBinaryWithNamesAndTypes here and
         // ignores setClickHouseFormat, so the format is not set: passing anything else
         // would only produce a warning. The alternative shipped path is String mode,
         // which would mean building CSV or JSONEachRow text per row and moving work to
-        // the server — measurably worse, and not what a competent user would deploy
-        // for a typed stream.
+        // the server. That alternative path has not been measured here.
         final ClickHouseConvertor<T> convertor = new ClickHouseConvertor<>(inputType, mapper);
 
-        final int maxBatchRows = Cfg.i("SINK_MAX_BATCH_ROWS", 25_000);
-        final int maxBufferedRows = Cfg.i("SINK_MAX_BUFFERED_ROWS", 50_000);
+        final int maxBatchRows = Cfg.i("SINK_MAX_BATCH_ROWS", 50_000);
+        final int maxBufferedRows = Cfg.i("SINK_MAX_BUFFERED_ROWS", 100_000);
         if (maxBufferedRows <= maxBatchRows) {
             // AsyncSinkWriter enforces this, but its message names neither knob.
             //

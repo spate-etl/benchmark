@@ -23,10 +23,11 @@
 #
 # In a maven container on purpose: there is no Maven on the benchmark host and
 # installing one would put the build's provenance outside the image. Temurin 17
-# because Flink 2.x supports 11/17/21, 17 is what the runtime image ships, and 21
+# because 17 is what the baseline runtime image ships, and 21
 # is still flagged experimental for Flink — compiling on a JDK the runtime does
 # not use is how you get a fresh class-file-version failure at submission time.
 # ---------------------------------------------------------------------------
+ARG FLINK_RUNTIME_IMAGE=flink:2.2.1-java17
 FROM maven:3.9-eclipse-temurin-17 AS build
 
 WORKDIR /build
@@ -49,7 +50,7 @@ COPY workload/schema/sensor_batch.avsc ./src/main/resources/sensor_batch.avsc
 # prefix lookup resolves the plugin's own version from the network, which is one
 # more thing that can move between two builds of the same source.
 RUN --mount=type=cache,target=/root/.m2 \
-    mvn -B -ntp -DskipTests package \
+    mvn -B -ntp package \
     && mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree \
        -DoutputFile=/build/dependencies.txt \
     && test -s target/comparison-flink.jar
@@ -62,7 +63,10 @@ RUN --mount=type=cache,target=/root/.m2 \
 # 2.3 base would mean running the Kafka connector outside its supported range in
 # a benchmark whose whole point is that the configuration is defensible.
 # ---------------------------------------------------------------------------
-FROM flink:2.2.1-java17
+FROM ${FLINK_RUNTIME_IMAGE}
+ARG FLINK_RUNTIME_IMAGE
+ENV BENCH_FLINK_RUNTIME_IMAGE=${FLINK_RUNTIME_IMAGE}
+LABEL org.opencontainers.image.base.name=${FLINK_RUNTIME_IMAGE}
 
 USER root
 
@@ -84,6 +88,7 @@ COPY --from=build --chown=flink:flink /build/dependencies.txt \
 RUN cp /opt/flink/conf/config.yaml /opt/flink/conf/config.yaml.base
 COPY --chown=flink:flink entrants/flink/config.yaml /opt/flink/conf/config.yaml
 COPY --chown=flink:flink entrants/flink/log4j-console.properties /opt/flink/conf/log4j-console.properties
+COPY --chown=flink:flink --chmod=755 entrants/flink/entrypoint.sh /opt/flink/bench-entrypoint.sh
 
 # Our config.yaml REPLACES the image's, which means it also has to carry forward
 # the entries the image needs. env.java.opts.all is the dangerous one: Flink 2.x
@@ -118,10 +123,8 @@ USER flink
 # starts the container by hand should get the configuration the published numbers
 # describe rather than a stale one.
 #
-# SINK_MAX_BATCH_BYTES is the one sink setting that is still only an image
-# default. It binds above roughly 150,000 rows per batch, so it would cap
-# `max_rows` before `max_rows` does. It is well clear at the published 50,000,
-# and is recorded here rather than made a knob.
+# SINK_MAX_BATCH_BYTES is also exposed by the descriptor. Byte and timer
+# limits can flush a batch before its row cap; inspect actual rows per INSERT.
 #
 # EXPECT_PARALLELISM must equal `parallelism.default` in config.yaml, and
 # `entrants_are_valid` asserts that it does. It is the number ComparisonJob
@@ -152,5 +155,5 @@ ENV BOOTSTRAP=spate-bench-redpanda:29092 \
 
 # Inherited from the base image; repeated so that the two entrypoint arguments
 # this arm is started with are visible without reading the base Dockerfile.
-ENTRYPOINT ["/docker-entrypoint.sh"]
+ENTRYPOINT ["/opt/flink/bench-entrypoint.sh"]
 CMD ["help"]

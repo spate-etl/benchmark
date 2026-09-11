@@ -80,7 +80,12 @@ payload() {
   # ClickHouse absorb at a ladder of caps, and none of that runs an entrant.
   # Building six of them would be most of the box time for nothing.
   if [ "$MODE" = tuning ]; then
-    run_step tune bash "$REPO/.github/aws/tune.sh"
+    if [ "$SELECTOR" = flink ]; then
+      export FLINK_REVIEW_REMAINING_SECONDS=$(( FLINK_REVIEW_PAYLOAD_END - $(date +%s) ))
+      run_step flink-confirm python3 "$REPO/.github/aws/flink-confirm.py"
+    else
+      run_step tune bash "$REPO/.github/aws/tune.sh"
+    fi
     return 0
   fi
 
@@ -151,7 +156,13 @@ export -f payload run_step
 # with a non-zero status instead of marching on and reporting the run complete.
 # The outer shell's pipefail then propagates that status through the `tee` pipe
 # into overall_rc.
-timeout --signal=TERM --kill-after=5m "$(( (TTL_HOURS - 2) * 3600 ))s" \
+payload_timeout_seconds=$(( (TTL_HOURS - 2) * 3600 ))
+if [ "$MODE" = tuning ] && [ "$SELECTOR" = flink ]; then
+  # The bounded follow-up reserves fifteen minutes for upload and shutdown.
+  payload_timeout_seconds=$(( TTL_HOURS * 3600 - 900 ))
+fi
+export FLINK_REVIEW_PAYLOAD_END=$(( $(date +%s) + payload_timeout_seconds ))
+timeout --signal=TERM --kill-after=5m "${payload_timeout_seconds}s" \
   bash -c 'set -euo pipefail; payload' 2>&1 | tee -a "$LOG" || overall_rc=$?
 
 aws s3 cp "$LOG" "$S3_RUN/logs/bench-run.log" || true
