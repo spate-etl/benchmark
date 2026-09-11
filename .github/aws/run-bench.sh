@@ -76,11 +76,18 @@ payload() {
     -p spate-benchmark-harness --bin bench
   local bench="$REPO/target/release/bench"
 
-  # The infrastructure search. No arm images: it measures what the broker and
-  # ClickHouse absorb at a ladder of caps, and none of that runs an entrant.
-  # Building six of them would be most of the box time for nothing.
+  # Two different searches share MODE=tuning, told apart by SELECTOR.
+  # SELECTOR='*' is the infrastructure search: no arm images, it measures what
+  # the broker and ClickHouse absorb at a ladder of caps, and none of that
+  # runs an entrant. A specific selector names the entrant whose OWN knobs are
+  # under search instead — tune-entrant.sh, which builds that one image and
+  # never touches an environment profile or the ceilings file.
   if [ "$MODE" = tuning ]; then
-    run_step tune bash "$REPO/.github/aws/tune.sh"
+    if [ "$SELECTOR" = '*' ]; then
+      run_step tune bash "$REPO/.github/aws/tune.sh"
+    else
+      run_step tune-entrant bash "$REPO/.github/aws/tune-entrant.sh"
+    fi
     return 0
   fi
 
