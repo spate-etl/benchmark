@@ -28,8 +28,7 @@ SETUP_S = 35 * 60
 SCREEN_S = 120 * 60
 RECOVERY_S = 30 * 60
 CONFIRM_S = 220 * 60
-CONTROLS_S = 30 * 60
-REQUIRED_SECONDS = SETUP_S + SCREEN_S + RECOVERY_S + CONFIRM_S + CONTROLS_S + 15 * 60
+REQUIRED_SECONDS = SETUP_S + SCREEN_S + RECOVERY_S + CONFIRM_S + 15 * 60
 
 # `G1NewSizePercent` is an experimental HotSpot flag and the unlock must precede
 # it. The entrypoint sets `-XX:-IgnoreUnrecognizedVMOptions`, so without this the
@@ -134,8 +133,6 @@ def plan(defaults):
              "does": "TaskManager restart on the SELECTED candidate; failing it stops the session"},
             {"phase": "confirmation", "cap_s": CONFIRM_S, "drains": 12,
              "does": "three repetitions, candidate against the published baseline, each arm carrying its own A/A twin, pair order reversed on alternate repetitions"},
-            {"phase": "controls", "cap_s": CONTROLS_S, "drains": 3,
-             "does": "fresh Spate RowBinary, only if reached"},
         ],
         baseline=baseline_knobs(defaults),
         reference=reference_knobs(defaults),
@@ -148,7 +145,7 @@ def plan(defaults):
                 max_rows=25000, buffered_rows=50000)),
             ("four-taskmanagers", dict(baseline_knobs(defaults), slots=8, taskmanagers=4,
                 max_rows=12500, buffered_rows=25000, inflight=1))],
-        controls="Fresh Spate Native and ClickHouse Kafka need a separately budgeted sweep")
+        controls="None. Every arm is measured together by the published run this search feeds")
 
 
 # `maxsize` is load-bearing, not tidiness. JFR writes the destination file only
@@ -172,8 +169,7 @@ def execute(session):
 
     # Every window is measured back from the deadline, so the phases that decide
     # the verdict are reserved before the screen is offered anything.
-    controls_start = session.deadline - CONTROLS_S
-    confirm_start = controls_start - CONFIRM_S
+    confirm_start = session.deadline - CONFIRM_S
     recovery_start = confirm_start - RECOVERY_S
 
     review.run_command([review.BENCH, "ceiling", "--env", review.ENV_ID])
@@ -208,7 +204,7 @@ def execute(session):
     if not verdict["recovery_passed"]:
         verdict["reason"] = "Recovery or correctness failed on the selected candidate"
     else:
-        confirm_end = min(controls_start, time.monotonic() + CONFIRM_S)
+        confirm_end = min(session.deadline, time.monotonic() + CONFIRM_S)
         confirmed = []
         # Reverse the pair order every repetition. Each one-arm invocation gets
         # the harness's mandatory twin, so both configurations face the same gate
@@ -237,16 +233,6 @@ def execute(session):
 
     (session.directory / "verdict.json").write_text(json.dumps(verdict, indent=2))
     review.DESCRIPTOR.write_text(session.original)
-    if session.deadline - time.monotonic() > 180:
-        import subprocess
-        with (session.directory / "controls.log").open("w") as log:
-            try:
-                review.run_command([review.BENCH, "run", "spate:rowbinary", "--reps", "3",
-                                    "--trigger", "tuning", "--env", review.ENV_ID],
-                                   stdout=log, stderr=subprocess.STDOUT,
-                                   timeout=session.deadline - time.monotonic())
-            except subprocess.TimeoutExpired:
-                print("RowBinary control reached the session deadline", flush=True)
     shutil.copytree(review.ROOT / "tuning" / review.ENV_ID, session.directory / "all-records", dirs_exist_ok=True)
     session.upload()
 

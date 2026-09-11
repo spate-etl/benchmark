@@ -81,14 +81,13 @@ class ReviewTests(unittest.TestCase):
         # overrunning screen eat confirmation.
         source = Path(__file__).with_name("flink-confirm.py").read_text()
         self.assertIn("min(recovery_start, time.monotonic() + SCREEN_S)", source)
-        self.assertIn("min(controls_start, time.monotonic() + CONFIRM_S)", source)
+        self.assertIn("min(session.deadline, time.monotonic() + CONFIRM_S)", source)
         self.assertIn("min(confirm_start, time.monotonic() + RECOVERY_S)", source)
 
     def test_confirmation_is_reserved_before_the_screen_is_offered_anything(self):
         self.assertGreaterEqual(
             confirm.REQUIRED_SECONDS,
-            confirm.SETUP_S + confirm.SCREEN_S + confirm.RECOVERY_S
-            + confirm.CONFIRM_S + confirm.CONTROLS_S,
+            confirm.SETUP_S + confirm.SCREEN_S + confirm.RECOVERY_S + confirm.CONFIRM_S,
             "the declared budget must hold every phase cap it promises",
         )
 

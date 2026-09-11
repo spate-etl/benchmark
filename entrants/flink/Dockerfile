@@ -146,12 +146,13 @@ ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     CLICKHOUSE_USER=default \
     CLICKHOUSE_PASSWORD=bench \
     CLICKHOUSE_DATABASE=default \
-    SINK_MAX_BATCH_ROWS=50000 \
-    SINK_MAX_BUFFERED_ROWS=100000 \
+    AVRO_MODE=specific \
+    SINK_MAX_BATCH_ROWS=12500 \
+    SINK_MAX_BUFFERED_ROWS=25000 \
     SINK_MAX_BATCH_BYTES=16777216 \
     SINK_MAX_ROW_BYTES=1048576 \
     SINK_LINGER_MS=1000 \
-    SINK_MAX_IN_FLIGHT=2
+    SINK_MAX_IN_FLIGHT=1
 
 # Inherited from the base image; repeated so that the two entrypoint arguments
 # this arm is started with are visible without reading the base Dockerfile.

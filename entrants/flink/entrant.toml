@@ -157,5 +157,5 @@ id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
 approach = "realistic"
 default  = true
-knobs    = { parallelism = 32, slots = 32, process_mib = 21504, network_memory_max = "9223372036854775807b", runtime_image = "flink:2.2.1-java17", jvm_opts = "", avro_mode = "generic", linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2, max_batch_bytes = 16777216, poll_records = 500, partition_fetch_bytes = 1048576, fetch_bytes = 52428800, connections = 10, network_buffer_bytes = 300000 }
+knobs    = { parallelism = 32, slots = 32, process_mib = 21504, network_memory_max = "9223372036854775807b", runtime_image = "flink:2.2.1-java17", jvm_opts = "", avro_mode = "specific", linger_ms = 1000, max_rows = 12500, buffered_rows = 25000, inflight = 1, max_batch_bytes = 16777216, poll_records = 500, partition_fetch_bytes = 1048576, fetch_bytes = 52428800, connections = 10, network_buffer_bytes = 300000 }
 reports  = { wire_format = "rowbinary_nt" }

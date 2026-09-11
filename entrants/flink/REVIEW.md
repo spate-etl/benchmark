@@ -1,343 +1,191 @@
 # Flink fairness review
 
-Review started 2026-09-10 against benchmark `9b4cab3`, Flink source tag
-`release-2.2.1`, and official ClickHouse connector tag `v0.2.0`.
-Tracking issue: [#74](https://github.com/spate-etl/benchmark/issues/74).
+Three AWS sessions against benchmark `9b4cab3`, Flink source tag `release-2.2.1`
+and official ClickHouse connector tag `v0.2.0`, on the fixed
+`c8gd-metal-24xl-ec2-docker` environment. Tracking issue:
+[#74](https://github.com/spate-etl/benchmark/issues/74).
 
-## Established evidence
+Every record cited here carries `trigger: tuning` and lives in
+[`review/`](review/), never in `results/`. The configuration the search settled
+on is declared in the descriptor and is measured again cleanly as a published
+run; no number below is a published number.
 
-The three current Flink measurements have median throughput approximately
-2.98M rows/s, CPU efficiency 115,654 rows/s/core and CPU cost 8.646 µs/row.
-In the same invocation Spate Native achieved approximately 1.60M rows/s/core
-and ClickHouse Kafka approximately 1.13M. Spate RowBinary was infrastructure
-bound; its throughput must retain that qualification.
+## What changed, and what it did
 
-One Flink repetition reports 8,495 G1 pauses totaling 771.4 seconds over a
-987.9-second window. The maximum post-GC heap occupancy was approximately
-17.5 GiB, close to the configured heap. Post-young-GC occupancy is not an
-exact live-object measurement. The harness maps JVM uptime to the sampler
-window approximately; raw logs and timestamps are needed before calling this
-an exact stopped-time fraction. These observations prioritize allocation and
-retention, rather than proving a particular allocation site is responsible.
+The default was 50,000-row batches, 100,000 buffered rows, two requests in
+flight and generic Avro. It is now **12,500 / 25,000 / one request in flight,
+with generated (specific) Avro records**.
 
-The retired `c8g-8xl-ec2-docker` archive (before commit `c8f58cd`) used eight
-partitions/subtasks within a six-CPU/24-GiB data plane. It delivered 2.0–2.2M
-rows/s using approximately 5.2 cores and 2.4–2.65 µs/row. Its corpus was 1.5M
-messages rather than 40M and it used harness v1, so the comparison is a
-scaling lead, not an isolated treatment effect.
+Confirmed over three interleaved repetitions, each arm carrying its own A/A
+control, pair order reversed on alternate repetitions
+([`review/2026-09-11-session.jsonl`](review/2026-09-11-session.jsonl)):
 
-## Execution and allocation path
+| | baseline | candidate |
+|---|---:|---:|
+| rows/s/core (median of 3) | 121,496 | **523,082** |
+| rows/s (median of 3) | 3.079M | **5.705M** |
+| cores used | 25.4 | 10.9 |
+| repetition spread | 14.90% | **2.12%** |
+| A/A controls | 10.17%, 7.43%, 49.57% | 2.68%, 0.79%, **0.65%** |
+| throttled | 310.6 s | **13.2 s** |
+| duplicate rows | 0 | 0 |
 
-1. Kafka fetches framed byte values through the shipped Kafka connector.
-2. `RegistryAvroDeserializationSchema.deserialize` reads the registry schema
-   and calls `datumReader.read(null, decoder)`. Object reuse in the execution
-   configuration does not reuse this decoder's preceding record.
-3. The application filters events before most conversions, hoists batch
-   fields/timestamps and reuses one outer `SensorRow`. Each retained event
-   still needs string/array conversions and output values.
-4. `ClickHouseConvertor.applyPOJOImpl` creates a `ClickHousePayload`, fills its
-   `LinkedHashMap`, encodes the row through `DataWriter` and retains a copied
-   byte array beside the map. This duplicates representations, not inserted rows.
-5. `ClickHouseAsyncWriter` extends the connector's **own**
-   `ExtendedAsyncSinkWriter`, rather than Flink 2.2.1's `AsyncSinkWriter`.
-   Runtime source inspection alone therefore does not cover the entire sink.
-6. The writer sends cached bytes with a names/types header over HTTP. Typed
-   mode forces `RowBinaryWithNamesAndTypes`. Checkpointing waits for in-flight
-   requests and serializes buffered maps through `ClickHouseAsyncSinkSerializer`.
+**+330.5% per core and +85.3% raw throughput**, so the per-core figure is not
+bought by throughput. Checkpoint recovery was exercised on the candidate before
+confirmation: the TaskManager was restarted mid-drain and all 32 subtasks
+restored, with no duplicates and no job exceptions.
 
-Pinned source references:
-[registry decoder](https://github.com/apache/flink/blob/release-2.2.1/flink-formats/flink-avro/src/main/java/org/apache/flink/formats/avro/RegistryAvroDeserializationSchema.java),
-[converter](https://github.com/ClickHouse/flink-connector-clickhouse/blob/v0.2.0/flink-connector-clickhouse-2.0.0/src/main/java/org/apache/flink/connector/clickhouse/convertor/ClickHouseConvertor.java),
-[writer](https://github.com/ClickHouse/flink-connector-clickhouse/blob/v0.2.0/flink-connector-clickhouse-2.0.0/src/main/java/org/apache/flink/connector/clickhouse/sink/ClickHouseAsyncWriter.java),
-and [buffering implementation](https://github.com/ClickHouse/flink-connector-clickhouse/blob/v0.2.0/flink-connector-clickhouse-2.0.0/src/main/java/org/apache/flink/connector/clickhouse/sink/writer/ExtendedAsyncSinkWriter.java).
+### The recorded verdict is `accepted: false`, and the reason is the baseline
 
-The connector's `actualRecordsPerBatch` and `actualBytesPerBatch` histograms
-are misleading in this release: `flush()` updates them with the **remaining
-buffer** after `createNextAvailableBatch()` removes the submitted rows. They
-are retained as raw diagnostics, but batch-size conclusions must use
-ClickHouse query-log measurements (`ch_rows_per_insert`). Flush-reason counters
-can also increment in both `nonBlockingFlush()` and `flush()`; they are not an
-exclusive accounting of submitted batches.
+`confirmation_summary` requires every A/A control to sit within the declared 2%
+noise floor. All three candidate controls did. The baseline's did not — 10.17%,
+7.43% and **49.57%**, the last being the same configuration measured twice in
+one sweep at 129,103 and 77,819 rows/s/core.
 
-The configured 32 × 100,000 buffered rows and 32 × 2 × 50,000 in-flight rows
-are each 3.2M. They are capacities rather than observed live counts. Increasing
-parallelism multiplied these capacities while preserving roughly the old heap.
+Six observations of the baseline across this session span **1.73×**, against a
+candidate holding 2.12%; the two were interleaved in the same sweeps, on the
+same box, minutes apart. The instability is a property of the configuration
+rather than of the rig, and the first session saw the same thing across a wider
+range (94K–182K on fixed knobs).
 
-There is also an adaptive limit below the configured request count. The
-connector constructs Flink's default `AsyncSinkWriterConfiguration`, whose
-congestion-control strategy starts with `maxBatchSize` in-flight **rows** and
-increases that capacity by ten after each successful request. At a 262,144-row
-batch cap, permitting two full batches would require 26,215 successful requests
-without intervening failures. Smaller timer-flushed batches can overlap sooner.
-Thus matching Spate's four request slots does not match its effective concurrency.
-The connector builder does not expose a replacement rate-limiting strategy;
-changing its internals would exceed this review's configuration-only tuning.
-This behavior is covered by a test against the pinned Flink library. See
-[configuration defaults](https://github.com/apache/flink/blob/release-2.2.1/flink-connectors/flink-connector-base/src/main/java/org/apache/flink/connector/base/sink/writer/config/AsyncSinkWriterConfiguration.java)
-and [additive increase](https://github.com/apache/flink/blob/release-2.2.1/flink-connectors/flink-connector-base/src/main/java/org/apache/flink/connector/base/sink/writer/strategy/AIMDScalingStrategy.java).
+Promotion here is a deliberate decision to publish over a gate that failed on
+the arm being retired. It is recorded rather than reconciled: the candidate
+confirmed, and the configuration it replaces could not hold still.
 
-## POJO, chaining and fairness
+## Why throughput was X and not 2X
 
-Java tests against the pinned libraries resolve `SensorRow` as `PojoTypeInfo`
-with 12 fields. Both timestamps resolve as `GenericType<LocalDateTime>`;
-tags resolve as `NullableList<String>`. Thus the outer POJO does not establish
-that every nested field avoids Kryo. Generic Avro input has its own Avro type
-information and serializer.
+The arm is **blocked, not saturated**. Flink reports every subtask 100% busy
+with `idle = 0` for the whole drain, while the cgroup consumes 10.9 of its 32
+cores — so a task thread is computing about a third of its wall time and
+blocked the rest inside the sink.
 
-The topology test uses the production pipeline assembly and a discard sink:
-widths 8, 16 and 32 each yield one job vertex. The AWS runtime plans additionally
-confirm one vertex containing the real Kafka source, flatten and ClickHouse
-writer at all three widths, including the four-TaskManager deployment.
-`StreamingJobGraphGenerator` also checks slot sharing, operator
-strategies, partitioner/exchange mode and maximum parallelism. `OperatorChain`
-selects reference-passing `ChainingOutput` when object reuse is enabled.
+Per subtask: 179,438 rows/s at 12,377 rows per INSERT is a **69 ms** cycle, of
+which roughly 23 ms is CPU and **46 ms is waiting for ClickHouse to
+acknowledge**, with one request in flight. Nothing is at a cap — the broker
+serves 9% of its ceiling, ClickHouse absorbs 52% of its ingest ceiling, GC
+accounts for 28 s of a 515 s window and throttling for 13 s.
 
-Equal width, object reuse and memory/JVM tuning are permitted by rules 1–3.
-Multiple TaskManagers would additionally require a contract change; PR #76
-proposed one and was closed, so that topology is out of scope here. No Kafka
-decode, ClickHouse encoding or recovery guarantee is removed. Generated Avro records use the
-canonical schema, Avro's compiler and Flink's public registry deserializer.
+More concurrency does not help: at the same batch size, two requests in flight
+measured *lower* throughput (5.596M against 5.726M) and 26% more CPU. The lever
+is batch size, and it is bounded by retention — see below.
 
-Tests also preserve nulls, ASCII-only case folding, signed integer division,
-array contents, millisecond/microsecond timestamps, and buffered rows after
-another input batch and the official connector's checkpoint round trip.
+## Where the CPU goes
 
-## Measurement changes and experiments
+A 60-second `settings=profile` flight recording of the candidate, 21,081
+execution samples, attributed by caller:
 
-The harness previously selected one data-plane container's CPU/memory and
-overwrote its GC summary when multiple TaskManagers were declared. Data-plane
-CPU now sums all such containers; anonymous memory uses simultaneous samples.
-GC and heap figures remain per JVM for multiple-TaskManager configurations;
-there is no misleading sum of overlapping stop-the-world pauses. Existing
-single-TaskManager metric names remain. This corrects an unexercised topology;
-the published single-TaskManager measurement protocol remains v2.
+| Share | Frame | Owner |
+|---:|---|---|
+| 14.0% | `BinaryStreamUtils.writeUnsignedInt16` ← `DataWriter.writeUInt16` | connector |
+| 8.3% | `Arrays.copyOf` ← `ByteArrayOutputStream` grow and `toByteArray` | connector |
+| 8.9% | `HashMap.putVal` ← `SensorRowMapper.toMap` | connector's payload contract |
+| 6.3% | `Utf8.toString` ← `BinaryDecoder.readString` | Avro |
+| 5.7% | `DataWriter.writeArray` | connector |
+| 5.5% | `LinkedHashMap.newNode` | connector |
+| 5.0% | `Rows.asciiUpper` ← `FlattenEvents.flatMap` | this arm |
+| 4.5% | `BinaryStreamUtils.writeVarInt` | connector |
+| 3.8% | `ZoneId.ofOffset` ← `DataWriter.writeDateTime64` | connector |
 
-The envelope document and validator require exactly one data-plane container.
-[PR #76](https://github.com/spate-etl/benchmark/pull/76) proposed permitting one
-or more for every entrant with unchanged aggregate limits, and **was closed
-without being accepted**. So the contract has not moved: multi-TaskManager
-results would need a fresh proposal of their own, as `CONTRIBUTING.md` requires,
-and the four-TaskManager screening records below remain historical evidence that
-no configuration in this PR is eligible to be selected from. The implementation
-retains exactly-one-container validation and depends on no contract change.
+**Roughly 60% of the arm's CPU is inside the ClickHouse connector's RowBinary
+encoder and Avro's decoder.** After the change above, this arm is bounded by the
+connector rather than by Flink.
 
-The runner `.github/aws/flink-review.py` prints its initial matrix with
-`--dry-run`. It preserves the environment, corpus, five-second at-least-once
-checkpoints and synchronous INSERTs. Large batches are a priority: 131,072 and
-262,144 rows, a 262,144/4/500-ms Spate RowBinary settings control, and larger
-batches when earlier trials justify them. Byte caps, actual batch fill,
-retention, GC, checkpoints and server/merge costs are recorded together.
+`Utf8.toString` is not a sign that specific Avro failed: the generated classes
+carry `"avro.java.string":"String"` for every string field, and Avro's own
+`BinaryDecoder.readString` implements String-reading as Utf8-then-convert.
 
-Screening and profiling use the tuning quarantine. Confirmation is unprofiled
-and requires three repetitions per configuration and an acceptable A/A control.
-Recovery is a separate diagnostic: the harness is paused while a TaskManager
-is restarted, so its timing is not a performance result. Checkpoint restore
-evidence and the ordinary correctness gate must both be checked.
+### Three connector findings for upstream
 
-## First AWS session: screening evidence
+Per rule 7, and worth more than anything this arm can do on its own side:
 
-Session `20260910T214620Z-flink-review` ran commit `a53ced2` on the fixed
-`c8gd-metal-24xl-ec2-docker` environment and self-terminated after approximately
-seven hours. The corpus remained 40M messages / 2.94B retained rows, with five
-second at-least-once checkpoints. All records remain tuning evidence. The
-[complete screening and incomplete confirmation records](review/2026-09-10-screening.jsonl)
-include failed attempts and A/A controls; nothing was added to `results/`.
+1. `DataWriter.writeDateTime64` resolves `ZoneId.of("UTC")` per value — 3.8% of
+   arm CPU across two `DateTime64` columns per row.
+2. `ClickHouseConvertor.applyPOJOImpl` builds a per-row `ByteArrayOutputStream`
+   that grows and is then copied by `toByteArray()` — 8.3%.
+3. The payload is a per-row `LinkedHashMap` of boxed values, retained alongside
+   the encoded bytes until the batch flushes — 14.4% between `putVal` and
+   `newNode`, and the dominant contributor to the retention below.
 
-The following are single screening measurements, excluding A/A twins. GC time
-is the harness's reported pause total, not CPU time or an exact stopped-time
-fraction. Per-JVM figures are preserved for the multi-TaskManager case.
+That retention is also the mechanism behind the headline result. At the old
+defaults, 32 subtasks × (100,000 buffered + 2 × 50,000 in flight) is 6.4M live
+payloads; session one's GC logs show G1's Eden collapsing to a single 16 MiB
+region at the 25th percentile, the heap pinned at 98% occupancy doing
+`G1 Preventive Collection`s, and **18,325 CPU-seconds of GC in one run — about
+70% of the arm's entire CPU**. Smaller buffers remove the live set that causes
+it.
 
-| Case | Rows/s | Rows/s/core | CPU µs/row | Rows/INSERT | CH CPU µs/row | GC pause s | Throttled s |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `baseline` | 4.78M | 181,656 | 5.505 | 42,733 | 1.608 | 414.3 | 206.1 |
-| `batch50k-one` | 3.29M | 129,650 | 7.713 | 39,450 | 1.605 | 667.6 | 241.5 |
-| `batch128k` | 3.90M | 158,863 | 6.295 | 90,264 | 1.582 | 426.4 | 348.5 |
-| `batch256k` | 3.74M | 144,647 | 6.913 | 144,190 | 1.586 | 537.9 | 654.1 |
-| `batch256k-fill` | 3.10M | 121,331 | 8.242 | 208,599 | 1.583 | 664.6 | 755.9 |
-| `small-buffer` | 5.73M | 456,046 | 2.193 | 12,355 | 1.718 | 30.6 | 21.7 |
-| `heap34g` | 1.06M | 44,089 | 22.681 | 25,237 | 1.653 | 2545.0 | 1886.9 |
-| `batch256k-heap64g` | 3.79M | 147,611 | 6.775 | 221,202 | 1.585 | 502.6 | 1059.3 |
-| `spate-rowbinary-settings` | 2.03M | 84,658 | 11.812 | 44,518 | 1.629 | 1073.3 | 2428.6 |
-| `inflight-two` | 5.60M | 353,660 | 2.828 | 12,292 | 1.741 | 78.0 | 141.7 |
-| `fixed-budget-eight` | 3.95M | 472,255 | 2.118 | 47,918 | 1.578 | 26.6 | 7.8 |
-| `fixed-budget-sixteen` | 6.28M | 425,951 | 2.348 | 24,365 | 1.630 | 42.7 | 47.6 |
-| `parallel-eight` | 3.61M | 494,004 | 2.024 | 12,353 | 1.704 | 7.6 | 8.0 |
-| `parallel-sixteen` | 5.34M | 489,548 | 2.043 | 12,363 | 1.713 | 15.0 | 8.0 |
-| `four-tms` | 5.34M | 509,859 | 1.961 | 12,370 | 1.719 | per JVM | 35.6 |
+## What was measured and rejected
 
-Smaller buffers are the strongest measured improvement. The first baseline's
-raw GC log contains 183 full compaction pauses and 328 "To-space exhausted"
-messages. The 12,500-row / 25,000-buffered / one-in-flight case has neither,
-and its reported pause total falls from 414.3 to 30.6 seconds. The GC log's
-user-plus-system CPU totals fall from approximately 9,324 to 692 CPU-seconds.
-These raw-log intervals are slightly wider than the measurement window, so
-they support GC as the dominant avoidable cost without forming an exact
-decomposition of the headline CPU measurement.
+| Cell | rows/s/core | vs reference | Verdict |
+|---|---:|---:|---|
+| `tuned-ref` (12,500/25,000/1, generic Avro) | 440,651 | — | the screen's reference |
+| **`specific-avro`** | **522,678** | **+18.6%** | promoted |
+| `network256m` (`taskmanager.memory.network.max: 256m`) | 402,252 | −8.7% | rejected |
+| `java21-g1` | 393,745 | −10.6% | **not interpretable** |
+| `java21-zgc` | 306,850 | −30.4% | rejected |
 
-Increasing heap alone did not solve the problem. The 34-GiB process trial
-produced a 28.86-GiB heap with compressed references still **enabled**, yet ran
-much worse. The 64-GiB process trials had compressed references disabled and
-also failed to beat smaller buffers. Neither a universal heap-size rule nor
-"compressed references explain every slowdown" is supported by these data.
+The Java 17 screen's A/A control was 1.77%, inside the noise floor. The Java 21
+screen's was **15.64%** — `java21-g1` measured 393,745 against its own twin's
+460,530 — so neither Java 21 cell separates and both need re-measuring before
+anything is claimed about the runtime.
 
-Large batches were exercised: the 262,144-row cases averaged approximately
-144K–221K rows per INSERT. Matching Spate's 500-ms linger instead averaged only
-44.5K rows and was slower per core. Matching configured batch settings therefore
-did not match observed batches or effective request concurrency.
+Generational ZGC did what it promises and lost on the metric that is published:
+GC pause fell to **0.1 s** from 23–37 s, while CPU rose to 17.26 cores and
+throttling to **423.9 s**. Load barriers and concurrent collection are CPU, and
+this comparison is scored on CPU. It also maps its heap from a `memfd`, which
+the kernel charges to `shmem`: it reported 17.15 GiB there, and under the
+pre-`shmem` footprint definition would have published 4.69 GiB against a true
+21.84 GiB.
 
-These were not all uninterrupted executions. Captured checkpoint counters show
-7 restores in `batch256k`, 55 in `heap34g`, and 5 in `batch256k-heap64g`.
-Exception histories include checkpoint-coordinator RPC timeouts in the first
-two and failed INSERTs with broken-pipe errors in the last. Their measured cost
-includes recovery and some extra writes; it cannot be attributed to batch size
-or GC alone. Baseline, small-buffer, and captured 8/16-subtask jobs had no
-recorded job exceptions. `duplicate_rows` examines the correctness-gate window,
-so zero there does not establish zero replays across the complete drain.
+`network256m` returns 1.72 GiB from unused network buffers to the task heap —
+verified against Flink's own memory calculator — and still lost, with throttling
+rising from 15.3 s to 36.2 s.
 
-The 8- and 16-subtask trials all retained the same 32-CPU container limit.
-Their much lower CPU cost supports the scaling concern: multiplying per-subtask
-buffer capacity while retaining the original heap made the 32-subtask baseline
-GC-heavy. Equal operator widths and object reuse were already active.
+## Not measured, and why
 
-Confirmation did **not** complete. Three ordinary baseline repetitions finished,
-but only two ordinary candidate repetitions finished; their A/A twins are not
-additional independent confirmation repetitions. Candidate A/A spread was
-approximately 1.1–1.2%, while the baseline A/A spread was 17–18%. The session
-reached its deadline before recovery and fresh Spate/ClickHouse Kafka controls.
-The recorded acceptance verdict is false. The promising four-TaskManager
-configuration is not promoted to a default or a published result.
+**The G1 young-generation floor was never tested.** Both cells declared
+`-XX:G1NewSizePercent=40` without `-XX:+UnlockExperimentalVMOptions`; the
+entrypoint disables `IgnoreUnrecognizedVMOptions`, so the JVM refused to start
+and each cell recorded a TaskManager that exited during the drain. The flag is
+fixed and the launcher check now asserts that every JVM option the runner
+declares actually starts a JVM.
 
-The first AWS diagnostic attempt at `a53ced2` failed before processing records:
-the Flink image's `FLINK_PROPERTIES` parser removes whitespace and concatenated
-the extra JVM arguments. Both attempts are retained as failed tuning records.
-The descriptor now uses Flink's `FLINK_ENV_JAVA_OPTS_TM` launcher override for
-the complete argument list. A local runtime check confirmed that separate
-`ParallelGCThreads=8` and `ConcGCThreads=2` arguments reach Java 17.0.20.
-Unprofiled configurations with an empty extra-argument string were unaffected.
+**A larger batch at width 32 was never tried with one request in flight.** Given
+the sink-latency finding it is the strongest remaining lever: 25,000 rows would
+halve the round trips per row delivered. Session one's only 25,000-row cell ran
+at width 16 with two in flight and produced that session's highest raw
+throughput, 6.28M rows/s.
 
-The same argument-delivery bug prevented the Parallel GC, G1 worker-count and
-specific-Avro trials from starting. The fetch trial timed out; the poll-size,
-Java 21, larger-than-262,144-row and recovery trials did not complete or start.
-None is represented as a measured optimization.
+**Reduced widths remain deferred** under
+[issue #78](https://github.com/spate-etl/benchmark/issues/78): the contract sizes
+consumer width to the 32-partition topic, and even partition ownership at width
+16 does not amend that text. Four TaskManagers have no open proposal —
+[PR #76](https://github.com/spate-etl/benchmark/pull/76) was closed — so the
+four-TaskManager records of session one remain historical evidence that nothing
+here is selected from.
 
-## Targeted follow-up
+## Cost moved to the server
 
-The follow-up at commit `093a97b` uses `.github/aws/flink-confirm.py`, a separate
-four-hour instance limit, and a 3.5-hour experiment deadline. Combined instance
-time remains below the original twelve-hour budget. It prioritizes a single
-TaskManager with width 16, 12,500-row batches, 25,000 buffered rows and one request
-in flight, which uses one TaskManager but conflicts with the current partition-width wording; see issue #78.
+Smaller batches mean more INSERTs: 12,374 rows per INSERT against roughly
+39,250, so ClickHouse CPU per row rises from **1.624 µs to 1.720 µs, +5.9%**.
+Against an arm-side saving of about 4.4 µs per row that is roughly 2% of the win
+moved rather than removed, and it is disclosed here rather than left to be
+found.
 
-It repairs profiling, tests the previously unexecuted JVM/Avro settings, then
-compares three unprofiled repetitions against the baseline. The tuned candidate
-is the A/A control; baseline repetition spread still contributes to the required
-improvement threshold. Recovery is separate, and the Spate RowBinary control
-runs only within the remaining time. Defaults remain unchanged until the
-performance and recovery checks both pass. Publication requires the separate
-post-merge measurement process described in `CONTRIBUTING.md`.
+## Instrument limitations in these sessions
 
-At the start of confirmation, the follow-up's unprofiled reference completed
-at 5.38M rows/s, 512,528 rows/s/core and 1.951 µs/row. Parallel GC was close
-at 508,987 rows/s/core; a 4-MiB per-partition fetch limit was worse at 423,977.
-These remain single screening observations. The G1 worker-count trial reached
-the screening deadline before completing. Confirmation selected the reference:
-one TaskManager, 16 subtasks, generic Avro, unchanged JVM collector settings,
-12,500-row batches, 25,000 buffered rows and one in-flight request.
-
-Two review-tool defects remain material limitations of this pinned run.
-The specific-Avro trial failed during graph construction because Flink's
-reflective type validation rejected a concrete generated record type against
-the transform's `GenericRecord` interface. The fix supplies the same output
-POJO type through Flink's public `flatMap` overload; topology tests now cover
-both input modes at widths 8/16/32. This fix is not a successful AWS specific-Avro
-measurement.
-
-JFR arguments now reached the JVM, but all six downloaded recording files were
-empty. The observer had copied JFR's empty destination before recording finished
-and skipped subsequent copies because the local path existed. Capture now
-refreshes through a temporary file and retains nonempty copies. No JFR CPU or
-allocation conclusions can be drawn from this run's uploaded files. Both fixes
-are later than the running checkout, which remains pinned to `093a97b`.
-
-## Adversarial review corrections
-
-The current default is not promoted from these incomplete sessions. The next
-candidate is one TaskManager at **width 32**, small buffers, and Java 21 with
-`-XX:+UseZGC -XX:+ZGenerational`, as requested in the review. The official image
-builds and starts that collector locally; this is not an AWS performance result.
-Flink's [Java compatibility documentation](https://github.com/apache/flink/blob/release-2.2.1/docs/content/docs/deployment/java_compatibility.md)
-labels Java 21 experimental. Its trials are therefore marked `tuned`, and the
-runtime image and actual Java version are recorded and checked.
-
-Widths 8/16 require resolution of [issue #78](https://github.com/spate-etl/benchmark/issues/78):
-the normative text sizes consumers to the partition count. Even partition
-ownership at width 16 does not itself amend that text. Four TaskManagers would
-require a contract proposal that does not currently exist, PR #76 having been
-closed. They also provide four separate 21,504-MiB process budgets (84 GiB total)
-and approximately four times the configured heap: roughly 68.6 GiB versus
-17.2 GiB for one TaskManager. Both fit the same 96-GiB container envelope, but
-process layout and usable heap change together; this was not a topology-only test.
-
-The identical first-session baseline spans **94,259–181,656 rows/s/core** across
-the session, approximately a 1.93× range. The first measurement is about 1.61×
-the median of the subsequent six. The narrower 17–18% A/A spreads do not describe
-that full drift. Infrastructure was reused throughout the ordered ladder; the
-64-GiB trials preceded later slower baselines. Timing establishes no cause.
-`batch128k`, `batch256k` and `batch256k-heap64g` are **not separable from this
-control variation**. Their single-trial ordering is not a batch-size ranking.
-The smaller-buffer mechanism is supported by the repeated large efficiency
-difference and raw GC evidence, but its effect size still needs confirmation.
-
-The table now includes throttling and ClickHouse CPU per row. `throttled_us`
-is cgroup throttled duration, not CPU-seconds consumed or necessarily wall time
-lost by the application. `nr_throttled` was sampled but not emitted in the
-historical records; the harness now emits it. GC and throttling rise together,
-but correlation does not establish that throttling explains all of the loss.
-In particular, the proposed sum of 23 G1 parallel GC workers and 32 application
-threads during a young collection is incorrect: evacuation is
-[stop-the-world](https://docs.oracle.com/en/java/javase/17/gctuning/garbage-first-g1-garbage-collector1.html).
-Concurrent GC work and other runnable threads can compete for quota, and bursts
-can exhaust a period's quota despite lower average CPU use. See the
-[kernel's bandwidth-control description](https://www.kernel.org/doc/html/latest/scheduler/sched-bwc.html).
-Capping GC workers is a high-priority hypothesis, not an established win.
-
-For the first-session baseline and width-32 small-buffer trial, ClickHouse CPU
-rises from approximately 1.608 to 1.718 µs/row (+6.8%), about 323 extra CPU-seconds
-over 2.94B rows. Arm CPU falls by about 3.31 µs/row, roughly 9,738 CPU-seconds;
-the extra target cost is about 3.3% of that saving. This comparison shares the
-ordered-screening limitation. More INSERTs move a small but real cost outside
-the arm envelope. The table exposes it rather than treating arm efficiency as
-the entire system's cost.
-
-The observed wire density of about 64.5 bytes/row makes 262,144 rows roughly
-16.9 MB, below the large-trial 64-MiB byte cap. At 3.74M rows/s divided by 32
-subtasks, that row cap takes about 2.24 seconds of average output to fill,
-longer than the 1-second timer. The trial averaged 144K rows/INSERT; extending
-linger to five seconds reached 209K. This arithmetic supports timer pressure,
-but checkpoint flushes, backpressure and recovery also affect batch fill.
-At the width-16 small-buffer rate, 262,144 rows would take about 0.8 seconds
-per subtask **if that rate persisted with the larger buffers**. That is an
-untested cell, not evidence that large buffers preserve the GC win. Width-16
-25,000-row batches also deserve comparison: 6.28M rows/s exceeded the selected
-12,500-row case by about 18%, while CPU efficiency was lower.
-
-Screening used REST polling and file copying; unprofiled confirmation did not.
-The screening table carries that diagnostic overhead. The revised runner does
-not select the maximum of a single-trial ladder: the Java 21/ZGC candidate is
-predeclared, and a 0.7% reference/Parallel-GC difference is treated as unresolved.
-Recovery runs first. Each configuration receives its own A/A twin in each of
-three repetitions, with pair order reversed between repetitions. Acceptance
-requires both A/A families to pass, improvement beyond measured noise, no
-greater than 2% raw-throughput regression, and no increased duplicate count in
-the correctness window. Throttling and downstream CPU remain explicit in the
-verdict. A six-hour remaining-budget check precedes all work; an undersized
-session is refused. Additional controls and mechanism probes require their own
-budget, rather than being promised time that confirmation will consume.
-
-The proposed additional probes are GC worker limits at width 32, a 256-MiB
-network-memory cap, and specific Avro with custom coders. The source default
-network reservation is approximately 10% of Flink memory, about 2 GiB here;
-a single chained vertex suggests it can be reduced, but the resulting heap
-and runtime behavior must be measured. `avro_mode=specific` now enables custom
-coders automatically. JVM option typos fail startup, GC logging cannot be
-overridden through the tuning knob, and Java/Python/launcher tests run in CI.
+- Per-vertex REST metrics 404'd on every poll of session three: the metric ids
+  were appended to the query string unencoded, and this job's chained vertex name
+  carries spaces and `>`. Busy and idle above were recovered from
+  `accumulated-busy-time` on the job resource instead, which carries no sink
+  latency, so the 46 ms is arithmetic rather than a reading. Fixed.
+- A recovery run's CPU figures are invalid by construction: restarting the
+  TaskManager destroys its cgroup, the sampler exits when the cgroup vanishes,
+  and the window is left with a tenth of its samples. Recovery is a correctness
+  and restore check only.
+- Screening cells carry the diagnostic observer's REST polling; confirmation
+  runs without it.
+- Session one's control drifted from 181,656 to about 113,000 rows/s/core across
+  seven hours on fixed knobs with the infrastructure reused throughout. Its
+  single-trial ordering is unresolved within that range, and its batch-size
+  ladder is not separable from it.
