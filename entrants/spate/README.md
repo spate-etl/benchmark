@@ -20,10 +20,10 @@ was in force.
 | Knob | Value | What it controls |
 |---|---|---|
 | `threads` | **32** | Hot-path threads, one per **partition**, not one per CPU. The drain is paced by the busiest consumer thread: any thread owning two partitions paces the drain at half rate, so the count matches the 32-partition topic on the 32-CPU envelope. |
-| `shards` | **8** | Independent workers, each with its own queue, encoder and in-flight permits. Several shards against one server is how a single-node target gets concurrent inserts, and width buys more than depth: sixteen concurrent INSERTs as 8 × 2 are worth **52% more** than the same sixteen as 2 × 8. |
-| `inflight` | **4** | Concurrent INSERTs per shard, so 32 in total. Where the curve flattens; 8 and 16 measure the same rate and hold more rows in flight. |
-| `linger_ms` | **500** | Batch timer, and a hard p99 floor in sustained mode. At these knobs a batch fills in ~364 ms, so it seals on rows and the timer does not fire. |
-| `max_rows` | **262144** | Rows per INSERT. The largest batch this arm actually seals on **rows** — it achieves 99.7% of the cap. Above roughly 380,000 the linger timer seals the batch instead, so a larger cap would declare a number that never takes effect. |
+| `shards` | **32** | Independent workers, each with its own queue, encoder and in-flight permits. Several shards against one server is how a single-node target gets concurrent inserts, and width buys more than depth: sixteen concurrent INSERTs as 8 × 2 are worth **52% more** than the same sixteen as 2 × 8, which is why shard count and request depth are separate knobs. |
+| `inflight` | **4** | Concurrent INSERTs per shard, so 128 across the arm. Where the curve flattens; 8 and 16 measure the same rate and hold more rows in flight. |
+| `linger_ms` | **500** `rowbinary`, **2000** `native` | Batch timer, and a hard p99 floor in sustained mode. The larger `native` batch needs longer to fill before the timer would seal it early. |
+| `max_rows` | **262144** `rowbinary`, **1048576** `native` | Rows per INSERT. Above the cap the linger timer seals the batch instead, so a larger one would declare a number that never takes effect. Read the batch a run actually sealed from `ch_rows_per_insert`. |
 
 Fixed by the contract rather than chosen: `commit_interval` is **5 s**, matched to
 Flink's `AT_LEAST_ONCE` checkpoint interval so both arms pay for the same
