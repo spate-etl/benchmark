@@ -506,6 +506,14 @@ fn read_heap_config(
         heap.version = Some(value.to_owned());
         return Ok(());
     }
+    // ZGC prints `Soft Max Capacity` directly after `Max Capacity`, and the
+    // suffix match below would take the soft limit as the configured heap — the
+    // later line wins. They are equal only while `-Xmx` is explicit; wherever
+    // the JVM derives its heap, the soft limit is the lower number, and the gap
+    // between configured and used is the whole point of this module.
+    if key.starts_with("Soft ") {
+        return Ok(());
+    }
     let slot = if key.ends_with("Max Capacity") {
         &mut heap.max_bytes
     } else if key.ends_with("Initial Capacity") {
@@ -962,12 +970,22 @@ mod tests {
 [0.003s][info][gc,init] Min Capacity: 8M
 [0.003s][info][gc,init] Initial Capacity: 512M
 [0.003s][info][gc,init] Max Capacity: 512M
+[0.003s][info][gc,init] Soft Max Capacity: 460M
 [0.188s][info][gc,phases   ] GC(0) Y: Pause Mark Start (Major) 0.004ms
 [0.191s][info][gc,phases   ] GC(0) Y: Pause Mark End 0.004ms
 [0.192s][info][gc,phases   ] GC(0) Y: Pause Relocate Start 0.007ms
 [0.193s][info][gc,phases   ] GC(0) O: Pause Mark End 0.005ms
 [0.195s][info][gc,phases   ] GC(0) O: Pause Relocate Start 0.003ms
 ";
+
+    #[test]
+    fn zgcs_soft_limit_is_not_mistaken_for_its_configured_heap() {
+        // `Soft Max Capacity` is printed straight after `Max Capacity` and ends
+        // with the same words, so a suffix match takes the soft limit — a heap
+        // this arm was never configured with, and the smaller of the two.
+        let log = parse_gc_log(ZGC_LOG).expect("a real ZGC log parses");
+        assert_eq!(log.heap.max_bytes, Some(512 * 1024 * 1024));
+    }
 
     #[test]
     fn parses_a_real_g1_log_from_the_arms_own_collector() {

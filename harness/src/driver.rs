@@ -1491,6 +1491,11 @@ fn measure(
                 ),
             )
             .metric("peak_anon_bytes", Metric::bytes(d.cost.peak_anon_bytes))
+            // The swap-backed component of the figure above. Zero for every arm
+            // whose runtime allocates its heap anonymously, and the whole of a
+            // ZGC heap for one that does not — so the split is auditable per
+            // record rather than an assertion in a document.
+            .metric("peak_shmem_bytes", Metric::bytes(d.cost.peak_shmem_bytes))
             .metric(
                 "peak_charged_bytes",
                 Metric::bytes(d.cost.peak_charged_bytes),
@@ -4533,6 +4538,7 @@ mod tests {
                 mem_peak: v,
                 anon: v,
                 file: v,
+                shmem: v,
                 slab: v,
                 kernel_stack: v,
                 sock: v,
@@ -4816,6 +4822,7 @@ mod tests {
                     mem_peak: a,
                     anon: a,
                     file: 0,
+                    shmem: 0,
                     slab: 0,
                     kernel_stack: 0,
                     sock: 0,
