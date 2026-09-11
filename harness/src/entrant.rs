@@ -335,12 +335,16 @@ pub struct Variant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Approach {
-    /// Rules 1 and 3 satisfied. Headline-eligible.
+    /// Rules 1 and 3 satisfied: what a competent user would deploy.
+    /// Headline-eligible, and the class every arm must have one of, because a
+    /// tuned best must never be the only figure an arm publishes.
     Realistic,
     /// Rule-1 compliant but not what a typical user would deploy.
+    /// Headline-eligible, and labelled wherever it appears: the label is a
+    /// claim about deployability, not about the measurement.
     Tuned,
-    /// Uses code the project does not ship, or drops a guarantee. Never the
-    /// headline; exists to quantify a specific effect.
+    /// Uses code the project does not ship, or drops a guarantee. Shown and
+    /// filterable, never ranked; exists to quantify a specific effect.
     Stripped,
 }
 
@@ -1285,9 +1289,12 @@ fn validate_variants(e: &Entrant, errs: &mut Vec<String>, at: &dyn Fn(String) ->
             "expected exactly one variant marked default, found {defaults}"
         )));
     }
-    // The site's default view shows one row per entrant at its default variant.
-    // A `stripped` default would put a deliberately unrepresentative arm in the
-    // headline — the exact failure the valve exists to prevent.
+    // This check carries more weight since rule 3 made `tuned` headline-eligible.
+    // It is what guarantees every arm still publishes the figure a user would
+    // actually get: without it an arm could present only its tuned best, and
+    // "how does this behave out of the box" would stop being answerable from the
+    // page. A `stripped` default would additionally put a deliberately
+    // unrepresentative arm in front — the failure the valve exists to prevent.
     if let Some(d) = e.spec.variants.iter().find(|v| v.default)
         && d.approach != Approach::Realistic
     {
