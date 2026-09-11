@@ -55,7 +55,19 @@ use crate::report::{Flag, Report, SCHEMA_VERSION};
 /// whichever branch of a consumer's formatter it falls through. So a metric in a
 /// new unit is added here in the same commit that emits it, by someone who has
 /// thought about what every consumer will do with it.
-pub const ALLOWED_UNITS: [&str; 7] = ["MB/s", "bytes", "cores", "ratio", "records/s", "rows", "us"];
+pub const ALLOWED_UNITS: [&str; 8] = [
+    "MB/s",
+    "bytes",
+    "cores",
+    // CFS periods in which the cgroup was throttled, from `nr_throttled`. A
+    // count of scheduling windows rather than of work, so it shares a unit with
+    // nothing else here.
+    "periods",
+    "ratio",
+    "records/s",
+    "rows",
+    "us",
+];
 
 /// What a clean tree contained.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
