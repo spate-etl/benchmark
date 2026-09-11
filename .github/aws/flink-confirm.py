@@ -180,9 +180,13 @@ def execute(session):
 
     # Two invocations because `[build].image` is a descriptor field, so one sweep
     # runs one runtime. Each carries its own A/A twin on its first arm.
-    screened = session.sweep("screen-java17", java17_cases(session.defaults), deadline=recovery_start)
+    # Capped forward as well as reserved backwards. The launcher gives a tuning
+    # run twelve hours whatever the plan asks for, so a window derived only from
+    # the deadline would hand the screen most of the session.
+    screen_end = min(recovery_start, time.monotonic() + SCREEN_S)
+    screened = session.sweep("screen-java17", java17_cases(session.defaults), deadline=screen_end)
     screened += session.sweep("screen-java21", java21_cases(session.defaults),
-                              image=IMAGE, deadline=recovery_start)
+                              image=IMAGE, deadline=screen_end)
     candidate = select_candidate(screened, session.defaults)
     (session.directory / "candidate.json").write_text(json.dumps(candidate, indent=2))
     knobs, image = candidate["knobs"], candidate["image"]
@@ -199,6 +203,7 @@ def execute(session):
     if not verdict["recovery_passed"]:
         verdict["reason"] = "Recovery or correctness failed on the selected candidate"
     else:
+        confirm_end = min(controls_start, time.monotonic() + CONFIRM_S)
         confirmed = []
         # Reverse the pair order every repetition. Each one-arm invocation gets
         # the harness's mandatory twin, so both configurations face the same gate
@@ -209,12 +214,12 @@ def execute(session):
             if rep % 2:
                 cases.reverse()
             for name, case, case_image, drain_budget in cases:
-                if controls_start - time.monotonic() < 2 * drain_budget:
+                if confirm_end - time.monotonic() < 2 * drain_budget:
                     verdict["budget_exhausted"] = True
                     break
                 confirmed += session.sweep(
                     f"{name}-{rep}", [(name, case)], observe=False, image=case_image,
-                    deadline=min(controls_start, time.monotonic() + 2 * drain_budget))
+                    deadline=min(confirm_end, time.monotonic() + 2 * drain_budget))
                 if not session.results[-1]["gc_flags_verified"]:
                     verdict["runtime_configuration_failed"] = True
                     break

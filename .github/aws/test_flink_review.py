@@ -74,6 +74,16 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "undersized"):
                 confirm.execute(None)
 
+    def test_every_phase_is_capped_forward_as_well_as_reserved_backwards(self):
+        # The launcher gives a tuning run twelve hours whatever the plan asks
+        # for. Windows derived only from the deadline would hand the screen most
+        # of the session; windows derived only from the caps would let an
+        # overrunning screen eat confirmation.
+        source = Path(__file__).with_name("flink-confirm.py").read_text()
+        self.assertIn("min(recovery_start, time.monotonic() + SCREEN_S)", source)
+        self.assertIn("min(controls_start, time.monotonic() + CONFIRM_S)", source)
+        self.assertIn("min(confirm_start, time.monotonic() + RECOVERY_S)", source)
+
     def test_confirmation_is_reserved_before_the_screen_is_offered_anything(self):
         self.assertGreaterEqual(
             confirm.REQUIRED_SECONDS,
