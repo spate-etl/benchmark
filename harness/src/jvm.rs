@@ -693,8 +693,14 @@ impl GcSummary {
     #[must_use]
     pub fn provenance(&self) -> String {
         let collector = self.configured.collector.as_deref().unwrap_or("unknown");
+        // Absent rather than guessed where the log carries no version line.
+        let runtime = self
+            .configured
+            .version
+            .as_deref()
+            .map_or(String::new(), |v| format!(" on JVM {v}"));
         let mut s = format!(
-            "GC: {collector}, {} pause(s) totalling {:.1}ms, max {:.1}ms ({})",
+            "GC: {collector}{runtime}, {} pause(s) totalling {:.1}ms, max {:.1}ms ({})",
             self.pauses,
             self.total_us / 1000.0,
             self.max_us / 1000.0,
@@ -985,6 +991,21 @@ mod tests {
         // this arm was never configured with, and the smaller of the two.
         let log = parse_gc_log(ZGC_LOG).expect("a real ZGC log parses");
         assert_eq!(log.heap.max_bytes, Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn provenance_names_the_runtime_that_produced_the_pauses() {
+        let summary = parse_gc_log(ZGC_LOG)
+            .expect("a real ZGC log parses")
+            .summarise(None)
+            .expect("a summary");
+        assert!(
+            summary
+                .provenance()
+                .contains("on JVM 25.0.3+9-LTS (release)"),
+            "{}",
+            summary.provenance()
+        );
     }
 
     #[test]

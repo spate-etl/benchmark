@@ -1,94 +1,129 @@
 # The Apache Flink arm
 
-Kafka → Confluent-framed Avro → `flatMap` → ClickHouse, held to
-[the fairness contract](../../methodology/), which is normative. Read that first;
-this file records only what is specific to Flink.
+Kafka → Confluent-framed Avro → flatten/filter → ClickHouse, under the
+[normative fairness contract](../../methodology/README.md).
 
 Delivery is **at-least-once**, with 5 s `AT_LEAST_ONCE` checkpoints to a shared
-filesystem path. The insert format is **`RowBinaryWithNamesAndTypes`**,
+filesystem path. The insert format is `RowBinaryWithNamesAndTypes`,
 uncompressed, over HTTP — forced by the ClickHouse connector's typed mode, which
-ignores `setClickHouseFormat`. It is row-oriented, so ClickHouse pivots every row
-into columns server-side; the Spate arm publishes a `rowbinary` control number for
-exactly this reason, and that control is the like-for-like comparison here.
+ignores `setClickHouseFormat`. It is row-oriented, so ClickHouse pivots every
+row into columns server-side; read this arm against Spate's `rowbinary` control.
 
-## Configuration
+Why throughput is what it is: the arm is blocked rather than saturated. Flink
+reports every subtask 100% busy with `idle = 0` while the cgroup uses 10.9 of
+its 32 cores, so a task thread computes about a third of its wall time and
+waits the rest. Per subtask that is a 69 ms INSERT cycle — roughly 23 ms of CPU
+and 46 ms waiting for ClickHouse to acknowledge, with one request in flight.
+Raising concurrency does not help: at the same batch size, two requests in
+flight measured lower throughput and 26% more CPU.
 
-Everything tunable lives in [`config.yaml`](config.yaml) or in the sink's
-env-driven batch settings, and nothing tunable lives in the Java: a reviewer
-should be able to read the whole tuning surface without decompiling a jar.
+## Configuration and accounting
 
-### Knobs the driver sets per run
+The driver reads `entrant.toml`; each result records the effective knobs.
+`config.yaml` supplies image defaults, and the official image entrypoint applies
+`FLINK_PROPERTIES` and `TASK_MANAGER_NUMBER_OF_TASK_SLOTS` before starting Java.
+`EXPECT_PARALLELISM` asserts the resolved job width at submission.
 
-These are the descriptor's knobs. The record carries what was in force, and that
-record is authoritative — `config.yaml`'s copies are the image's defaults, kept
-equal to the published values so a hand-run container matches the numbers.
-
-| Knob | Value | Reaches Flink as | What it controls |
-|---|---|---|---|
-| `parallelism` | **32** | `FLINK_PROPERTIES`, `TASK_MANAGER_NUMBER_OF_TASK_SLOTS` | Subtasks, one per **partition** (32), matched to the 32-CPU data plane. The drain is paced by the busiest source subtask: any subtask owning two partitions paces the drain at half rate. `KafkaSource` gives one partition to one subtask, so a 33rd would never receive a split. |
-| `max_rows` | **50,000** | `SINK_MAX_BATCH_ROWS` | Rows per INSERT, inside ClickHouse's recommended 10k–100k. The connector's own default is **500**, two orders of magnitude off. |
-| `buffered_rows` | **100,000** | `SINK_MAX_BUFFERED_ROWS` | Rows a subtask may hold. Must be *strictly* greater than `max_rows` or `AsyncSinkWriter` refuses to construct; `[[constraints]]` in `entrant.toml` catches that before a container starts. |
-| `inflight` | **2** | `SINK_MAX_IN_FLIGHT` | Concurrent INSERTs per subtask. The connector's default is **50**, which at parallelism 8 would permit 400 concurrent INSERTs and a corresponding flood of parts. |
-| `linger_ms` | **1000** | `SINK_LINGER_MS` | Bounds latency in sustained mode. In drain mode batches fill on size first. |
-
-These are **per subtask**, so the cross-arm quantities are the products: rows in
-flight are `parallelism × inflight × max_rows` = **800,000**, and total buffered
-rows are `parallelism × buffered_rows` = **800,000**. The arm holds `parallelism`
-copies of every buffer, and `buffered_rows` also bounds checkpoint state, because
-`AsyncSinkWriter.snapshotState` returns the buffered request entries.
-
-`EXPECT_PARALLELISM` is set alongside and is an **assertion, not a setting**:
-`ComparisonJob.assertParallelism` compares it against the parallelism the cluster
-resolved and refuses the job if they differ, so a run at the wrong width fails
-instead of producing a plausible number.
-
-Two image defaults are not knobs and are worth knowing: `SINK_MAX_BATCH_BYTES` is
-16 MiB and binds above roughly 150,000 rows per batch, so it would cap `max_rows`
-before `max_rows` does; `SINK_MAX_ROW_BYTES` is 1 MiB and must be no larger.
-
-### Values fixed in `config.yaml`
-
-| Key | Value | Why |
+| Setting | Baseline | Meaning |
 |---|---|---|
-| `taskmanager.memory.process.size` | `21504m` | Deliberately not scaled with the 96 GiB container: this sizing (~17.5g heap) measured 2.9M rows/s where a 28.8g heap measured 1.0M — GC churn grows with the heap while the live set does not. `entrants_are_valid` bounds it between the 24 GiB-era sizing and the compressed-oops boundary. |
-| `taskmanager.memory.managed.fraction` | **`0.0`** | The default `0.4` *reserves* 5.7 GiB whether or not anything uses it, and a stateless job on the `hashmap` backend uses none. |
-| `taskmanager.memory.task.off-heap.size` | `128m` | Headroom for the sink's socket I/O, so a burst is backpressure rather than `OutOfMemoryError: Direct buffer memory`. |
-| `jobmanager.memory.process.size` | `1920m` | 2 GiB container, 128 MiB slack. Deliberately generous: the control plane must never be what limits the arm, and its *measured* cost is what gets published. |
-| `execution.checkpointing.interval` | `5s` | Matched to every other arm's durability cadence. Checkpointing is off entirely unless an interval is set. |
-| `execution.checkpointing.mode` | `AT_LEAST_ONCE` | The default is `EXACTLY_ONCE`, which buys aligned barriers and buffer blocking for a guarantee no other arm provides. |
-| `execution.checkpointing.storage` | `filesystem` | The default `jobmanager` storage caps state at 5 MiB and would begin failing checkpoints under load. |
-| `execution.buffer-timeout.enabled` | `false` | Flush a network buffer only when it is full. In 2.x the old duration key split in two, so setting it is accepted-but-deprecated rather than effective. |
-| `pipeline.object-reuse` | `true` | Chained operators hand the same reference downstream instead of copying. |
-| `pipeline.operator-chaining.enabled` | `true` | Load-bearing: source, flatMap and sink writer are one chain, so no `GenericRecord` and no output row is ever serialized. |
-| `state.backend.type` | `hashmap` | The only state is Kafka offsets plus the sink's buffered entries — which is also why managed memory can be zero. |
+| Job parallelism / slots per TaskManager | 32 / 32 | Independent settings; one TaskManager initially |
+| Data-plane envelope | 32 CPUs / 96 GiB | One TaskManager under the current contract |
+| JobManager envelope | 1 CPU / 2 GiB | Additional control plane; measured cost is included in arm totals |
+| TaskManager process size | 21,504 MiB | Flink derives heap, direct memory, metaspace and overhead; not the cgroup limit |
+| Managed-memory fraction | 0 | This pipeline uses no managed-memory operators |
+| Task off-heap memory | 512 MiB | Configured separately from managed and network memory |
+| Object reuse / operator chaining | enabled / enabled | Avoid copies on eligible chained edges |
+| Checkpoints | 5 s, AT_LEAST_ONCE, filesystem | Shared named volume mounted on JobManager and TaskManagers |
+| `max_rows` / `buffered_rows` | 50,000 / 100,000 | Per sink subtask; buffered rows must exceed batch rows |
+| `inflight` / `linger_ms` | 2 / 1,000 ms | Requests per sink subtask; timer can flush below the row cap |
+| `max_batch_bytes` | 16 MiB | Independent batch limit; exposed for large-batch experiments |
+| `avro_mode` | generic | Optional generated specific records use the same canonical schema and shipped deserializer |
 
-**Flink 2.x reads `config.yaml` only.** `flink-conf.yaml` was removed in 2.0 and a
-file by that name is silently ignored. Our copy *replaces* the image's, so it must
-carry forward `env.java.opts.all`; the Dockerfile diffs it against the base image
-and fails the build on drift.
+At width 32 the configured capacities are **3.2 million buffered rows plus up to
+3.2 million rows in flight**. They are limits, not measured occupancy. The sink
+retains a map and cached wire bytes for each row, so multiplying wire size alone
+underestimates heap demand. Checkpoints serialize buffered maps; in-flight
+requests must complete before the checkpoint can proceed.
 
-[`log4j-console.properties`](log4j-console.properties) keeps the root logger at
-`INFO` and turns the ClickHouse, Kafka and Avro loggers down to `WARN` — the Kafka
-consumer logs its full resolved configuration per subtask, and the ClickHouse
-writer logs three lines per submitted batch. `CH_LOG_LEVEL=INFO` puts the
-ClickHouse lines back for debugging.
+The descriptor also exposes Kafka poll/fetch limits, ClickHouse connection and
+network-buffer settings, and extra TaskManager JVM options. Their defaults match
+the pinned libraries. JVM process sizing and collector choices are tuning
+variables, but the current normative sizing guard still applies to committed
+variants. Larger heaps and multiple TaskManagers are exploratory contract questions.
 
-GC is G1, the Java 17 / Flink 2.x default. `-Xlog:gc*` writes
-`/opt/flink/log/gc.log` and `gc-jm.log` for the driver to read.
+## Typing and serialization
 
-## Build
+The source uses Flink's `ConfluentRegistryAvroDeserializationSchema`. Generic mode
+produces `GenericRecordAvroTypeInfo`, whose stream serializer is Avro, not Kryo.
+The shipped decoder calls `datumReader.read(null, ...)`: pipeline object reuse
+does not make that decoder reuse the previous record.
+
+`SensorRow` is a Flink POJO. With Flink 2.2.1's automatic type extraction its two
+`LocalDateTime` fields are generic types and its tags are `NullableList<String>`.
+A POJO can contain a generic field. The connector's "typed/POJO mode" is a
+separate concept: it consumes the supplied `DataMapper`.
+
+Equal parallelism permits forward edges, but chaining also depends on operator
+strategies, slot sharing and exchange mode. Tests verify one chain at widths
+8, 16 and 32; diagnostic runs also capture the actual deployed job plan. On a
+chained edge, object reuse passes references without serializer copies. Avro
+input decoding, ClickHouse output encoding and checkpoint serialization still
+happen. A mismatched width does not automatically select Kryo.
+
+The transform reuses its outer row. The connector synchronously copies fields
+into a new map and caches encoded bytes. Strings and timestamps are immutable;
+tags are copied into a fresh list. Tests check aliasing and a connector
+checkpoint round trip, including nulls and timestamp precision.
+
+## ClickHouse batches
+
+Typed connector mode forces uncompressed `RowBinaryWithNamesAndTypes`, with
+`async_insert=0`. Spate's RowBinary control uses the closely related `RowBinary`
+format, with 262,144-row batches, 32 shards, four requests per shard and 500 ms
+linger. Configured limits are not actual batch sizes: compare ClickHouse's
+`ch_rows_per_insert`, query logs, and merge costs.
+
+The shipped adaptive rate limiter initially permits only one full batch's worth
+of in-flight rows, even with four request slots. Its capacity increases by ten
+rows per successful request, so matching another arm's configured request count
+does not match its effective concurrency.
+
+The connector's `actualRecordsPerBatch` and `actualBytesPerBatch` histograms are
+not reliable in this release: `flush()` updates them with the remaining buffer
+after `createNextAvailableBatch()` has removed the submitted rows. Read batch
+size from ClickHouse's `ch_rows_per_insert` instead.
+
+Larger batches cost retention rather than buying throughput here. The sink holds
+`buffered_rows` plus `inflight × max_rows` payloads per subtask, each a map and
+a copy of the encoded row, so the configured capacity is what the heap carries.
+
+## Build, tests and versions
 
 ```sh
 bench build flink
+bench run flink --reps 3
+python3 .github/aws/flink-review.py --dry-run
 ```
 
-By hand — the build context is the **repository root**, uniformly for every
-entrant, because the build needs `entrants/flink/` and `workload/schema/` and
-nothing else:
+The Docker build runs Java topology/transform/checkpoint tests and records the
+resolved Maven dependency graph in `/opt/flink/usrlib/dependencies.txt`.
 
-```sh
-docker build -f entrants/flink/Dockerfile -t spate-bench-flink .
-```
+| Component | Pin |
+|---|---|
+| Flink | 2.2.1; exact runtime image digest recorded per run |
+| Baseline Java | Temurin 17, runtime version recorded in GC logs |
+| Kafka connector | 5.0.0-2.2 |
+| Avro runtime/compiler | 1.11.4 |
+| ClickHouse Flink connector | `flink-connector-clickhouse-2.0.0`, version 0.2.0, classifier `all` |
+
+The ClickHouse artifact's `2.0.0` is a Flink compatibility coordinate, not its
+release version. Inspect the bundled Java-client version separately.
+
+`mode=tuning`, `selector=flink` in the ops launcher runs the bounded review
+session. Every trial uses `trigger=tuning`; artifacts go to the run's S3 logs
+prefix, and records remain outside `results/`. Final performance confirmation
+runs without profilers. An independently declared, clean measurement is required
+before publishing a chosen configuration.
 
 ## Run
 
@@ -128,19 +163,21 @@ docker run -d --name spate-bench-flink-tm --network spate-bench-net \
 hiding in a swapfile. The job never terminates itself: the source is unbounded and
 the driver removes the containers.
 
-**That recipe runs the image's defaults.** The driver additionally sets the seven
-variables the knob table names above, and those are what a published record's
+**That recipe runs the image's defaults.** The driver additionally sets the configuration
+variables in `entrant.toml`, and those are what a published record's
 knobs mean.
 
 A session cluster works too (`jobmanager` instead of `standalone-job`, then
 `flink run /opt/flink/usrlib/comparison-flink.jar`).
 
+
 ## Versions
 
 | Component | Coordinate / image | Version |
 |---|---|---|
-| Flink runtime | `flink:2.2.1-java17` (digest `sha256:3d050f35…8f1c`) | 2.2.1 |
-| JVM | Temurin (image default) | 17.0.19+10 |
+| Flink runtime | `flink:2.2.1-java17`; historical base digest `sha256:3d050f35…8f1c` | 2.2.1 |
+| JVM | Temurin 17 baseline | archived 17.0.19+10; review 17.0.20+8 |
+| Experimental runtime | `flink:2.2.1-java21` | Java 21, Generational ZGC candidate |
 | Build JDK | `maven:3.9-eclipse-temurin-17` | 17 |
 | Kafka connector | `org.apache.flink:flink-connector-kafka` | `5.0.0-2.2` |
 | Kafka client | `org.apache.kafka:kafka-clients` (transitive) | 4.2.0 |
@@ -152,8 +189,11 @@ A session cluster works too (`jobmanager` instead of `standalone-job`, then
 
 The full resolved graph is baked into the image at
 `/opt/flink/usrlib/dependencies.txt`, because Maven has no lockfile and the
-resolved graph is the only thing a later re-run can be compared against. The job
-jar is ~38 MB.
+resolved graph is the only thing a later re-run can be compared against. The result
+records the actual JVM version as `sut.toolchain`, the arm image digest, and
+the `runtime_image` knob. The image embeds its base-image name and refuses a
+mismatched knob. Historical abbreviated digests above are observations, not
+immutable build pins.
 
 Three coordinate traps worth knowing. `2.0.0` is part of the ClickHouse
 connector's **artifactId** — it names the Flink minor the artifact targets — and
@@ -166,38 +206,13 @@ with `NoClassDefFoundError` at submission rather than at resolution. And
 `pom.xml` declares `https://packages.confluent.io/maven/`, exactly as Flink's own
 pom does.
 
-## Differences worth knowing
 
-- **The JobManager is allocated on top of the data-plane envelope.** Charging a
-  whole coordinator against a single TaskManager is an artefact of running one
-  TaskManager; in production one JobManager serves a cluster. Its measured cost is
-  0.07–0.11 cores and about 780 MB of anonymous memory, against a 1344m heap whose
-  peak live set is roughly 25 MiB. Both figures are published, so a reader who
-  prefers the stricter rule can apply it.
-- **The sink batch knobs are per subtask**, so comparing this arm's `max_rows`
-  against a single-process arm's is not comparing the same quantity. The products
-  are above.
-- **This arm cannot choose its wire format.** `RowBinaryWithNamesAndTypes` is
-  forced by the connector's typed mode because the Java client has no Native
-  writer ([clickhouse-java#2509](https://github.com/ClickHouse/clickhouse-java/issues/2509),
-  open). That is a gap in the Java client rather than a Flink deficiency, and it is
-  not a win we claim: read this arm against Spate's `rowbinary` control.
-- **It does not send `insert_deduplication_token`.** The shared DDL sets
-  `non_replicated_deduplication_window = 1000`, so ClickHouse hashes this arm's
-  blocks and skips hashing those of an arm that sends a token. Its duplicate count
-  is reported rather than suppressed.
-- **`Rows.asciiUpper` is hand-written**, because `toUpperCase(Locale.ROOT)` is
-  still Unicode-aware — it maps `ß` to `SS` — and would not match the other arms'
-  `to_ascii_uppercase`. Only `a-z` is folded, which is what the contract specifies.
-- **`GenericRecord` string fields are converted to `java.lang.String` in the
-  flatMap.** Avro yields `org.apache.avro.util.Utf8`; the connector's `DataWriter`
-  would stringify it anyway, and its checkpointed payload map accepts only a fixed
-  set of value types.
-- **A JVM on Docker Desktop for macOS is not a JVM on Linux.** G1's heuristics
-  react to a vCPU count the hypervisor maps non-deterministically across
-  performance and efficiency cores, so this is the arm most likely to improve on
-  bare metal. JIT warm-up is inside the measured window and a full drain takes
-  about 49 seconds, so this arm's published rate is a **floor**.
+## Additional correctness and API disclosures
+
+- Typed mode cannot select Native output. It forces `RowBinaryWithNamesAndTypes`; compare it with Spate's RowBinary control when isolating wire-format effects (rule 5).
+- This arm does not supply `insert_deduplication_token`. With the shared `non_replicated_deduplication_window = 1000`, ClickHouse hashes its blocks; Spate supplies a token. Duplicate counts and server cost remain visible.
+- `Rows.asciiUpper` implements the workload's ASCII-only rule. Java's `toUpperCase(Locale.ROOT)` also folds non-ASCII text such as `ß`, so it cannot express that transform faithfully. This is application semantics, not a replacement framework decoder.
+- Generic Avro strings arrive as `Utf8`; the flatten converts them to `String`. Tests now feed both generic and generated specific records through the actual flatten, converter and connector checkpoint round trip.
 
 ## Two verified traps
 
@@ -209,9 +224,10 @@ throws, and a `LocalDateTime` built in any other zone lands offset.
 round-trip of `DateTime64(3)` and `DateTime64(6)`, `Nullable(Float64)` nulls,
 `LowCardinality(String)` and `Array(LowCardinality(String))`.
 
-The connector's own `numRecordsSend` and `numBytesSend` **over-report by 2×**: the
-counter is incremented inside the client's request-body callback, which runs twice
-per HTTP request. No row is inserted twice — `numRequestSubmitted` and
+The archived connector/client probe found that `numRecordsSend` and
+`numBytesSend` **over-report by 2×**: the
+counter is incremented inside the client's request-body callback, which ran twice
+per HTTP request in that probe. No row is inserted twice — `numRequestSubmitted` and
 `system.query_log`'s `written_rows` both agree with one insert per batch. This
 comparison reads no framework metric for any published figure, but anyone else
 reading those counters would be misled.

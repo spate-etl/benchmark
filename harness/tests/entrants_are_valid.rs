@@ -93,6 +93,48 @@ fn planned_entrants_explain_themselves() {
     }
 }
 
+/// The 24 GiB-era process size, below which the arm is denied memory it was
+/// allocated. `methodology/envelope.md` states this bound normatively.
+const FLINK_PROCESS_FLOOR_MIB: u64 = 21_504;
+
+/// The process size whose derived heap sits at the compressed-oops boundary:
+/// past roughly 32g every reference doubles.
+const FLINK_PROCESS_CEILING_MIB: u64 = 34_816;
+
+#[test]
+fn the_images_sizing_guard_enforces_the_same_bounds_this_test_does() {
+    // Two files have to agree and neither is obviously the source of truth —
+    // the shape that drifts silently. This test bounds the descriptor's knobs;
+    // `entrypoint.sh` bounds the value that reaches Flink, which also covers a
+    // hand-run image.
+    let entrypoint = std::fs::read_to_string(entrants_dir().join("flink/entrypoint.sh"))
+        .expect("read entrypoint.sh");
+    let guard = entrypoint
+        .lines()
+        .find(|l| l.contains("process_mib <") && l.contains("process_mib >"))
+        .expect("entrypoint.sh bounds process_mib on one line");
+    let bound = |marker: &str| -> u64 {
+        guard
+            .split_once(marker)
+            .and_then(|(_, rest)| {
+                let digits: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse().ok()
+            })
+            .unwrap_or_else(|| panic!("no integer after {marker:?} in {guard:?}"))
+    };
+    assert_eq!(
+        (bound("process_mib < "), bound("process_mib > ")),
+        (FLINK_PROCESS_FLOOR_MIB, FLINK_PROCESS_CEILING_MIB),
+        "entrants/flink/entrypoint.sh bounds the TaskManager process size at \
+         {guard:?}, which is not the {FLINK_PROCESS_FLOOR_MIB}..{FLINK_PROCESS_CEILING_MIB} MiB \
+         range this test and methodology/envelope.md declare"
+    );
+}
+
 #[test]
 fn flink_jvm_sizing_fits_its_declared_container() {
     // Defect this exists to prevent, found in the extracted harness: config.yaml
@@ -123,30 +165,44 @@ fn flink_jvm_sizing_fits_its_declared_container() {
             Role::ControlPlane => sizes[0],
             Role::DataPlane => sizes[1],
         };
-        // The JVM's floor is the smaller of the container less limit/8 slack
-        // (the JVM's accounting does not cover everything in the container)
-        // and the 24 GiB-era process size, which measured faster on the 96 GiB
-        // envelope than every larger heap tried — GC churn grows with the
-        // heap while the live set does not. The ceiling is the process size
-        // whose derived heap sits at the compressed-oops boundary: past ~32g
-        // every reference doubles. Below the floor the arm is denied memory
-        // it was allocated; above the ceiling it is denied a configuration
-        // anyone would deploy.
-        const ERA_PROCESS_MIB: u64 = 21_504;
-        const OOPS_BOUNDARY_PROCESS_MIB: u64 = 34_816;
-        let floor = (limit - limit / 8).min(ERA_PROCESS_MIB);
-        assert!(
-            jvm >= floor,
-            "flink {}: JVM process.size {jvm}m is under the {floor}m its \
-             {limit}m container affords; Flink is being handicapped",
-            container.name
-        );
-        assert!(
-            jvm <= limit.min(OOPS_BOUNDARY_PROCESS_MIB),
-            "flink {}: JVM process.size {jvm}m exceeds its container's {limit}m \
-             or the compressed-oops boundary",
-            container.name
-        );
+        // Enforce the current normative sizing guard on the effective knob,
+        // and retain explicit slack for memory outside Flink's process budget.
+        let process_sizes: Vec<u64> = if container.role == Role::DataPlane {
+            assert_eq!(flink.spec.env["BENCH_PROCESS_MIB"], "{{knob:process_mib}}");
+            assert!(
+                flink.spec.env["FLINK_PROPERTIES"]
+                    .contains("taskmanager.memory.process.size: {{knob:process_mib}}m")
+            );
+            flink
+                .spec
+                .variants
+                .iter()
+                .map(|v| {
+                    let effective = v.knobs["process_mib"]
+                        .as_integer()
+                        .expect("process_mib integer") as u64;
+                    if v.default {
+                        assert_eq!(effective, jvm, "image and descriptor sizing differ");
+                    }
+                    effective
+                })
+                .collect()
+        } else {
+            vec![jvm]
+        };
+        let floor = (limit - limit / 8).min(FLINK_PROCESS_FLOOR_MIB);
+        let slack = if container.role == Role::ControlPlane {
+            128
+        } else {
+            limit / 8
+        };
+        for effective in process_sizes {
+            assert!(
+                effective >= floor && effective <= (limit - slack).min(FLINK_PROCESS_CEILING_MIB),
+                "flink {}: effective process {effective}m must be >= {floor}m, <= 34816m and leave {slack}m slack in {limit}m",
+                container.name
+            );
+        }
     }
 }
 
@@ -185,7 +241,15 @@ fn kafka_connect_jvm_sizing_fits_its_declared_container() {
     };
     let jvm = flag("-Xmx") + flag("-XX:MaxDirectMemorySize=") + flag("-XX:MaxMetaspaceSize=");
 
-    let worker = kc.data_plane().expect("a data-plane container");
+    let worker = kc
+        .spec
+        .envelope
+        .as_ref()
+        .unwrap()
+        .containers
+        .iter()
+        .find(|c| c.role == Role::DataPlane)
+        .expect("a data-plane container");
     let limit = mib(&worker.memory).expect("container memory parses");
     // The same budgets as the Flink check: the 24 GiB-era total as the floor,
     // and 35072m — a 31744m heap at the compressed-oops boundary plus direct

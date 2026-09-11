@@ -34,7 +34,7 @@ short = "Flink"
 # operating system. `pinned` is asserted against what is resolved, so a
 # base-image bump refuses the run rather than publishing a mislabelled number.
 strategy = "command"
-command  = ["sh", "-c", "ls /opt/flink/lib | sed -n 's/^flink-dist-\\(.*\\)\\.jar$/\\1/p'"]
+command  = ["sh", "-c", "ls /opt/flink/lib | sed -n 's/^flink-dist-\\(.*\\)\\.jar$/\\1/p'; printf 'toolchain: '; java -version 2>&1 | head -1"]
 pinned   = "2.2.1"
 
 [build]
@@ -67,7 +67,7 @@ name   = "tm"
 cpus   = "32"
 memory = "96g"
 args   = ["taskmanager"]
-# Where config.yaml's env.java.opts.taskmanager sends -Xlog:gc*.
+# Where entrypoint.sh's FLINK_ENV_JAVA_OPTS_TM sends -Xlog:gc*.
 gc_log = "/opt/flink/log/gc.log"
 
 # The disclosure the control-plane container above requires: a container
@@ -104,20 +104,28 @@ SINK_MAX_BATCH_ROWS     = "{{knob:max_rows}}"
 SINK_MAX_BUFFERED_ROWS  = "{{knob:buffered_rows}}"
 SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
 
-# Parallelism, through the official image's own configuration contract. Both
-# variables are fed to Flink's `bin/config-parser-utils.sh`, which rewrites the
-# entry in `config.yaml` in place — so the value in force is a real `config.yaml`
-# entry a reviewer can read out of the running container. One knob drives both
-# keys because they are one decision: with a single TaskManager, a subtask needs
-# a slot, so parallelism above the slot count does not schedule and slots above
-# the parallelism are reserved and idle.
-#
-# The value is one subtask per PARTITION (32), not one per CPU: the drain is
-# paced by the busiest source subtask, and any subtask reading two partitions
-# paces the whole drain at half rate. On this envelope the two rules land on
-# the same number, 32 subtasks on 32 CPUs.
-FLINK_PROPERTIES                  = "parallelism.default: {{knob:parallelism}}"
-TASK_MANAGER_NUMBER_OF_TASK_SLOTS = "{{knob:parallelism}}"
+# Public Flink configuration, applied by the official image entrypoint.
+# Slots are per TaskManager; parallelism is the job width across all TaskManagers.
+# The current contract sizes consumer width to the 32-partition topic. Reduced
+# widths are exploratory pending methodology issue #78, not default candidates.
+FLINK_PROPERTIES = """
+parallelism.default: {{knob:parallelism}}
+taskmanager.memory.process.size: {{knob:process_mib}}m
+taskmanager.memory.network.max: {{knob:network_memory_max}}
+"""
+# The image's FLINK_PROPERTIES parser strips whitespace. Flink's own launcher
+# accepts this environment override directly, preserving JVM argument separators.
+BENCH_JVM_OPTS = "{{knob:jvm_opts}}"
+BENCH_PROCESS_MIB = "{{knob:process_mib}}"
+EXPECT_RUNTIME_IMAGE = "{{knob:runtime_image}}"
+TASK_MANAGER_NUMBER_OF_TASK_SLOTS = "{{knob:slots}}"
+SINK_MAX_BATCH_BYTES = "{{knob:max_batch_bytes}}"
+KAFKA_MAX_POLL_RECORDS = "{{knob:poll_records}}"
+KAFKA_MAX_PARTITION_FETCH_BYTES = "{{knob:partition_fetch_bytes}}"
+KAFKA_FETCH_MAX_BYTES = "{{knob:fetch_bytes}}"
+CLICKHOUSE_MAX_CONNECTIONS = "{{knob:connections}}"
+CLICKHOUSE_NETWORK_BUFFER_BYTES = "{{knob:network_buffer_bytes}}"
+AVRO_MODE = "{{knob:avro_mode}}"
 
 # The assertion, not the setting. `ComparisonJob` compares this against the
 # parallelism the cluster actually resolved and refuses the job if they differ,
@@ -149,5 +157,5 @@ id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
 approach = "realistic"
 default  = true
-knobs    = { parallelism = 32, linger_ms = 1000, max_rows = 50000, buffered_rows = 100000, inflight = 2 }
+knobs    = { parallelism = 32, slots = 32, process_mib = 21504, network_memory_max = "9223372036854775807b", runtime_image = "flink:2.2.1-java17", jvm_opts = "", avro_mode = "specific", linger_ms = 1000, max_rows = 12500, buffered_rows = 25000, inflight = 1, max_batch_bytes = 16777216, poll_records = 500, partition_fetch_bytes = 1048576, fetch_bytes = 52428800, connections = 10, network_buffer_bytes = 300000 }
 reports  = { wire_format = "rowbinary_nt" }

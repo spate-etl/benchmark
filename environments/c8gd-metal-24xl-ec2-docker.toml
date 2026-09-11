@@ -59,7 +59,7 @@ memory   = "8g"
 registry = "redpanda-builtin"
 
 [infra.clickhouse]
-image  = "clickhouse/clickhouse-server:26.3"
+image  = "clickhouse/clickhouse-server:26.3.33.24@sha256:810861a2e2d0188744f5f23b2d3ec9ff95812bcb9ddbb8fed13a377a7f305893"
 cpus   = "32"
 memory = "32g"
 
