@@ -2607,40 +2607,6 @@ fn rows_per_message(expected_rows: u64, batches: u64) -> f64 {
     expected_rows as f64 / batches as f64
 }
 
-/// Optional raw diagnostics, written after sampling and never used as results.
-fn save_diagnostic(name: &str, text: &str) {
-    if let Some(dir) = std::env::var_os("BENCH_DIAGNOSTICS_DIR") {
-        let dir = std::path::PathBuf::from(dir);
-        if let Err(error) = std::fs::create_dir_all(&dir).and_then(|()| {
-            std::fs::write(
-                dir.join(format!("{}-{name}", crate::report::now_ms())),
-                text,
-            )
-        }) {
-            eprintln!("could not save diagnostic {name}: {error}");
-        }
-    }
-}
-
-/// The arm's peak anonymous memory: what it held **at one instant**.
-///
-/// Not `SutCost::sum`'s figure, which adds each container's own maximum. That
-/// answers "how much could they have used between them" — an upper bound only
-/// reached if every container peaked simultaneously, which nothing makes them
-/// do. A JobManager that spikes during job submission and a TaskManager that
-/// spikes late in the drain are charged as though they had spiked together.
-///
-/// The error is in the wrong direction. It over-reports the arm total, so it
-/// penalises exactly the multi-process arms the envelope rule already goes out
-/// of its way not to penalise, on the one panel where a JVM looks worst.
-///
-/// Each container's own published figure stays its own maximum, which is right:
-/// that number *is* one container's peak, and `data_plane_peak_anon_bytes` is
-/// answering a different question from the arm total.
-///
-/// `summed` is the fallback and is unreachable from here: `simultaneous_peak_anon`
-/// returns `None` only when no series has a readable sample, and an arm in that
-/// state has already been refused for having no summary at all.
 fn arm_peak_anon(costs: &[(String, sampler::Samples)], summed: f64) -> f64 {
     let series: Vec<&[sampler::Sample]> = costs.iter().map(|(_, s)| s.rows.as_slice()).collect();
     sampler::simultaneous_peak_anon(&series).unwrap_or(summed)
@@ -2899,11 +2865,7 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         // charges the arm for its own start-up exactly as the sampler's window
         // does. The mapping is approximate and `GcSummary::from_uptime_s` says
         // what was actually covered.
-        let measured = jvm::read_gc_log(name, gc_log).and_then(|text| {
-            save_diagnostic(&format!("{name}-gc.log"), &text);
-            jvm::parse_gc_log(&text)?.summarise(Some((0.0, cost.window_s)))
-        });
-        match measured {
+        match jvm::measure(name, gc_log, Some((0.0, cost.window_s))) {
             Ok(summary) => match c.role {
                 Role::DataPlane => gc.data_plane = Some(summary),
                 Role::ControlPlane => gc.control_plane = Some(summary),

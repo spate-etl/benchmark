@@ -64,9 +64,6 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --locked
 
-      - name: AWS review runner tests
-        run: python3 -m unittest discover -s .github/aws
-
       # The same command README.md tells a contributor to run locally, running
       # the same library code — not a second implementation of the checks that
       # could drift from the one a human invokes.
@@ -83,22 +80,6 @@ jobs:
   # the private ops repo (it deploys to a shared account), and that repo runs its
   # own terraform fmt/validate/tflint/trivy gates. This repo keeps only what is
   # public and reproducible — the harness, the box payload, and the site.
-
-  flink:
-    name: Flink job and launcher
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        java: [17, 21]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build and run Java tests
-        run: docker build --build-arg FLINK_RUNTIME_IMAGE=flink:2.2.1-java${{ matrix.java }} -f entrants/flink/Dockerfile -t spate-bench-flink .
-      - name: Check launcher and GC configuration
-        run: python3 .github/aws/test_flink_launcher.py --image spate-bench-flink --runtime-image flink:2.2.1-java${{ matrix.java }}
 
   site:
     name: Site

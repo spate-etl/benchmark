@@ -104,13 +104,9 @@ const FLINK_PROCESS_CEILING_MIB: u64 = 34_816;
 #[test]
 fn the_images_sizing_guard_enforces_the_same_bounds_this_test_does() {
     // Two files have to agree and neither is obviously the source of truth —
-    // the shape that drifts silently. This test bounds the descriptor's knobs
-    // before a run; `entrypoint.sh` bounds the value that actually reaches
-    // Flink, inside the container, where a hand-run image is also covered.
-    // Drifted apart, one of them silently stops being a guard: a sweep could
-    // set a process size this test rejects and the image accepts, or the
-    // reverse, and the disagreement would surface as a mid-run container exit
-    // rather than as a failed check.
+    // the shape that drifts silently. This test bounds the descriptor's knobs;
+    // `entrypoint.sh` bounds the value that reaches Flink, which also covers a
+    // hand-run image.
     let entrypoint = std::fs::read_to_string(entrants_dir().join("flink/entrypoint.sh"))
         .expect("read entrypoint.sh");
     let guard = entrypoint

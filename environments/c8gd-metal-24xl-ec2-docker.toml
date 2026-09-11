@@ -59,11 +59,6 @@ memory   = "8g"
 registry = "redpanda-builtin"
 
 [infra.clickhouse]
-# Pinned by digest, with the version kept in the tag so the reference reads as
-# provenance rather than as a hash. The floating `:26.3` moved under three runs
-# without anyone editing this file — 26.3.22.7, then 26.3.23.7, then 26.3.33.24
-# — which `infra_digest` does not guard, because it excludes versions by design.
-# The broker has always been pinned exactly; this makes the shared sink match.
 image  = "clickhouse/clickhouse-server:26.3.33.24@sha256:810861a2e2d0188744f5f23b2d3ec9ff95812bcb9ddbb8fed13a377a7f305893"
 cpus   = "32"
 memory = "32g"
