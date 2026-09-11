@@ -93,6 +93,52 @@ fn planned_entrants_explain_themselves() {
     }
 }
 
+/// The 24 GiB-era process size, below which the arm is denied memory it was
+/// allocated. `methodology/envelope.md` states this bound normatively.
+const FLINK_PROCESS_FLOOR_MIB: u64 = 21_504;
+
+/// The process size whose derived heap sits at the compressed-oops boundary:
+/// past roughly 32g every reference doubles.
+const FLINK_PROCESS_CEILING_MIB: u64 = 34_816;
+
+#[test]
+fn the_images_sizing_guard_enforces_the_same_bounds_this_test_does() {
+    // Two files have to agree and neither is obviously the source of truth —
+    // the shape that drifts silently. This test bounds the descriptor's knobs
+    // before a run; `entrypoint.sh` bounds the value that actually reaches
+    // Flink, inside the container, where a hand-run image is also covered.
+    // Drifted apart, one of them silently stops being a guard: a sweep could
+    // set a process size this test rejects and the image accepts, or the
+    // reverse, and the disagreement would surface as a mid-run container exit
+    // rather than as a failed check.
+    let entrypoint = std::fs::read_to_string(entrants_dir().join("flink/entrypoint.sh"))
+        .expect("read entrypoint.sh");
+    let guard = entrypoint
+        .lines()
+        .find(|l| l.contains("process_mib <") && l.contains("process_mib >"))
+        .expect("entrypoint.sh bounds process_mib on one line");
+    let bound = |marker: &str| -> u64 {
+        guard
+            .split_once(marker)
+            .and_then(|(_, rest)| {
+                let digits: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse().ok()
+            })
+            .unwrap_or_else(|| panic!("no integer after {marker:?} in {guard:?}"))
+    };
+    assert_eq!(
+        (bound("process_mib < "), bound("process_mib > ")),
+        (FLINK_PROCESS_FLOOR_MIB, FLINK_PROCESS_CEILING_MIB),
+        "entrants/flink/entrypoint.sh bounds the TaskManager process size at \
+         {guard:?}, which is not the {FLINK_PROCESS_FLOOR_MIB}..{FLINK_PROCESS_CEILING_MIB} MiB \
+         range this test and methodology/envelope.md declare"
+    );
+}
+
 #[test]
 fn flink_jvm_sizing_fits_its_declared_container() {
     // Defect this exists to prevent, found in the extracted harness: config.yaml
@@ -148,7 +194,7 @@ fn flink_jvm_sizing_fits_its_declared_container() {
         } else {
             vec![jvm]
         };
-        let floor = (limit - limit / 8).min(21_504);
+        let floor = (limit - limit / 8).min(FLINK_PROCESS_FLOOR_MIB);
         let slack = if container.role == Role::ControlPlane {
             128
         } else {
@@ -156,7 +202,7 @@ fn flink_jvm_sizing_fits_its_declared_container() {
         };
         for effective in process_sizes {
             assert!(
-                effective >= floor && effective <= (limit - slack).min(34_816),
+                effective >= floor && effective <= (limit - slack).min(FLINK_PROCESS_CEILING_MIB),
                 "flink {}: effective process {effective}m must be >= {floor}m, <= 34816m and leave {slack}m slack in {limit}m",
                 container.name
             );

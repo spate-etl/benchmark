@@ -2,6 +2,7 @@
 """Docker smoke checks, called explicitly by CI after the Java build."""
 import argparse
 import subprocess
+import time
 
 
 def check_image(image, runtime_image="flink:2.2.1-java17"):
@@ -28,12 +29,55 @@ def check_image(image, runtime_image="flink:2.2.1-java17"):
         assert rejected.returncode != 0, (options, rejected.stdout)
     mismatch = launch(expected="deliberately-wrong-image")
     assert mismatch.returncode != 0, mismatch.stdout
+
+    # The sizing guard only runs on the `taskmanager` argument, so the checks
+    # above never reach it: they hand the entrypoint `bash`. Drive it directly.
+    # Every case here is refused before the entrypoint execs Flink, so no
+    # cluster starts and nothing needs a JobManager to talk to.
+    def size(process_mib, memory="96g"):
+        return subprocess.run(["docker", "run", "--rm", "--cpus=2", f"--memory={memory}",
+                               f"--memory-swap={memory}", "-e", f"BENCH_PROCESS_MIB={process_mib}",
+                               image, "taskmanager"],
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+
+    for process_mib, memory, why in (
+            ("21503", "96g", "one MiB below the era-sizing floor the envelope declares"),
+            ("34817", "96g", "one MiB above the compressed-oops boundary"),
+            ("not-a-number", "96g", "not an integer, so the arithmetic must not decide it"),
+            ("21504", "22g", "in range, but leaves under an eighth of the container "
+                             "outside Flink's own budget"),
+    ):
+        refused = size(process_mib, memory)
+        assert refused.returncode != 0, (process_mib, memory, why, refused.stdout)
+        assert "sizing guard" in refused.stdout or "outside Flink" in refused.stdout, \
+            (process_mib, why, refused.stdout)
+
+    # Positive control: without it every assertion above is satisfied by a
+    # guard that refuses everything, which would stop the arm from running at
+    # all. Started detached and removed by name — a `timeout` on `docker run`
+    # detaches the client and leaves the container alive. What happens after
+    # the guard does not matter here; a TaskManager with no JobManager to reach
+    # is free to fail, so long as it failed for its own reasons.
+    subprocess.run(["docker", "rm", "-f", "flink-launcher-sizing"], capture_output=True, timeout=30)
+    subprocess.run(["docker", "run", "-d", "--name", "flink-launcher-sizing", "--cpus=2",
+                    "--memory=96g", "--memory-swap=96g", "-e", "BENCH_PROCESS_MIB=21504",
+                    image, "taskmanager"], capture_output=True, timeout=60, check=True)
+    try:
+        time.sleep(10)
+        accepted = subprocess.run(["docker", "logs", "flink-launcher-sizing"], text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30).stdout
+    finally:
+        subprocess.run(["docker", "rm", "-f", "flink-launcher-sizing"], capture_output=True, timeout=30)
+    for refusal in ("sizing guard", "outside Flink"):
+        assert refusal not in accepted, (refusal, accepted[-2000:])
+
     if "java21" in runtime_image:
         zgc = launch("-XX:+UseZGC -XX:+ZGenerational")
         assert zgc.returncode == 0, zgc.stdout
         assert "Using The Z Garbage Collector" in zgc.stdout, zgc.stdout
         assert "java.version = 21" in zgc.stdout, zgc.stdout
-    print("Flink launcher: worker counts, custom coders, GC path, typo rejection and runtime provenance passed")
+    print("Flink launcher: worker counts, custom coders, GC path, typo rejection, "
+          "runtime provenance and TaskManager sizing bounds passed")
 
 
 if __name__ == "__main__":
