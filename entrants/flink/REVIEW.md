@@ -93,9 +93,9 @@ strategies, partitioner/exchange mode and maximum parallelism. `OperatorChain`
 selects reference-passing `ChainingOutput` when object reuse is enabled.
 
 Equal width, object reuse and memory/JVM tuning are permitted by rules 1–3.
-Multiple TaskManagers additionally require the contract change proposed in
-PR #76. No Kafka decode, ClickHouse
-encoding or recovery guarantee is removed. Generated Avro records use the
+Multiple TaskManagers would additionally require a contract change; PR #76
+proposed one and was closed, so that topology is out of scope here. No Kafka
+decode, ClickHouse encoding or recovery guarantee is removed. Generated Avro records use the
 canonical schema, Avro's compiler and Flink's public registry deserializer.
 
 Tests also preserve nulls, ASCII-only case folding, signed integer division,
@@ -112,13 +112,14 @@ there is no misleading sum of overlapping stop-the-world pauses. Existing
 single-TaskManager metric names remain. This corrects an unexercised topology;
 the published single-TaskManager measurement protocol remains v2.
 
-The envelope document and validator previously required exactly one data-plane
-container. [PR #76](https://github.com/spate-etl/benchmark/pull/76) proposes
-permitting one or more for every entrant with unchanged aggregate limits.
-Multi-TaskManager results depend on that separate contract proposal, as
-`CONTRIBUTING.md` requires;
-the existing contract does not permit this configuration. The implementation
-PR now retains exactly-one-container validation and has no dependency on PR #76.
+The envelope document and validator require exactly one data-plane container.
+[PR #76](https://github.com/spate-etl/benchmark/pull/76) proposed permitting one
+or more for every entrant with unchanged aggregate limits, and **was closed
+without being accepted**. So the contract has not moved: multi-TaskManager
+results would need a fresh proposal of their own, as `CONTRIBUTING.md` requires,
+and the four-TaskManager screening records below remain historical evidence that
+no configuration in this PR is eligible to be selected from. The implementation
+retains exactly-one-container validation and depends on no contract change.
 
 The runner `.github/aws/flink-review.py` prints its initial matrix with
 `--dry-run`. It preserves the environment, corpus, five-second at-least-once
@@ -270,8 +271,9 @@ runtime image and actual Java version are recorded and checked.
 
 Widths 8/16 require resolution of [issue #78](https://github.com/spate-etl/benchmark/issues/78):
 the normative text sizes consumers to the partition count. Even partition
-ownership at width 16 does not itself amend that text. Four TaskManagers require
-PR #76. They also provide four separate 21,504-MiB process budgets (84 GiB total)
+ownership at width 16 does not itself amend that text. Four TaskManagers would
+require a contract proposal that does not currently exist, PR #76 having been
+closed. They also provide four separate 21,504-MiB process budgets (84 GiB total)
 and approximately four times the configured heap: roughly 68.6 GiB versus
 17.2 GiB for one TaskManager. Both fit the same 96-GiB container envelope, but
 process layout and usable heap change together; this was not a topology-only test.
