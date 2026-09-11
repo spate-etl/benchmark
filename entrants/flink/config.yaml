@@ -106,6 +106,10 @@ pipeline:
     # Permit eligible operators to chain. Verify the deployed plan; encoding
     # and checkpoint serialization remain even with a fully chained graph.
     enabled: true
+  # Refuse at submission if any field ever needs Kryo instead of paying for it
+  # silently on every checkpoint, and on every row that crosses a
+  # repartitioning edge.
+  generic-types: false
 
 state:
   backend:

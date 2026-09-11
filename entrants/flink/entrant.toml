@@ -103,6 +103,15 @@ SINK_LINGER_MS          = "{{knob:linger_ms}}"
 SINK_MAX_BATCH_ROWS     = "{{knob:max_rows}}"
 SINK_MAX_BUFFERED_ROWS  = "{{knob:buffered_rows}}"
 SINK_MAX_IN_FLIGHT      = "{{knob:inflight}}"
+# Independent of `parallelism` — see ComparisonJob's own doc (sinkParallelism,
+# pipeline) for what a different value costs (a rescale()'d chain break, real
+# serialisation on that edge) and buys (a sink writer count decoupled from
+# consumer width). Empty tracks `parallelism` AT RUNTIME rather than being
+# pinned to today's value — deliberately, so that overriding `parallelism`
+# alone (a consumer-width sweep) cannot leave this knob stale and pointed at
+# the job's old width, which would insert an unplanned rescale() into a sweep
+# that never asked for one.
+SINK_PARALLELISM        = "{{knob:sink_parallelism}}"
 
 # Public Flink configuration, applied by the official image entrypoint.
 # Slots are per TaskManager; parallelism is the job width across all TaskManagers.
@@ -157,5 +166,5 @@ id       = "rowbinary-nt"
 label    = "Flink 2.2.1 · RowBinary"
 approach = "realistic"
 default  = true
-knobs    = { parallelism = 32, slots = 32, process_mib = 21504, network_memory_max = "9223372036854775807b", runtime_image = "flink:2.2.1-java17", jvm_opts = "", avro_mode = "specific", linger_ms = 1000, max_rows = 12500, buffered_rows = 25000, inflight = 1, max_batch_bytes = 16777216, poll_records = 500, partition_fetch_bytes = 1048576, fetch_bytes = 52428800, connections = 10, network_buffer_bytes = 300000 }
+knobs    = { parallelism = 32, sink_parallelism = "", slots = 32, process_mib = 21504, network_memory_max = "9223372036854775807b", runtime_image = "flink:2.2.1-java17", jvm_opts = "", avro_mode = "specific", linger_ms = 1000, max_rows = 12500, buffered_rows = 25000, inflight = 1, max_batch_bytes = 16777216, poll_records = 500, partition_fetch_bytes = 1048576, fetch_bytes = 52428800, connections = 10, network_buffer_bytes = 300000 }
 reports  = { wire_format = "rowbinary_nt" }

@@ -3,6 +3,7 @@ package dev.kainth.spatebench.flink;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.flink.api.java.typeutils.GenericTypeInfo;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.configuration.Configuration;
@@ -17,6 +18,8 @@ import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.util.Collector;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -46,8 +49,14 @@ class PipelineTest {
     void equalParallelismProducesOneChainAndTheRowIsAPojo() {
         var type = assertInstanceOf(PojoTypeInfo.class, TypeExtractor.getForClass(SensorRow.class));
         assertEquals(12, type.getArity());
-        // Record the actual nested types: a POJO is not a promise of no Kryo.
-        System.out.println("SensorRow resolved type: " + type);
+        // A POJO is not itself a promise of no Kryo: each field's own resolved
+        // type is what config.yaml's pipeline.generic-types: false also enforces
+        // at submission.
+        for (int i = 0; i < type.getArity(); i++) {
+            var field = type.getPojoFieldAt(i);
+            assertFalse(field.getTypeInformation() instanceof GenericTypeInfo,
+                    field.getField().getName() + " resolved to a generic (Kryo) type");
+        }
         for (String mode : new String[] {"generic", "specific"}) {
             for (int parallelism : new int[] {8, 16, 32}) {
                 var configuration = new Configuration();
@@ -55,12 +64,62 @@ class PipelineTest {
                 var env = StreamExecutionEnvironment.getExecutionEnvironment(configuration);
                 env.setParallelism(parallelism);
                 ComparisonJob.pipeline(env, ComparisonJob.kafkaSource(SensorBatchSchema.parse(SensorBatchSchema.json()), "earliest", mode),
-                        new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events");
+                        new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events", parallelism);
                 var graph = env.getStreamGraph().getJobGraph();
                 assertEquals(1, graph.getNumberOfVertices());
                 assertEquals(parallelism, graph.getVertices().iterator().next().getParallelism());
                 assertTrue(env.getConfig().isObjectReuseEnabled());
             }
+        }
+    }
+
+    @Test
+    void sinkParallelismEmptyTracksTheJobsWidthAtRuntime() {
+        assertEquals(32, ComparisonJob.resolveSinkParallelism("", 32));
+        assertEquals(16, ComparisonJob.resolveSinkParallelism("", 16));
+    }
+
+    @Test
+    void sinkParallelismRejectsNonPositiveValuesIncludingFlinksParallelismDefault() {
+        // -1 is Flink's own PARALLELISM_DEFAULT sentinel: accepted by Flink's API,
+        // resolved to the job's width at runtime, and exactly the value that would
+        // silently take pipeline()'s rescale() branch for what is really an
+        // equal-width job if this check did not exist.
+        var ex = assertThrows(IllegalArgumentException.class,
+                () -> ComparisonJob.resolveSinkParallelism("-1", 32));
+        assertTrue(ex.getMessage().contains("strictly positive"), ex.getMessage());
+        assertThrows(IllegalArgumentException.class,
+                () -> ComparisonJob.resolveSinkParallelism("0", 32));
+    }
+
+    @Test
+    void sinkParallelismRejectsWidthsThatDoNotEvenlyDivideTheJobsParallelism() {
+        // 32 has no factor of 5; some sink instance would own a different number of
+        // upstream partitions than the others under rescale()'s fixed-subset split.
+        var ex = assertThrows(IllegalArgumentException.class,
+                () -> ComparisonJob.resolveSinkParallelism("5", 32));
+        assertTrue(ex.getMessage().contains("evenly divide"), ex.getMessage());
+        // Every genuine divisor pair is accepted, in both directions.
+        for (int width : new int[] {1, 2, 4, 8, 16, 32}) {
+            assertEquals(width, ComparisonJob.resolveSinkParallelism(Integer.toString(width), 32));
+        }
+    }
+
+    @Test
+    void differingSinkParallelismRescalesIntoATwoVertexGraphAtItsOwnWidth() {
+        var env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(32);
+        ComparisonJob.pipeline(env,
+                ComparisonJob.kafkaSource(SensorBatchSchema.parse(SensorBatchSchema.json()), "earliest", "specific"),
+                new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events", 8);
+        var graph = env.getStreamGraph().getJobGraph();
+        // A repartitioning edge (rescale here) is a chain break: the source+flatten
+        // half and the sink are now separate vertices, unlike the equal-width case
+        // above, which chains into exactly one.
+        assertEquals(2, graph.getNumberOfVertices());
+        for (var vertex : graph.getVertices()) {
+            int expected = vertex.getName().contains("clickhouse") ? 8 : 32;
+            assertEquals(expected, vertex.getParallelism(), vertex.getName());
         }
     }
 
@@ -106,8 +165,8 @@ class PipelineTest {
             assertEquals(-2333L, first.get("value_scaled"));
             assertNull(first.get("quality"));
             assertEquals(List.of("tag-a", "tag-b"), first.get("tags"));
-            assertEquals(SensorBatchSchema.fromEpochMillis(1700000000123L), first.get("batch_ts"));
-            assertEquals(SensorBatchSchema.fromEpochMicros(1700000000123456L), first.get("send_ts"));
+            assertEquals(LocalDateTime.ofInstant(SensorBatchSchema.fromEpochMillis(1700000000123L), ZoneOffset.UTC), first.get("batch_ts"));
+            assertEquals(LocalDateTime.ofInstant(SensorBatchSchema.fromEpochMicros(1700000000123456L), ZoneOffset.UTC), first.get("send_ts"));
             assertEquals("next", payloads.get(2).getData().get("region"));
             var wrappers = payloads.stream().map(p -> new RequestEntryWrapper<>(p, p.getCachedBytesLength())).toList();
             var serializer = new ClickHouseAsyncSinkSerializer(false);

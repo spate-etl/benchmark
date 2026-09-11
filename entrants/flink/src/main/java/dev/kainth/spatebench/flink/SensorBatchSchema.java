@@ -7,8 +7,7 @@ import java.io.InputStream;
 import java.io.Serializable;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
+import java.time.Instant;
 
 /**
  * The one Avro schema, read from {@code workload/schema/sensor_batch.avsc}.
@@ -102,28 +101,25 @@ final class SensorBatchSchema implements Serializable {
     }
 
     /**
-     * Epoch milliseconds to the {@code LocalDateTime} the ClickHouse connector's
-     * {@code DataWriter} requires for a {@code DateTime64} column.
-     *
-     * <p>{@code DataWriter.writeDateTime64} accepts only {@code LocalDateTime} or
-     * {@code ZonedDateTime} and serialises with a hardcoded {@code ZoneId.of("UTC")}.
-     * A bare {@code Long} in the payload map would throw, and a {@code LocalDateTime}
-     * built in any other zone would land offset — which is the same 1970-class trap
-     * the shared DDL warns about for the Spate Native encoder. Verified end to end
-     * against the live server (whose {@code timezone()} is UTC).
+     * Epoch milliseconds to an {@code Instant}. Flink's {@code TypeExtractor}
+     * resolves {@code Instant} as a native basic type; {@code LocalDateTime} falls
+     * back to Kryo. An {@code Instant} also has no zone to get wrong, unlike a
+     * {@code LocalDateTime} built directly — the 1970-class trap the shared DDL
+     * warns about for the Spate Native encoder. {@link SensorRowMapper#toMap}
+     * converts to {@code LocalDateTime} at the one boundary that needs it: the
+     * ClickHouse connector's {@code DataWriter.writeDateTime64} accepts only
+     * {@code LocalDateTime}/{@code ZonedDateTime}.
      */
-    static LocalDateTime fromEpochMillis(long ms) {
-        return LocalDateTime.ofEpochSecond(
+    static Instant fromEpochMillis(long ms) {
+        return Instant.ofEpochSecond(
                 Math.floorDiv(ms, 1_000L),
-                (int) (Math.floorMod(ms, 1_000L) * 1_000_000L),
-                ZoneOffset.UTC);
+                Math.floorMod(ms, 1_000L) * 1_000_000L);
     }
 
-    /** Epoch microseconds to {@code LocalDateTime}; see {@link #fromEpochMillis}. */
-    static LocalDateTime fromEpochMicros(long us) {
-        return LocalDateTime.ofEpochSecond(
+    /** Epoch microseconds to {@code Instant}; see {@link #fromEpochMillis}. */
+    static Instant fromEpochMicros(long us) {
+        return Instant.ofEpochSecond(
                 Math.floorDiv(us, 1_000_000L),
-                (int) (Math.floorMod(us, 1_000_000L) * 1_000L),
-                ZoneOffset.UTC);
+                Math.floorMod(us, 1_000_000L) * 1_000L);
     }
 }
