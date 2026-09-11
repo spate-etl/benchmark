@@ -693,8 +693,19 @@ impl GcSummary {
     #[must_use]
     pub fn provenance(&self) -> String {
         let collector = self.configured.collector.as_deref().unwrap_or("unknown");
+        // The runtime's own account of itself, from the collector's
+        // initialisation block. A record already carries the image digest the
+        // arm ran, but that identifies the JDK only to whoever can still pull
+        // the image; comparing two runtimes is exactly the case where the
+        // record has to say which one it was. Absent rather than guessed when
+        // the log does not carry a version line.
+        let runtime = self
+            .configured
+            .version
+            .as_deref()
+            .map_or(String::new(), |v| format!(" on JVM {v}"));
         let mut s = format!(
-            "GC: {collector}, {} pause(s) totalling {:.1}ms, max {:.1}ms ({})",
+            "GC: {collector}{runtime}, {} pause(s) totalling {:.1}ms, max {:.1}ms ({})",
             self.pauses,
             self.total_us / 1000.0,
             self.max_us / 1000.0,
@@ -985,6 +996,24 @@ mod tests {
         // this arm was never configured with, and the smaller of the two.
         let log = parse_gc_log(ZGC_LOG).expect("a real ZGC log parses");
         assert_eq!(log.heap.max_bytes, Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn provenance_names_the_runtime_that_produced_the_pauses() {
+        // Comparing two JDKs is the case this exists for: without it a record
+        // distinguishes them only by an image reference, and "Java 21 was
+        // faster" rests on the reader trusting the label rather than the log.
+        let summary = parse_gc_log(ZGC_LOG)
+            .expect("a real ZGC log parses")
+            .summarise(None)
+            .expect("a summary");
+        assert!(
+            summary
+                .provenance()
+                .contains("on JVM 25.0.3+9-LTS (release)"),
+            "{}",
+            summary.provenance()
+        );
     }
 
     #[test]
