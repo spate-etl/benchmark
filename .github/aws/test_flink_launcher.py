@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Docker smoke checks, called explicitly by CI after the Java build."""
 import argparse
+import importlib.util
+from pathlib import Path
 import subprocess
 import time
+import tomllib
 
 
 def check_image(image, runtime_image="flink:2.2.1-java17"):
@@ -52,6 +55,17 @@ def check_image(image, runtime_image="flink:2.2.1-java17"):
         assert "sizing guard" in refused.stdout or "outside Flink" in refused.stdout, \
             (process_mib, why, refused.stdout)
 
+    # Every JVM option the review runner declares must actually start a JVM.
+    # `G1NewSizePercent` is experimental and needs `-XX:+UnlockExperimentalVMOptions`
+    # ahead of it; declared without the unlock it cost a screening cell, because
+    # the entrypoint disables `IgnoreUnrecognizedVMOptions` and the TaskManager
+    # exits at startup. That reads as a container that died during the drain, so
+    # nothing points at the flag. The cells are the source of truth here rather
+    # than a second list that can drift from them.
+    for name, options in declared_jvm_opts(runtime_image):
+        started = launch(options)
+        assert started.returncode == 0, (name, options, started.stdout)
+
     # Positive control: without it every assertion above is satisfied by a
     # guard that refuses everything, which would stop the arm from running at
     # all. Started detached and removed by name — a `timeout` on `docker run`
@@ -78,6 +92,18 @@ def check_image(image, runtime_image="flink:2.2.1-java17"):
         assert "java.version = 21" in zgc.stdout, zgc.stdout
     print("Flink launcher: worker counts, custom coders, GC path, typo rejection, "
           "runtime provenance and TaskManager sizing bounds passed")
+
+
+def declared_jvm_opts(runtime_image):
+    """Each screening cell's JVM options, for the runtime it names."""
+    here = Path(__file__).parent
+    spec = importlib.util.spec_from_file_location("confirm", here / "flink-confirm.py")
+    confirm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(confirm)
+    descriptor = here.parents[1] / "entrants/flink/entrant.toml"
+    defaults = tomllib.loads(descriptor.read_text())["variants"][0]["knobs"]
+    return [(name, knobs["jvm_opts"]) for name, knobs in confirm.screen_cases(defaults)
+            if knobs["jvm_opts"] and knobs["runtime_image"] == runtime_image]
 
 
 if __name__ == "__main__":

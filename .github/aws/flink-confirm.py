@@ -31,6 +31,12 @@ CONFIRM_S = 220 * 60
 CONTROLS_S = 30 * 60
 REQUIRED_SECONDS = SETUP_S + SCREEN_S + RECOVERY_S + CONFIRM_S + CONTROLS_S + 15 * 60
 
+# `G1NewSizePercent` is an experimental HotSpot flag and the unlock must precede
+# it. The entrypoint sets `-XX:-IgnoreUnrecognizedVMOptions`, so without this the
+# JVM refuses to start and the cell reads as a TaskManager that exited during the
+# drain rather than as a flag that was never valid.
+G1_YOUNG_FLOOR = "-XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=500"
+
 # A screening cell has one repetition, and the session-1 control drifted 1.7x
 # across seven hours. Nothing below this margin is a mechanism.
 SCREEN_FLOOR = 0.05
@@ -53,9 +59,8 @@ def java17_cases(defaults):
     reference = reference_knobs(defaults)
     return [
         (REFERENCE, reference),
-        ("g1-young-floor", dict(reference, jvm_opts="-XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=500")),
-        ("g1-young-floor-big-buffers",
-         dict(baseline_knobs(defaults), jvm_opts="-XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=500")),
+        ("g1-young-floor", dict(reference, jvm_opts=G1_YOUNG_FLOOR)),
+        ("g1-young-floor-big-buffers", dict(baseline_knobs(defaults), jvm_opts=G1_YOUNG_FLOOR)),
         ("network256m", dict(reference, network_memory_max="256m")),
         ("specific-avro", dict(reference, avro_mode="specific")),
     ]
