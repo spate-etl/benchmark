@@ -7,6 +7,10 @@ spec = importlib.util.spec_from_file_location("review", Path(__file__).with_name
 review = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(review)
 
+spec = importlib.util.spec_from_file_location("confirm", Path(__file__).with_name("flink-confirm.py"))
+confirm = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(confirm)
+
 
 class ReviewTests(unittest.TestCase):
     def setUp(self):
@@ -14,26 +18,28 @@ class ReviewTests(unittest.TestCase):
         self.defaults = tomllib.loads(self.original)["variants"][0]["knobs"]
 
     def test_every_case_is_schedulable_and_buffers_exceed_batch_cap(self):
-        for count in (1, 4):
-            cases = review.initial_cases(self.defaults)
-            if count == 4:
-                cases = [(name, dict(knobs, slots=8, process_mib=21504)) for name, knobs in cases]
-            doc = tomllib.loads(review.descriptor_text(self.original, cases, count))
-            containers = [c for c in doc["envelope"]["container"] if c["role"] == "data-plane"]
-            self.assertEqual(sum(int(c["cpus"]) for c in containers), 32)
-            self.assertEqual(sum(int(c["memory"][:-1]) for c in containers), 96)
-            self.assertEqual(len(containers), count)
-            for variant in doc["variants"]:
-                knobs = variant["knobs"]
-                self.assertGreater(knobs["buffered_rows"], knobs["max_rows"])
-                self.assertGreaterEqual(count * knobs["slots"], knobs["parallelism"])
-                self.assertEqual(knobs["taskmanagers"], count)
-
-    def test_matching_spate_control_does_not_silently_use_flink_defaults(self):
-        cases = dict(review.initial_cases(self.defaults))
-        control = cases["spate-rowbinary-settings"]
-        self.assertEqual((control["max_rows"], control["inflight"], control["linger_ms"]), (262144, 4, 500))
-        self.assertGreater(control["max_batch_bytes"], self.defaults["max_batch_bytes"])
+        # The cells the next session will actually run, not a historical
+        # matrix: a case that cannot schedule costs a drain to discover, and
+        # `buffered_rows <= max_rows` is a job that refuses to start rather
+        # than a slow one.
+        cases = ([("candidate", confirm.candidate_knobs(self.defaults)),
+                  ("baseline", confirm.baseline_knobs(self.defaults))]
+                 + confirm.screen_cases(self.defaults))
+        doc = tomllib.loads(review.descriptor_text(self.original, cases))
+        containers = [c for c in doc["envelope"]["container"] if c["role"] == "data-plane"]
+        self.assertEqual(sum(int(c["cpus"]) for c in containers), 32)
+        self.assertEqual(sum(int(c["memory"][:-1]) for c in containers), 96)
+        self.assertEqual(len(containers), 1)
+        for variant in doc["variants"]:
+            knobs = variant["knobs"]
+            self.assertGreater(knobs["buffered_rows"], knobs["max_rows"])
+            self.assertGreaterEqual(knobs["slots"], knobs["parallelism"])
+            # One TaskManager is the contract, so consumer width is sized to the
+            # 32-partition topic; reduced widths are deferred under issue #78.
+            self.assertEqual(knobs["parallelism"], 32)
+        tuned = tomllib.loads(review.descriptor_text(self.original, [("zgc", self.defaults)], tuned=True))
+        self.assertEqual([v["id"] for v in tuned["variants"] if v["default"]], ["rowbinary-nt"])
+        self.assertEqual(tuned["variants"][0]["approach"], "tuned")
 
     def test_confirmation_requires_bilateral_noise_throughput_and_correctness(self):
         def measurements(name, values, throughput=1000, duplicates=0):
@@ -54,19 +60,56 @@ class ReviewTests(unittest.TestCase):
         self.assertFalse(review.confirmation_summary(baseline + candidate[:2] + both)["accepted"])
         self.assertTrue(review.confirmation_summary(baseline + candidate + both)["accepted"])
 
-    def test_followup_is_predeclared_width32_zgc_and_refuses_short_budget(self):
+    def test_followup_screens_at_contract_width_and_refuses_a_short_budget(self):
         from unittest.mock import patch
-        spec = importlib.util.spec_from_file_location("confirmation", Path(__file__).with_name("flink-confirm.py"))
-        confirmation = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(confirmation)
-        knobs = confirmation.candidate_knobs(self.defaults)
-        self.assertEqual((knobs["parallelism"], knobs["slots"]), (32, 32))
-        self.assertEqual(knobs["runtime_image"], "flink:2.2.1-java21")
-        self.assertIn("-XX:+ZGenerational", knobs["jvm_opts"])
+        for name, knobs in confirm.screen_cases(self.defaults):
+            self.assertEqual((knobs["parallelism"], knobs["slots"]), (32, 32), name)
+            self.assertGreater(knobs["buffered_rows"], knobs["max_rows"], name)
+        probes = dict(confirm.screen_cases(self.defaults))
+        self.assertIn("-XX:+ZGenerational", probes["java21-zgc"]["jvm_opts"])
+        self.assertEqual(probes["java21-zgc"]["runtime_image"], "flink:2.2.1-java21")
+        self.assertEqual(probes[confirm.REFERENCE]["runtime_image"], "flink:2.2.1-java17")
         # Refusal happens before builds, descriptor writes or a benchmark call.
         with patch.dict("os.environ", {"FLINK_REVIEW_REMAINING_SECONDS": "14400"}):
             with self.assertRaisesRegex(RuntimeError, "undersized"):
-                confirmation.execute(None)
+                confirm.execute(None)
+
+    def test_confirmation_is_reserved_before_the_screen_is_offered_anything(self):
+        self.assertGreaterEqual(
+            confirm.REQUIRED_SECONDS,
+            confirm.SETUP_S + confirm.SCREEN_S + confirm.RECOVERY_S
+            + confirm.CONFIRM_S + confirm.CONTROLS_S,
+            "the declared budget must hold every phase cap it promises",
+        )
+
+    def test_a_screening_cell_is_selected_on_margin_rather_than_on_being_largest(self):
+        def measured(name, value, flags=()):
+            return dict(kind="measurement", status="ok", sut={"variant_id": name},
+                        flags=list(flags), metrics={"rows_per_s_per_core": {"value": value}})
+        aa = [dict(kind="verdict", metrics={"aa_spread": {"value": 0.01}})]
+        reference = measured(confirm.REFERENCE, 100)
+
+        # Largest, but inside the floor: one repetition cannot separate it.
+        noise = confirm.select_candidate([reference, measured("network256m", 104)] + aa, self.defaults)
+        self.assertEqual(noise["name"], confirm.REFERENCE)
+        self.assertEqual(noise["image"], None)
+
+        # Clear of both the floor and the sweep's own A/A spread.
+        won = confirm.select_candidate(
+            [reference, measured("network256m", 104), measured("java21-zgc", 130)] + aa, self.defaults)
+        self.assertEqual(won["name"], "java21-zgc")
+        self.assertEqual(won["image"], confirm.IMAGE)
+        self.assertNotIn("network256m", won["margins"])
+
+        # A noisy sweep raises the bar rather than lowering the candidate's.
+        loud = confirm.select_candidate(
+            [reference, measured("java21-zgc", 130)]
+            + [dict(kind="verdict", metrics={"aa_spread": {"value": 0.5}})], self.defaults)
+        self.assertEqual(loud["name"], confirm.REFERENCE)
+
+        # An A/A twin is not a repetition of the arm it shadows.
+        self.assertNotIn("control", confirm.medians(
+            [reference, measured("control", 900, flags=["aa_control"])]))
 
     def test_requested_gc_worker_flags_need_matching_runtime_logs(self):
         import tempfile

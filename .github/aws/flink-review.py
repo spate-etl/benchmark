@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Bounded Flink tuning session. All runs use the normal harness and tuning quarantine.
+"""Shared machinery for a bounded Flink tuning session, imported by its runners.
 
-No infrastructure profile or corpus changes. Run with --dry-run to inspect the
-initial matrix without Docker, AWS, file writes, or a benchmark invocation.
+Not a script. The first session's screening ladder ran from here at commit
+093a97b and cannot run again: its matrix is recorded, knob for knob, in
+`entrants/flink/review/2026-09-10-screening.jsonl`, which is the evidence. What
+remains is the part a later session reuses — the descriptor rewrite, the
+quarantined sweep, the diagnostic observer and the confirmation verdict.
+
+Every run goes through the normal harness and the tuning quarantine, and no
+infrastructure profile or corpus changes.
 """
-import argparse
 import json
 import os
 from pathlib import Path
@@ -23,40 +28,18 @@ ENV_ID = "c8gd-metal-24xl-ec2-docker"
 BENCH = ROOT / "target/release/bench"
 
 
-def initial_cases(defaults):
-    def case(name, **knobs):
-        return name, dict(defaults, **knobs)
-    return [
-        case("baseline"),
-        case("batch50k-one", inflight=1),
-        case("batch128k", max_rows=131072, buffered_rows=262144, inflight=1, max_batch_bytes=67108864),
-        case("batch256k", max_rows=262144, buffered_rows=524288, inflight=1, max_batch_bytes=67108864),
-        case("batch256k-fill", max_rows=262144, buffered_rows=524288, inflight=1, max_batch_bytes=67108864, linger_ms=5000),
-        case("small-buffer", max_rows=12500, buffered_rows=25000, inflight=1),
-        case("heap34g", process_mib=34816),
-        case("batch256k-heap64g", process_mib=65536, max_rows=262144, buffered_rows=524288,
-             inflight=1, max_batch_bytes=67108864, linger_ms=5000),
-        case("spate-rowbinary-settings", process_mib=65536, max_rows=262144, buffered_rows=524288,
-             inflight=4, max_batch_bytes=67108864, linger_ms=500),
-    ]
-
-
-def descriptor_text(original, cases, taskmanagers=1):
-    """Only replace the variant list and optionally split the existing TM envelope."""
+def descriptor_text(original, cases, tuned=False):
+    """Replace variants while preserving the single-TaskManager envelope."""
     head = original[:original.index("[[variants]]")]
-    if taskmanagers == 4:
-        start = head.index('[[envelope.container]]\nrole   = "data-plane"')
-        end = head.index("\n# The disclosure", start)
-        template = head[start:end]
-        head = head[:start] + "\n".join(template.replace('name   = "tm"', f'name   = "tm{i}"')
-            .replace('cpus   = "32"', 'cpus   = "8"').replace('memory = "96g"', 'memory = "24g"')
-            for i in range(4)) + head[end:]
     for i, (name, knobs) in enumerate(cases):
-        knobs = dict(knobs, taskmanagers=taskmanagers)
         head += '\n[[variants]]\n' + f'id = {json.dumps(name)}\nlabel = {json.dumps("Flink review " + name)}\n'
-        head += 'approach = "realistic"\n' + f'default = {str(i == 0).lower()}\n'
+        head += f'approach = "{ "tuned" if tuned else "realistic" }"\n' + f'default = {str(i == 0 and not tuned).lower()}\n'
         head += 'reports = { wire_format = "rowbinary_nt" }\n'
         head += 'knobs = { ' + ', '.join(f'{k} = {json.dumps(v)}' for k, v in knobs.items()) + ' }\n'
+    if tuned:
+        # Keep the ordinary Java 17 default; image overrides apply only to
+        # explicitly selected experimental variants through the harness's @tag.
+        head += "\n" + original[original.index("[[variants]]"):]
     return head
 
 
@@ -272,20 +255,17 @@ class Session:
         except (OSError, subprocess.TimeoutExpired) as error:
             print(f"Progress upload unavailable: {error}", flush=True)
 
-    def sweep(self, label, cases, *, reps=1, taskmanagers=1, observe=True, recovery=False, deadline=None, image=None):
+    def sweep(self, label, cases, *, reps=1, observe=True, recovery=False, deadline=None, image=None):
         deadline = deadline or self.screen_deadline
         remaining = deadline - time.monotonic()
         if remaining < 180:
             return []
         directory = self.directory / label
         directory.mkdir()
-        text = descriptor_text(self.original, cases, taskmanagers)
-        if image:
-            text = text.replace('image      = "spate-bench-flink"', f'image      = "{image}"')
-            text = text.replace('approach = "realistic"', 'approach = "tuned"')
+        text = descriptor_text(self.original, cases, tuned=bool(image))
         DESCRIPTOR.write_text(text)
         (directory / "entrant.toml").write_text(text)
-        command = [str(BENCH), "run", *["flink:" + name for name, _ in cases], "--reps", str(reps), "--trigger", "tuning", "--env", ENV_ID]
+        command = [str(BENCH), "run", *["flink:" + name + ("@" + image if image else "") for name, _ in cases], "--reps", str(reps), "--trigger", "tuning", "--env", ENV_ID]
         environment = dict(os.environ, BENCH_DIAGNOSTICS_DIR=str(directory))
         before = set()
         for file in (ROOT / "tuning" / ENV_ID / "flink").glob("*.jsonl"):
@@ -331,7 +311,7 @@ class Session:
         for file in (ROOT / "tuning" / ENV_ID / "flink").glob("*.jsonl"):
             records.extend(r for line in file.read_text().splitlines() if (r := json.loads(line))["run_id"] not in before)
         (directory / "records.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
-        outcome = {"label": label, "exit_code": code, "timed_out": timed_out, "taskmanagers": taskmanagers,
+        outcome = {"label": label, "exit_code": code, "timed_out": timed_out,
                    "recovery_attempted": bool(observer and observer.restarted), "recovery_restored": bool(observer and observer.recovered),
                    "gc_flags_verified": verify_gc_flags(directory, cases)}
         (directory / "outcome.json").write_text(json.dumps(outcome, indent=2))
@@ -340,19 +320,3 @@ class Session:
         DESCRIPTOR.write_text(self.original)
         self.upload()
         return records
-
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-    defaults = tomllib.loads(DESCRIPTOR.read_text())["variants"][0]["knobs"]
-    if args.dry_run:
-        print(json.dumps(initial_cases(defaults), indent=2))
-        return
-    raise SystemExit("Historical screening matrix only; use flink-confirm.py for the predeclared follow-up")
-
-
-if __name__ == "__main__":
-    main()

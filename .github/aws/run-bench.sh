@@ -82,7 +82,11 @@ payload() {
   if [ "$MODE" = tuning ]; then
     if [ "$SELECTOR" = flink ]; then
       export FLINK_REVIEW_REMAINING_SECONDS=$(( FLINK_REVIEW_PAYLOAD_END - $(date +%s) ))
-      run_step flink-confirm python3 "$REPO/.github/aws/flink-confirm.py"
+      if [ "${FLINK_REVIEW_STAGE:-confirm}" = priority ]; then
+        run_step flink-priority python3 "$REPO/.github/aws/flink-confirm.py" --priority
+      else
+        run_step flink-confirm python3 "$REPO/.github/aws/flink-confirm.py"
+      fi
     else
       run_step tune bash "$REPO/.github/aws/tune.sh"
     fi
