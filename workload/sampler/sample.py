@@ -10,7 +10,7 @@ Why this exists rather than `docker stats`: `docker stats` reports a
 pre-computed CPU *percentage* over an interval it chooses, with no cumulative
 microsecond counter, and its memory figure folds in page cache. Neither can
 support a defensible CPU-per-record number. Reading the cgroup directly gives
-monotonic `usage_usec` and a page-cache-free `anon` figure, identically for every
+monotonic `usage_usec` and a page-cache-free footprint, identically for every
 framework, with no cooperation from the thing being measured.
 
 Two deliberate design points:
@@ -23,11 +23,22 @@ Two deliberate design points:
   arm's container starts and stops it the moment the drain completes, and that
   interval IS the measurement window — every published rate divides by it — so no
   signalling between driver and sampler is needed.
-* **`anon` is the headline memory figure, not `memory.current`.** `memory.current`
-  includes page cache, which on a Kafka-consuming container is mostly the
-  kernel's doing rather than the framework's, and would let a framework look
-  expensive for reading its own input. Both are emitted so the published
-  breakdown can show them side by side.
+* **The headline memory figure is `anon` + `shmem`, not `memory.current`.**
+  `memory.current` includes page cache, which on a Kafka-consuming container is
+  mostly the kernel's doing rather than the framework's, and would let a
+  framework look expensive for reading its own input. `anon` alone is not the
+  whole of what a framework holds: a JVM running ZGC maps its heap from a
+  `memfd`, and the kernel charges that to `shmem` (a subset of `file`) rather
+  than to `anon`. Measured on the same JVM and the same 600 MiB live set, G1
+  reports `anon=691M shmem=0` and generational ZGC reports `anon=57M
+  shmem=805M` — so counting `anon` alone would publish a ZGC arm at a twelfth
+  of its real footprint. Both keys are emitted separately as well, so the split
+  is visible per record and the old definition can be recomputed from it.
+
+  `shmem` rather than `file` is the right addition: swap is disabled for every
+  arm, so swap-backed memory (tmpfs, shm, shared anonymous maps) is exactly as
+  irreducible as `anon`, while the rest of `file` is reclaimable page cache the
+  kernel populated on the framework's behalf.
 
 `nr_throttled`/`throttled_usec` are emitted because they answer "why was it X and
 not 2X?" directly: a throttled arm is CPU-cap-bound, and that is evidence rather
@@ -54,7 +65,9 @@ _CANDIDATES = (
 CG = next((p for p in _CANDIDATES if os.path.isdir(p)), None)
 
 CPU_KEYS = ("usage_usec", "user_usec", "system_usec", "nr_throttled", "throttled_usec")
-MEM_KEYS = ("anon", "file", "slab", "kernel_stack", "sock")
+# `shmem` sits next to `file` because it is a subset of it; see the module
+# docstring for why it is added to `anon` rather than left inside the cache.
+MEM_KEYS = ("anon", "file", "shmem", "slab", "kernel_stack", "sock")
 
 
 def keyed(path, wanted):

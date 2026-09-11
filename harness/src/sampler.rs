@@ -17,9 +17,32 @@
 //! `docker stats` reports a CPU *percentage* computed over an interval it
 //! chooses, with no cumulative microsecond counter, and its memory column folds
 //! in page cache. Neither supports a defensible CPU-per-record figure. Reading
-//! cgroup v2 directly gives monotonic `usage_usec` and a page-cache-free `anon`,
-//! plus `nr_throttled`/`throttled_usec`, which answer "why was it X and not 2X?"
-//! with evidence instead of inference.
+//! cgroup v2 directly gives monotonic `usage_usec` and a page-cache-free
+//! footprint, plus `nr_throttled`/`throttled_usec`, which answer "why was it X
+//! and not 2X?" with evidence instead of inference.
+//!
+//! ## What the published footprint counts
+//!
+//! `peak_anon_bytes` is **`anon` + `shmem`**, not `anon` alone.
+//!
+//! The quantity the comparison wants is memory the framework caused to exist
+//! and is holding — excluding the page cache the kernel populated on its behalf
+//! for reading its own input. `anon` was only ever a proxy for that, and one
+//! collector breaks the proxy: a JVM running ZGC maps its heap from a `memfd`,
+//! which the kernel charges to `shmem` rather than to `anon`. Measured on one
+//! JVM at a 600 MiB live set, G1 reports `anon=691M shmem=0` while generational
+//! ZGC reports `anon=57M shmem=805M` — a twelvefold under-report of a ZGC arm,
+//! on the panel where a JVM looks worst, and in the flattering direction.
+//!
+//! `shmem` rather than the whole of `file`, because swap is disabled for every
+//! arm (`--memory-swap` equals `--memory`): swap-backed memory — tmpfs, shm
+//! segments, shared anonymous maps — is exactly as irreducible as `anon`, while
+//! the rest of `file` is reclaimable cache. Adding it is therefore a
+//! generalisation of the existing definition rather than a different one, and
+//! it is arm-neutral: every arm measured before this change reported `shmem` of
+//! zero, which is why the key keeps its name and its published series stays
+//! continuous. [`SutCost::peak_shmem_bytes`] is published beside it so the split
+//! is visible per record and the old definition can be recomputed.
 //!
 //! The sidecar is necessary because on Docker Desktop for macOS the cgroup
 //! filesystem lives inside the Linux VM and cannot be read from the host at all.
@@ -110,10 +133,15 @@ pub struct Sample {
     pub mem_current: i64,
     /// Peak charged memory **since the sampler started**, via the held fd.
     pub mem_peak: i64,
-    /// Anonymous memory — the page-cache-free figure the comparison headlines.
+    /// Anonymous memory. With [`Sample::shmem`], the footprint the comparison
+    /// headlines; see the module docs for why neither is it alone.
     pub anon: i64,
-    /// Page-cache memory charged to the cgroup.
+    /// Page-cache memory charged to the cgroup. Includes `shmem`.
     pub file: i64,
+    /// Swap-backed cache: tmpfs, shm segments, shared anonymous maps — and a
+    /// ZGC heap, which is a `memfd` mapping. A subset of [`Sample::file`],
+    /// counted with [`Sample::anon`] rather than left in the page cache.
+    pub shmem: i64,
     /// Kernel slab memory.
     pub slab: i64,
     /// Kernel stack memory.
@@ -128,7 +156,7 @@ impl Sample {
             .split(',')
             .map(|s| s.trim().parse().ok())
             .collect::<Option<_>>()?;
-        if f.len() != 13 {
+        if f.len() != 14 {
             return None;
         }
         Some(Self {
@@ -142,9 +170,10 @@ impl Sample {
             mem_peak: f[7],
             anon: f[8],
             file: f[9],
-            slab: f[10],
-            kernel_stack: f[11],
-            sock: f[12],
+            shmem: f[10],
+            slab: f[11],
+            kernel_stack: f[12],
+            sock: f[13],
         })
     }
 
@@ -179,6 +208,7 @@ impl Sample {
             self.mem_peak,
             self.anon,
             self.file,
+            self.shmem,
             self.slab,
             self.kernel_stack,
             self.sock,
@@ -398,8 +428,13 @@ impl Samples {
             throttled_us: delta(|s| s.throttled_usec),
             nr_throttled: delta(|s| s.nr_throttled),
             // The headline footprint: page-cache-free, so a framework is not
-            // charged for the kernel caching its own input.
-            peak_anon_bytes: readable.iter().map(|s| s.anon).max()? as f64,
+            // charged for the kernel caching its own input — but swap-backed
+            // memory is the framework's, whatever the kernel files it under.
+            // See the module docs; a ZGC heap is a `memfd` and lands in `shmem`.
+            peak_anon_bytes: readable.iter().map(|s| s.anon + s.shmem).max()? as f64,
+            // Published as its own component so the split above is visible in
+            // the record and the pre-`shmem` definition can be recomputed.
+            peak_shmem_bytes: readable.iter().map(|s| s.shmem).max()? as f64,
             // Windowed, via the sampler's held fd — not a lifetime peak.
             peak_charged_bytes: last.mem_peak as f64,
             peak_current_bytes: readable.iter().map(|s| s.mem_current).max()? as f64,
@@ -409,7 +444,8 @@ impl Samples {
     }
 }
 
-/// The largest anonymous memory an arm occupied **at any one instant**.
+/// The largest footprint (`anon` + `shmem`) an arm occupied **at any one
+/// instant**.
 ///
 /// Not the sum of each container's peak, which is what a multi-container arm
 /// used to publish. Summing maxima answers "how much could they have used
@@ -467,7 +503,7 @@ pub fn simultaneous_peak_anon(series: &[&[Sample]]) -> Option<f64> {
             // Advance to the last sample that falls at or before this bucket's
             // edge, so a container sampling slightly fast does not skip one.
             while cursors[i] < rows.len() && rows[cursors[i]].t_ms < edge {
-                held[i] = Some(rows[cursors[i]].anon);
+                held[i] = Some(rows[cursors[i]].anon + rows[cursors[i]].shmem);
                 cursors[i] += 1;
             }
             if let Some(v) = held[i] {
@@ -535,8 +571,12 @@ pub struct SutCost {
     pub throttled_us: f64,
     /// CFS periods in which throttling occurred.
     pub nr_throttled: f64,
-    /// Peak anonymous memory — the published footprint figure.
+    /// Peak `anon` + `shmem` — the published footprint figure. See the module
+    /// docs for why `shmem` is in it.
     pub peak_anon_bytes: f64,
+    /// The `shmem` component of that peak, published separately so a reader can
+    /// see the split and recompute the figure without it.
+    pub peak_shmem_bytes: f64,
     /// Peak charged memory over the window (includes page cache).
     pub peak_charged_bytes: f64,
     /// Peak `memory.current` seen in the series (includes page cache).
@@ -596,6 +636,7 @@ impl SutCost {
             throttled_us: add(|p| p.throttled_us),
             nr_throttled: add(|p| p.nr_throttled),
             peak_anon_bytes: add(|p| p.peak_anon_bytes),
+            peak_shmem_bytes: add(|p| p.peak_shmem_bytes),
             peak_charged_bytes: add(|p| p.peak_charged_bytes),
             peak_current_bytes: add(|p| p.peak_current_bytes),
             samples: present.iter().map(|p| p.samples).min().unwrap_or(0),
@@ -891,12 +932,17 @@ mod tests {
 
     #[test]
     fn parses_a_sampler_row() {
+        // t_ms, usage, user, system, nr_throttled, throttled, mem_current,
+        // mem_peak, anon, file, shmem, slab, kernel_stack, sock.
         let row = "1784979298378,129007508,129003510,3998,660,602643,659456,659456,\
-                   135168,0,399080,16384,0";
+                   135168,24576,8192,399080,16384,0";
         let s = Sample::parse(row).expect("row parses");
         assert_eq!(s.t_ms, 1_784_979_298_378);
         assert_eq!(s.usage_usec, 129_007_508);
         assert_eq!(s.anon, 135_168);
+        assert_eq!(s.file, 24_576);
+        assert_eq!(s.shmem, 8_192);
+        assert_eq!(s.slab, 399_080);
         assert_eq!(s.sock, 0);
     }
 
@@ -910,7 +956,7 @@ mod tests {
     /// counter as the window's usage would charge the framework for its startup.
     #[test]
     fn a_single_sample_summarises_to_nothing() {
-        let one = Sample::parse("1000,5,5,0,0,0,10,10,10,0,0,0,0").expect("row parses");
+        let one = Sample::parse("1000,5,5,0,0,0,10,10,10,0,0,0,0,0").expect("row parses");
         let s = Samples {
             meta: String::new(),
             rows: vec![one],
@@ -922,10 +968,10 @@ mod tests {
     #[test]
     fn summarises_cpu_as_a_delta_over_the_window() {
         let rows = vec![
-            Sample::parse("1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0")
+            Sample::parse("1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0,0")
                 .expect("row parses"),
             // +2 CPU-seconds over 1 wall-second: two cores' worth.
-            Sample::parse("2000,3000000,2700000,300000,3,500,300,400,250,50,0,0,0")
+            Sample::parse("2000,3000000,2700000,300000,3,500,300,400,250,50,0,0,0,0")
                 .expect("row parses"),
         ];
         let cost = Samples {
@@ -953,14 +999,14 @@ mod tests {
     /// of a row fails together — so a row carrying one is not a sample.
     #[test]
     fn a_row_carrying_an_unreadable_counter_is_not_evidence() {
-        let good = Sample::parse("1000,5,5,0,0,0,10,10,10,0,0,0,0").expect("row parses");
+        let good = Sample::parse("1000,5,5,0,0,0,10,10,10,0,0,0,0,0").expect("row parses");
         assert!(good.readable());
         // `memory.peak` could not be reset, so the sampler reports the sentinel
         // for the whole run.
-        let no_peak = Sample::parse("1000,5,5,0,0,0,10,-1,10,0,0,0,0").expect("row parses");
+        let no_peak = Sample::parse("1000,5,5,0,0,0,10,-1,10,0,0,0,0,0").expect("row parses");
         assert!(!no_peak.readable());
         // `cpu.stat` could not be read at this instant.
-        let no_cpu = Sample::parse("1000,-1,-1,-1,-1,-1,10,10,10,0,0,0,0").expect("row parses");
+        let no_cpu = Sample::parse("1000,-1,-1,-1,-1,-1,10,10,10,0,0,0,0,0").expect("row parses");
         assert!(!no_cpu.readable());
     }
 
@@ -970,10 +1016,10 @@ mod tests {
     #[test]
     fn an_unreadable_last_sample_cannot_report_zero_cores() {
         let cost = series(&[
-            "1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0",
-            "2000,3000000,2700000,300000,0,0,300,400,250,50,0,0,0",
+            "1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0,0",
+            "2000,3000000,2700000,300000,0,0,300,400,250,50,0,0,0,0",
             // `cpu.stat` vanished under the sampler on the way out.
-            "3000,-1,-1,-1,-1,-1,300,400,250,50,0,0,0",
+            "3000,-1,-1,-1,-1,-1,300,400,250,50,0,0,0,0",
         ])
         .summarise()
         .expect("two readable samples summarise");
@@ -989,9 +1035,9 @@ mod tests {
     #[test]
     fn a_series_that_is_never_readable_summarises_to_nothing() {
         let s = series(&[
-            "1000,5,5,0,0,0,10,-1,10,0,0,0,0",
-            "2000,9,9,0,0,0,10,-1,10,0,0,0,0",
-            "3000,13,13,0,0,0,10,-1,10,0,0,0,0",
+            "1000,5,5,0,0,0,10,-1,10,0,0,0,0,0",
+            "2000,9,9,0,0,0,10,-1,10,0,0,0,0,0",
+            "3000,13,13,0,0,0,10,-1,10,0,0,0,0,0",
         ]);
         assert!(s.summarise().is_none());
     }
@@ -1003,8 +1049,8 @@ mod tests {
     #[test]
     fn throughput_and_cores_rest_on_the_same_window() {
         let cost = series(&[
-            "1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0",
-            "5000,9000000,8100000,900000,0,0,300,400,250,50,0,0,0",
+            "1000,1000000,900000,100000,0,0,100,100,80,20,0,0,0,0",
+            "5000,9000000,8100000,900000,0,0,300,400,250,50,0,0,0,0",
         ])
         .summarise()
         .expect("two samples summarise");
@@ -1025,14 +1071,14 @@ mod tests {
     fn an_arms_cores_are_its_summed_cpu_over_one_shared_window() {
         // A TaskManager over 4s, and a JobManager whose sampler saw 3.9s.
         let tm = series(&[
-            "1000,0,0,0,0,0,100,100,80,20,0,0,0",
-            "5000,8000000,8000000,0,0,0,300,400,250,50,0,0,0",
+            "1000,0,0,0,0,0,100,100,80,20,0,0,0,0",
+            "5000,8000000,8000000,0,0,0,300,400,250,50,0,0,0,0",
         ])
         .summarise()
         .expect("summarises");
         let jm = series(&[
-            "1100,0,0,0,0,0,10,10,8,2,0,0,0",
-            "5000,390000,390000,0,0,0,30,40,25,5,0,0,0",
+            "1100,0,0,0,0,0,10,10,8,2,0,0,0,0",
+            "5000,390000,390000,0,0,0,30,40,25,5,0,0,0,0",
         ])
         .summarise()
         .expect("summarises");
@@ -1058,8 +1104,8 @@ mod tests {
     #[test]
     fn an_arm_missing_one_containers_summary_has_no_cost_at_all() {
         let jm = series(&[
-            "1000,0,0,0,0,0,10,10,8,2,0,0,0",
-            "2000,67000,67000,0,0,0,30,40,25,5,0,0,0",
+            "1000,0,0,0,0,0,10,10,8,2,0,0,0,0",
+            "2000,67000,67000,0,0,0,30,40,25,5,0,0,0,0",
         ])
         .summarise()
         .expect("summarises");
@@ -1085,6 +1131,7 @@ mod tests {
                 mem_peak: a.max(0),
                 anon: a,
                 file: 0,
+                shmem: 0,
                 slab: 0,
                 kernel_stack: 0,
                 sock: 0,
@@ -1138,5 +1185,91 @@ mod tests {
     #[test]
     fn a_series_with_nothing_readable_has_no_peak() {
         assert_eq!(simultaneous_peak_anon(&[&Vec::<Sample>::new()]), None);
+    }
+
+    /// A row shaped like a real reading, so a test can vary one field at a time.
+    fn sample_with(t_ms: u64, anon: i64, shmem: i64) -> Sample {
+        Sample {
+            t_ms,
+            usage_usec: 1_000_000,
+            user_usec: 0,
+            system_usec: 0,
+            nr_throttled: 0,
+            throttled_usec: 0,
+            mem_current: anon + shmem,
+            mem_peak: anon + shmem,
+            anon,
+            file: shmem,
+            shmem,
+            slab: 0,
+            kernel_stack: 0,
+            sock: 0,
+        }
+    }
+
+    #[test]
+    fn a_zgc_heap_is_counted_even_though_the_kernel_files_it_under_shmem() {
+        // The numbers are a real measurement, not an invention: one JVM, one
+        // 600 MiB live set, `-XX:+UseG1GC` against `-XX:+UseZGC
+        // -XX:+ZGenerational`, reading the container's own `memory.stat`.
+        //
+        //   G1   anon=691113984  shmem=0
+        //   ZGC  anon= 56827904  shmem=805306368
+        //
+        // Counting `anon` alone would publish the ZGC arm at a twelfth of the
+        // G1 arm's footprint while it actually held more — a fabricated memory
+        // win, in the flattering direction, on the panel where a JVM looks
+        // worst.
+        let g1 = Samples {
+            meta: String::new(),
+            wall_s: 1.0,
+            rows: vec![
+                sample_with(1_000, 691_113_984, 0),
+                sample_with(2_000, 691_113_984, 0),
+            ],
+        }
+        .summarise()
+        .expect("a readable series");
+        let zgc = Samples {
+            meta: String::new(),
+            wall_s: 1.0,
+            rows: vec![
+                sample_with(1_000, 56_827_904, 805_306_368),
+                sample_with(2_000, 56_827_904, 805_306_368),
+            ],
+        }
+        .summarise()
+        .expect("a readable series");
+
+        assert!((g1.peak_anon_bytes - 691_113_984.0).abs() < f64::EPSILON);
+        assert!((g1.peak_shmem_bytes - 0.0).abs() < f64::EPSILON);
+        assert!((zgc.peak_anon_bytes - 862_134_272.0).abs() < f64::EPSILON);
+        assert!((zgc.peak_shmem_bytes - 805_306_368.0).abs() < f64::EPSILON);
+        assert!(
+            zgc.peak_anon_bytes > g1.peak_anon_bytes,
+            "the collector that holds more must not publish less: \
+             zgc {} against g1 {}",
+            zgc.peak_anon_bytes,
+            g1.peak_anon_bytes
+        );
+    }
+
+    #[test]
+    fn an_arms_simultaneous_peak_counts_shmem_too() {
+        // The multi-container path has its own maximum and must not diverge
+        // from `summarise`'s definition.
+        let tm = vec![sample_with(1_000, 10, 90), sample_with(2_000, 10, 90)];
+        assert_eq!(simultaneous_peak_anon(&[&tm]), Some(100.0));
+    }
+
+    #[test]
+    fn an_unreadable_shmem_makes_the_whole_row_unreadable() {
+        // `memory.stat` fails as a unit, so a sentinel in the new key must
+        // disqualify the row exactly as one in `anon` does — otherwise a `-1`
+        // would silently deduct a byte from a plausible total.
+        let mut row = sample_with(1_000, 100, 0);
+        row.shmem = -1;
+        assert!(!row.readable());
+        assert!(sample_with(1_000, 100, 0).readable());
     }
 }

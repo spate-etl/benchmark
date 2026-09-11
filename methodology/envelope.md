@@ -47,6 +47,22 @@ and asserts they match**. A mismatch fails the run; it does not warn.
 Swap is disabled (`--memory-swap` equals `--memory`) so memory pressure surfaces
 instead of hiding in a swapfile.
 
+**The published footprint is `anon` + `shmem`**, read from the container's own
+`memory.stat`, and excludes the rest of the page cache. The quantity being
+compared is memory the system caused to exist and is holding, rather than cache
+the kernel populated on its behalf for reading its own input — and `anon` alone
+is a proxy for that which one runtime breaks. A JVM using ZGC maps its heap from
+a `memfd`, which the kernel charges to `shmem` rather than to `anon`: on one JVM
+holding the same 600 MiB live set, G1 reports `anon=691M shmem=0` and
+generational ZGC reports `anon=57M shmem=805M`. Counting `anon` alone would
+publish that arm at a twelfth of its real footprint while it in fact held more,
+which is a fabricated memory win in the direction this benchmark can least
+afford. Because swap is disabled, swap-backed memory is exactly as irreducible
+as anonymous memory, so adding it generalises the existing definition rather
+than replacing it; every arm measured before the change reported `shmem` of
+zero. `peak_shmem_bytes` is published beside the total so the split is visible
+per record and the older definition can be recomputed from it.
+
 ## Why memory is generous, and what that does to the memory number
 
 CPU is the scarce resource here and memory is not: one arm runs at a time, so
@@ -80,7 +96,8 @@ minimum footprint. "How small can this run?" is a different question, and
 answering it properly means a separate sweep that tightens each arm until it
 degrades. That would be worth publishing; it is not what these numbers are.
 
-Every arm publishes `peak_anon` and `memory.peak`. JVM arms publish configured,
+Every arm publishes `peak_anon` (with its `peak_shmem` component) and
+`memory.peak`. JVM arms publish configured,
 committed and live heap beside them (`jvm_heap_*`), so the gap between
 allocation and use is visible rather than implied.
 
