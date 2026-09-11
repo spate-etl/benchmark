@@ -6,6 +6,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.connector.clickhouse.convertor.ClickHouseConvertor;
 import org.apache.flink.connector.clickhouse.convertor.DataMapper;
 import org.apache.flink.connector.clickhouse.sink.ClickHouseAsyncSink;
@@ -112,7 +113,7 @@ public final class ComparisonJob {
         // Flink's reflective input-type validation against that interface. Supply
         // the unchanged output POJO type through the public flatMap overload.
         batches.flatMap(new FlattenEvents(schemaJson),
-                        org.apache.flink.api.common.typeinfo.TypeInformation.of(SensorRow.class))
+                        TypeInformation.of(SensorRow.class))
                 .name("flatten-events")
                 .uid("flatten-events")
                 .sinkTo(sink)

@@ -3,10 +3,19 @@
 Kafka → Confluent-framed Avro → flatten/filter → ClickHouse, under the
 [normative fairness contract](../../methodology/README.md).
 
-The current default is the published baseline, not a claimed tuning optimum.
-The [fairness review](REVIEW.md) records evidence, experiments and remaining
-questions. Documentation corrections are tracked in
-[issue #74](https://github.com/spate-etl/benchmark/issues/74).
+Delivery is **at-least-once**, with 5 s `AT_LEAST_ONCE` checkpoints to a shared
+filesystem path. The insert format is `RowBinaryWithNamesAndTypes`,
+uncompressed, over HTTP — forced by the ClickHouse connector's typed mode, which
+ignores `setClickHouseFormat`. It is row-oriented, so ClickHouse pivots every
+row into columns server-side; read this arm against Spate's `rowbinary` control.
+
+Why throughput is what it is: the arm is blocked rather than saturated. Flink
+reports every subtask 100% busy with `idle = 0` while the cgroup uses 10.9 of
+its 32 cores, so a task thread computes about a third of its wall time and
+waits the rest. Per subtask that is a 69 ms INSERT cycle — roughly 23 ms of CPU
+and 46 ms waiting for ClickHouse to acknowledge, with one request in flight.
+Raising concurrency does not help: at the same batch size, two requests in
+flight measured lower throughput and 26% more CPU.
 
 ## Configuration and accounting
 
@@ -76,13 +85,17 @@ linger. Configured limits are not actual batch sizes: compare ClickHouse's
 
 The shipped adaptive rate limiter initially permits only one full batch's worth
 of in-flight rows, even with four request slots. Its capacity increases by ten
-rows per successful request. The [review](REVIEW.md) explains this constraint and
-why the connector's batch-size histograms are not reliable measurements of
-submitted batches in this release.
+rows per successful request, so matching another arm's configured request count
+does not match its effective concurrency.
 
-The review tests 131,072 and 262,144 rows, the Spate settings explicitly, and
-larger batches when justified. It raises the byte cap and tests linger as well
-as row limits. Large buffers may increase GC enough to offset fewer INSERTs.
+The connector's `actualRecordsPerBatch` and `actualBytesPerBatch` histograms are
+not reliable in this release: `flush()` updates them with the remaining buffer
+after `createNextAvailableBatch()` has removed the submitted rows. Read batch
+size from ClickHouse's `ch_rows_per_insert` instead.
+
+Larger batches cost retention rather than buying throughput here. The sink holds
+`buffered_rows` plus `inflight × max_rows` payloads per subtask, each a map and
+a copy of the encoded row, so the configured capacity is what the heap carries.
 
 ## Build, tests and versions
 
