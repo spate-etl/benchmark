@@ -1502,6 +1502,10 @@ fn measure(
             )
             .metric("throttled_us", Metric::minimize(d.cost.throttled_us, "us"))
             .metric(
+                "nr_throttled",
+                Metric::minimize(d.cost.nr_throttled, "periods"),
+            )
+            .metric(
                 "duplicate_rows",
                 // Reported, never suppressed: these are at-least-once systems and
                 // some duplication is legitimate. Hiding it would misrepresent the
@@ -2603,25 +2607,6 @@ fn rows_per_message(expected_rows: u64, batches: u64) -> f64 {
     expected_rows as f64 / batches as f64
 }
 
-/// The arm's peak anonymous memory: what it held **at one instant**.
-///
-/// Not `SutCost::sum`'s figure, which adds each container's own maximum. That
-/// answers "how much could they have used between them" — an upper bound only
-/// reached if every container peaked simultaneously, which nothing makes them
-/// do. A JobManager that spikes during job submission and a TaskManager that
-/// spikes late in the drain are charged as though they had spiked together.
-///
-/// The error is in the wrong direction. It over-reports the arm total, so it
-/// penalises exactly the multi-process arms the envelope rule already goes out
-/// of its way not to penalise, on the one panel where a JVM looks worst.
-///
-/// Each container's own published figure stays its own maximum, which is right:
-/// that number *is* one container's peak, and `data_plane_peak_anon_bytes` is
-/// answering a different question from the arm total.
-///
-/// `summed` is the fallback and is unreachable from here: `simultaneous_peak_anon`
-/// returns `None` only when no series has a readable sample, and an arm in that
-/// state has already been refused for having no summary at all.
 fn arm_peak_anon(costs: &[(String, sampler::Samples)], summed: f64) -> f64 {
     let series: Vec<&[sampler::Sample]> = costs.iter().map(|(_, s)| s.rows.as_slice()).collect();
     sampler::simultaneous_peak_anon(&series).unwrap_or(summed)
@@ -2857,7 +2842,10 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         return gc;
     };
     for c in &envelope.containers {
-        let Some((name, Some(cost))) = parts.iter().find(|(n, _)| n.ends_with(&c.name)) else {
+        let Some((name, Some(cost))) = parts
+            .iter()
+            .find(|(n, _)| *n == format!("spate-bench-sut-{}", c.name))
+        else {
             continue;
         };
         // The path is the descriptor's, because only the entrant's own
