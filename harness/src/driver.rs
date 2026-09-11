@@ -1063,16 +1063,27 @@ struct Measurement {
     ceiling_rows_per_s: u64,
 }
 
-/// Per-JVM GC accounting. Single-JVM roles retain their existing metric names.
-/// Multiple JVMs are reported individually: concurrent pauses and heap peaks
-/// must not be added and presented as whole-job downtime or simultaneous memory.
+/// What an arm's JVMs reported about their own collectors.
+///
+/// Two containers at most, and they are kept apart rather than summed: a pause
+/// total is time during which the arm was stopped, and adding a JobManager's
+/// pauses to a TaskManager's would name an interval in which neither was
+/// entirely stopped. The data plane's figures are the headline and the control
+/// plane's are published beside them, for the same reason
+/// `data_plane_cores_used` exists — so that nobody can claim we taxed a
+/// multi-process system for its control plane, nor that we hid what that plane
+/// cost.
+///
+/// Both `None` for an arm with no collector, and both `None` for a JVM arm whose
+/// log could not be read. Those are different facts and neither of them is a
+/// pause total of zero; [`gc_metrics`] emits nothing in either case, so a
+/// consumer sees an absence and has to render it as one.
 #[derive(Debug, Default)]
 struct Gc {
     /// The data-plane JVM's summary, where one could be read.
     data_plane: Option<jvm::GcSummary>,
     /// The control-plane JVM's summary, where one could be read.
     control_plane: Option<jvm::GcSummary>,
-    containers: Vec<(String, Role, jvm::GcSummary)>,
 }
 
 /// The part of a measurement that depends on how the arm was loaded.
@@ -1872,15 +1883,10 @@ fn run_arm(
         .and_then(|s| s.trim().parse::<u64>().ok())
     };
 
-    let data_plane_names: Vec<String> = arm
+    let data_plane_name = arm
         .entrant
-        .spec
-        .envelope
-        .iter()
-        .flat_map(|e| e.containers.iter())
-        .filter(|c| c.role == Role::DataPlane)
-        .map(|c| format!("spate-bench-sut-{}", c.name))
-        .collect();
+        .data_plane()
+        .map(|c| format!("spate-bench-sut-{}", c.name));
 
     let mut containers = ArmContainers::start(&specs);
 
@@ -1889,7 +1895,7 @@ fn run_arm(
     let (costs, held) = match opts.mode {
         Mode::Drain => hold_drain_window(
             &names,
-            &data_plane_names,
+            data_plane_name.as_ref(),
             &mut containers,
             &rows_now,
             expected_rows,
@@ -1902,7 +1908,7 @@ fn run_arm(
             ep,
             env,
             &names,
-            &data_plane_names,
+            data_plane_name.as_ref(),
             &mut containers,
             &rows_now,
             opts,
@@ -1973,7 +1979,10 @@ fn run_arm(
     }
 
     let summaries: Vec<Option<SutCost>> = parts.iter().map(|(_, c)| *c).collect();
-    let data_plane = data_plane_cost(arm.entrant, &costs);
+    let data_plane = parts
+        .iter()
+        .find(|(n, _)| Some(n) == data_plane_name.as_ref())
+        .and_then(|(_, c)| *c);
 
     // The producer round-robins across partitions and consumers drain them
     // independently, so at any instant the consumed frontier is RAGGED: the most
@@ -2035,13 +2044,6 @@ fn run_arm(
     }
     if let Some(s) = &gc.control_plane {
         note.push_str(&format!("; control plane {}", s.provenance()));
-    }
-    if gc.data_plane.is_none() {
-        for (name, role, summary) in &gc.containers {
-            if *role == Role::DataPlane {
-                note.push_str(&format!("; {name} {}", summary.provenance()));
-            }
-        }
     }
 
     // Rows landed INSIDE the window, and the two modes read that off different
@@ -2318,7 +2320,7 @@ enum Held {
 /// interval cost.
 fn hold_drain_window(
     names: &[String],
-    data_plane_names: &[String],
+    data_plane_name: Option<&String>,
     containers: &mut ArmContainers,
     rows_now: &dyn Fn() -> Option<u64>,
     expected_rows: u64,
@@ -2332,7 +2334,7 @@ fn hold_drain_window(
     loop {
         std::thread::sleep(Duration::from_millis(DRAIN_POLL_MS));
 
-        if let Some(why) = dead_container(names, data_plane_names, "the drain") {
+        if let Some(why) = dead_container(names, data_plane_name, "the drain") {
             let logs = containers.stop();
             return Err(with_logs(&why, &logs));
         }
@@ -2409,7 +2411,7 @@ fn hold_sustained_window(
     ep: &Endpoints,
     env: &Environment,
     names: &[String],
-    data_plane_names: &[String],
+    data_plane_name: Option<&String>,
     containers: &mut ArmContainers,
     rows_now: &dyn Fn() -> Option<u64>,
     opts: &RunOptions,
@@ -2451,7 +2453,7 @@ fn hold_sustained_window(
     let deadline = Instant::now() + Duration::from_secs(SUSTAINED_WARMUP_MAX_S);
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        if let Some(why) = dead_container(names, data_plane_names, "the sustained warm-up") {
+        if let Some(why) = dead_container(names, data_plane_name, "the sustained warm-up") {
             let logs = containers.stop();
             return Err(with_logs(&why, &logs));
         }
@@ -2489,7 +2491,7 @@ fn hold_sustained_window(
     let mut probe_failures = 0u32;
     while opened.elapsed() < Duration::from_secs(window_s) {
         std::thread::sleep(Duration::from_secs(1));
-        if let Some(why) = dead_container(names, data_plane_names, "the sustained window") {
+        if let Some(why) = dead_container(names, data_plane_name, "the sustained window") {
             let logs = containers.stop();
             return Err(with_logs(&why, &logs));
         }
@@ -2573,9 +2575,13 @@ fn stop_samplers(
 /// healthy JobManager burned the whole drain deadline and was recorded as
 /// slowness. That attributes a data-plane crash to the framework being slow,
 /// which is the wrong finding about the wrong thing.
-fn dead_container(names: &[String], data_plane_names: &[String], during: &str) -> Option<String> {
+fn dead_container(
+    names: &[String],
+    data_plane_name: Option<&String>,
+    during: &str,
+) -> Option<String> {
     let dead = names.iter().find(|n| !sampler::sut_alive(n.as_str()))?;
-    let role = if data_plane_names.contains(dead) {
+    let role = if Some(dead) == data_plane_name {
         "data-plane"
     } else {
         "control-plane"
@@ -2599,26 +2605,6 @@ fn rows_per_message(expected_rows: u64, batches: u64) -> f64 {
         return 0.0;
     }
     expected_rows as f64 / batches as f64
-}
-
-fn data_plane_cost(
-    entrant: &crate::entrant::Entrant,
-    costs: &[(String, sampler::Samples)],
-) -> Option<SutCost> {
-    let envelope = entrant.spec.envelope.as_ref()?;
-    let selected: Vec<&sampler::Samples> = costs
-        .iter()
-        .filter(|(name, _)| {
-            envelope.containers.iter().any(|c| {
-                c.role == Role::DataPlane && *name == format!("spate-bench-sut-{}", c.name)
-            })
-        })
-        .map(|(_, samples)| samples)
-        .collect();
-    let mut total = SutCost::sum(&selected.iter().map(|s| s.summarise()).collect::<Vec<_>>())?;
-    let series: Vec<&[sampler::Sample]> = selected.iter().map(|s| s.rows.as_slice()).collect();
-    total.peak_anon_bytes = sampler::simultaneous_peak_anon(&series)?;
-    Some(total)
 }
 
 /// Optional raw diagnostics, written after sampling and never used as results.
@@ -2918,21 +2904,10 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
             jvm::parse_gc_log(&text)?.summarise(Some((0.0, cost.window_s)))
         });
         match measured {
-            Ok(summary) => {
-                let same_role = envelope
-                    .containers
-                    .iter()
-                    .filter(|other| other.role == c.role)
-                    .count();
-                if same_role == 1 {
-                    match c.role {
-                        Role::DataPlane => gc.data_plane = Some(summary.clone()),
-                        Role::ControlPlane => gc.control_plane = Some(summary.clone()),
-                    }
-                } else {
-                    gc.containers.push((c.name.clone(), c.role, summary));
-                }
-            }
+            Ok(summary) => match c.role {
+                Role::DataPlane => gc.data_plane = Some(summary),
+                Role::ControlPlane => gc.control_plane = Some(summary),
+            },
             Err(why) => eprintln!("  no GC figures for {name}: {why}"),
         }
     }
@@ -2962,9 +2937,6 @@ fn gc_metrics(gc: &Gc) -> Vec<(String, Metric)> {
     }
     if let Some(s) = &gc.control_plane {
         out.extend(gc_metrics_for("control_plane_", s));
-    }
-    for (name, _, summary) in &gc.containers {
-        out.extend(gc_metrics_for(&format!("container_{name}_"), summary));
     }
     out
 }
@@ -4784,7 +4756,6 @@ mod tests {
             gc_metrics(&Gc {
                 data_plane: None,
                 control_plane: None,
-                containers: Vec::new(),
             })
             .is_empty()
         );
@@ -4800,7 +4771,6 @@ mod tests {
         let gc = Gc {
             data_plane: Some(gc_summary(9_666.0)),
             control_plane: Some(gc_summary(1_200.0)),
-            containers: Vec::new(),
         };
         let by_key: BTreeMap<String, Metric> = gc_metrics(&gc).into_iter().collect();
 
@@ -4818,7 +4788,6 @@ mod tests {
         let alone = Gc {
             data_plane: Some(gc_summary(9_666.0)),
             control_plane: None,
-            containers: Vec::new(),
         };
         let keys: Vec<String> = gc_metrics(&alone).into_iter().map(|(k, _)| k).collect();
         assert!(keys.iter().any(|k| k == "gc_pause_total_us"), "{keys:?}");
@@ -4840,7 +4809,6 @@ mod tests {
         let keys: Vec<String> = gc_metrics(&Gc {
             data_plane: Some(summary),
             control_plane: None,
-            containers: Vec::new(),
         })
         .into_iter()
         .map(|(k, _)| k)
@@ -4902,70 +4870,5 @@ mod tests {
         // and must not move.
         let one = vec![("sut".to_owned(), series(1_000, &[10, 900, 400]))];
         assert!((arm_peak_anon(&one, 900.0) - 900.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn multiple_taskmanagers_keep_individual_gc_and_sum_data_plane_cpu() {
-        let gc = Gc {
-            containers: vec![
-                ("tm0".into(), Role::DataPlane, gc_summary(100.0)),
-                ("tm1".into(), Role::DataPlane, gc_summary(200.0)),
-            ],
-            ..Gc::default()
-        };
-        let metrics: BTreeMap<_, _> = gc_metrics(&gc).into_iter().collect();
-        assert_eq!(metrics["container_tm0_gc_pause_total_us"].value, 100.0);
-        assert_eq!(metrics["container_tm1_gc_pause_total_us"].value, 200.0);
-        assert!(!metrics.contains_key("gc_pause_total_us"));
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
-        let mut entrants = crate::entrant::load_all(&root.join("entrants")).unwrap();
-        let entrant = entrants.iter_mut().find(|e| e.id() == "flink").unwrap();
-        let envelope = entrant.spec.envelope.as_mut().unwrap();
-        let mut tm = envelope
-            .containers
-            .iter()
-            .find(|c| c.role == Role::DataPlane)
-            .unwrap()
-            .clone();
-        envelope.containers.retain(|c| c.role != Role::DataPlane);
-        for name in ["tm0", "tm1"] {
-            tm.name = name.into();
-            envelope.containers.push(tm.clone());
-        }
-        let series = |usage: i64, memory: [i64; 2]| sampler::Samples {
-            meta: String::new(),
-            wall_s: 1.0,
-            rows: memory
-                .into_iter()
-                .enumerate()
-                .map(|(i, anon)| sampler::Sample {
-                    t_ms: 1000 + i as u64 * 1000,
-                    usage_usec: i as i64 * usage,
-                    user_usec: 0,
-                    system_usec: 0,
-                    nr_throttled: 0,
-                    throttled_usec: 0,
-                    mem_current: anon,
-                    mem_peak: anon,
-                    anon,
-                    file: 0,
-                    slab: 0,
-                    kernel_stack: 0,
-                    sock: 0,
-                })
-                .collect(),
-        };
-        let costs = vec![
-            ("spate-bench-sut-tm0".into(), series(1_000_000, [100, 10])),
-            ("spate-bench-sut-tm1".into(), series(2_000_000, [10, 200])),
-            ("spate-bench-sut-jm".into(), series(500_000, [999, 999])),
-            ("unrelated-tm0".into(), series(9_000_000, [999, 999])),
-        ];
-        let data = data_plane_cost(entrant, &costs).unwrap();
-        assert_eq!(data.cores_used, 3.0);
-        assert_eq!(data.peak_anon_bytes, 210.0);
     }
 }
