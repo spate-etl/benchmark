@@ -110,6 +110,12 @@ site renders them beside the numbers.
    filters and the derived columns are user code in every system, and every
    arm writes them.
 
+   An optimisation the system itself provides is exactly what we are here to
+   measure. Where a system evaluates the specified transform more cheaply than
+   a row at a time — ClickHouse applying a function over a `LowCardinality`
+   dictionary rather than per row — that is the engine doing its job, and an
+   arm should let it.
+
 2. **Optimise hard within rule 1.** Tune as an expert who wants to win would:
    correct parallelism, correct memory sizing, no needless copying, no debug
    logging on the hot path. A slow competitor arm is a bug in our benchmark, not a
