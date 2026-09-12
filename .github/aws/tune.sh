@@ -345,6 +345,11 @@ if [ "$(best_rows)" -lt "$GATE_ROWS_PER_S" ]; then
   exit 0
 fi
 
+# Stock JVM at the largest zero-based compressed-oops heap for the default
+# 8-byte alignment. No flags at all: if a small batch is enough on its own, this
+# is what ships, and p500-30g is the same heap and batch with the flags on.
+cellk p500-stock   30720  500 ""
+
 cellk p500-control 63488  500 "$CONTROL"
 cellk p500-30g     30720  500 "$SMALL"
 cellk p500-ihop    63488  500 "$IHOP"
