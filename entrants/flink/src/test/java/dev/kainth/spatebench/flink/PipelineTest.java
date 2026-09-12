@@ -3,6 +3,7 @@ package dev.kainth.spatebench.flink;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.flink.api.java.typeutils.GenericTypeInfo;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.configuration.Configuration;
@@ -17,6 +18,8 @@ import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.util.Collector;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -46,8 +49,13 @@ class PipelineTest {
     void equalParallelismProducesOneChainAndTheRowIsAPojo() {
         var type = assertInstanceOf(PojoTypeInfo.class, TypeExtractor.getForClass(SensorRow.class));
         assertEquals(12, type.getArity());
-        // Record the actual nested types: a POJO is not a promise of no Kryo.
-        System.out.println("SensorRow resolved type: " + type);
+        // A POJO is not itself a promise of no Kryo; config.yaml's
+        // pipeline.generic-types: false enforces the same thing at submission.
+        for (int i = 0; i < type.getArity(); i++) {
+            var field = type.getPojoFieldAt(i);
+            assertFalse(field.getTypeInformation() instanceof GenericTypeInfo,
+                    field.getField().getName() + " resolved to a generic (Kryo) type");
+        }
         for (String mode : new String[] {"generic", "specific"}) {
             for (int parallelism : new int[] {8, 16, 32}) {
                 var configuration = new Configuration();
@@ -106,8 +114,8 @@ class PipelineTest {
             assertEquals(-2333L, first.get("value_scaled"));
             assertNull(first.get("quality"));
             assertEquals(List.of("tag-a", "tag-b"), first.get("tags"));
-            assertEquals(SensorBatchSchema.fromEpochMillis(1700000000123L), first.get("batch_ts"));
-            assertEquals(SensorBatchSchema.fromEpochMicros(1700000000123456L), first.get("send_ts"));
+            assertEquals(LocalDateTime.ofInstant(SensorBatchSchema.fromEpochMillis(1700000000123L), ZoneOffset.UTC), first.get("batch_ts"));
+            assertEquals(LocalDateTime.ofInstant(SensorBatchSchema.fromEpochMicros(1700000000123456L), ZoneOffset.UTC), first.get("send_ts"));
             assertEquals("next", payloads.get(2).getData().get("region"));
             var wrappers = payloads.stream().map(p -> new RequestEntryWrapper<>(p, p.getCachedBytesLength())).toList();
             var serializer = new ClickHouseAsyncSinkSerializer(false);
