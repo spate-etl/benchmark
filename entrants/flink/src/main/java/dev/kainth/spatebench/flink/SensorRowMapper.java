@@ -5,6 +5,8 @@ import com.clickhouse.data.ClickHouseDataType;
 import org.apache.flink.connector.clickhouse.convertor.ColumnBinding;
 import org.apache.flink.connector.clickhouse.convertor.DataMapper;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -45,8 +47,9 @@ public final class SensorRowMapper extends DataMapper<SensorRow> {
         m.put("value_scaled", r.valueScaled);
         m.put("quality", r.quality);
         m.put("tags", r.tags);
-        m.put("batch_ts", r.batchTs);
-        m.put("send_ts", r.sendTs);
+        // DataWriter.writeDateTime64 accepts only LocalDateTime/ZonedDateTime.
+        m.put("batch_ts", LocalDateTime.ofInstant(r.batchTs, ZoneOffset.UTC));
+        m.put("send_ts", LocalDateTime.ofInstant(r.sendTs, ZoneOffset.UTC));
     }
 
     @Override

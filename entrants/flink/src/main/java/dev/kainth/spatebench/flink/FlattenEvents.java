@@ -5,7 +5,7 @@ import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.util.Collector;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -55,11 +55,11 @@ public final class FlattenEvents extends RichFlatMapFunction<GenericRecord, Sens
         String region = regionRaw == null ? "" : regionRaw.toString();
 
         // Hoisted out of the event loop: both timestamps are per-message, so one
-        // LocalDateTime pair is shared by all rows of the batch. LocalDateTime is
-        // immutable, so sharing it across buffered payloads is safe.
-        LocalDateTime batchTs =
+        // Instant pair is shared by all rows of the batch. Instant is immutable,
+        // so sharing it across buffered payloads is safe.
+        Instant batchTs =
                 SensorBatchSchema.fromEpochMillis((Long) batch.get(SensorBatchSchema.BATCH_TS_MS));
-        LocalDateTime sendTs =
+        Instant sendTs =
                 SensorBatchSchema.fromEpochMicros((Long) batch.get(SensorBatchSchema.SEND_TS_US));
 
         List<?> events = (List<?>) batch.get(SensorBatchSchema.EVENTS);

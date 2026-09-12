@@ -34,16 +34,19 @@ The driver reads `entrant.toml`; each result records the effective knobs.
 | Task off-heap memory | 512 MiB | Configured separately from managed and network memory |
 | Object reuse / operator chaining | enabled / enabled | Avoid copies on eligible chained edges |
 | Checkpoints | 5 s, AT_LEAST_ONCE, filesystem | Shared named volume mounted on JobManager and TaskManagers |
-| `max_rows` / `buffered_rows` | 50,000 / 100,000 | Per sink subtask; buffered rows must exceed batch rows |
-| `inflight` / `linger_ms` | 2 / 1,000 ms | Requests per sink subtask; timer can flush below the row cap |
+| `max_rows` / `buffered_rows` | 12,500 / 25,000 | Per sink subtask; buffered rows must exceed batch rows |
+| `inflight` / `linger_ms` | 1 / 1,000 ms | Requests per sink subtask; timer can flush below the row cap |
 | `max_batch_bytes` | 16 MiB | Independent batch limit; exposed for large-batch experiments |
 | `avro_mode` | generic | Optional generated specific records use the same canonical schema and shipped deserializer |
 
-At width 32 the configured capacities are **3.2 million buffered rows plus up to
-3.2 million rows in flight**. They are limits, not measured occupancy. The sink
-retains a map and cached wire bytes for each row, so multiplying wire size alone
-underestimates heap demand. Checkpoints serialize buffered maps; in-flight
-requests must complete before the checkpoint can proceed.
+At width 32 the configured capacities are **800,000 buffered rows plus up to
+400,000 rows in flight**. They are limits, and measured occupancy is far below
+them: a Full GC during issue #86's ladder compacted the TaskManager heap to
+**~350 MiB**, because ClickHouse keeps up and the buffer drains rather than
+filling. Configured retention is a bound, not a footprint, and sizing the heap
+from `buffered_rows + inflight × max_rows` overstates it by orders of magnitude.
+Checkpoints serialize buffered maps; in-flight requests must complete before the
+checkpoint can proceed.
 
 The descriptor also exposes Kafka poll/fetch limits, ClickHouse connection and
 network-buffer settings, and extra TaskManager JVM options. Their defaults match
@@ -58,10 +61,14 @@ produces `GenericRecordAvroTypeInfo`, whose stream serializer is Avro, not Kryo.
 The shipped decoder calls `datumReader.read(null, ...)`: pipeline object reuse
 does not make that decoder reuse the previous record.
 
-`SensorRow` is a Flink POJO. With Flink 2.2.1's automatic type extraction its two
-`LocalDateTime` fields are generic types and its tags are `NullableList<String>`.
-A POJO can contain a generic field. The connector's "typed/POJO mode" is a
-separate concept: it consumes the supplied `DataMapper`.
+`SensorRow` is a Flink POJO and every field resolves to a native serializer.
+Timestamps are `Instant`, which `TypeExtractor` handles as a basic type;
+`LocalDateTime` does not resolve and falls back to Kryo, which would be paid on
+every checkpoint. `pipeline.generic-types: false` refuses the job at submission
+if that ever stops holding, and `SensorRowMapper.toMap` converts to
+`LocalDateTime` at the one boundary that requires it —
+`DataWriter.writeDateTime64` accepts nothing else. The connector's "typed/POJO
+mode" is a separate concept: it consumes the supplied `DataMapper`.
 
 Equal parallelism permits forward edges, but chaining also depends on operator
 strategies, slot sharing and exchange mode. Tests verify one chain at widths
@@ -93,9 +100,13 @@ not reliable in this release: `flush()` updates them with the remaining buffer
 after `createNextAvailableBatch()` has removed the submitted rows. Read batch
 size from ClickHouse's `ch_rows_per_insert` instead.
 
-Larger batches cost retention rather than buying throughput here. The sink holds
-`buffered_rows` plus `inflight × max_rows` payloads per subtask, each a map and
-a copy of the encoded row, so the configured capacity is what the heap carries.
+Larger batches were measured and rejected (issue #86). At width 32 with one
+request in flight, doubling `max_rows` to 25,000 doubled the INSERT (12,360 →
+24,512 rows) and cut server-side cost as predicted (`ch_cpu_us_per_row` 1.724 →
+1.635), but spent more arm CPU than it saved: raw throughput rose 12.9% while
+`rows_per_s_per_core` — the published figure — fell 5.9%, at 14.3 cores against
+12.1. At 50,000 the arm collapses into repeated Full GCs. The committed values
+stand.
 
 ## Build, tests and versions
 
