@@ -97,9 +97,15 @@ fn planned_entrants_explain_themselves() {
 /// allocated. `methodology/envelope.md` states this bound normatively.
 const FLINK_PROCESS_FLOOR_MIB: u64 = 21_504;
 
-/// The process size whose derived heap sits at the compressed-oops boundary:
-/// past roughly 32g every reference doubles.
-const FLINK_PROCESS_CEILING_MIB: u64 = 34_816;
+/// The process size whose derived heap sits under the compressed-oops boundary
+/// for a 16-byte-aligned JVM: 73728 derives 64563 MiB, and references stop
+/// being compressed at 65505.
+const FLINK_PROCESS_CEILING_MIB: u64 = 73_728;
+
+/// The process size whose derived heap sits at the DEFAULT 8-byte boundary
+/// (32736 MiB). Past it a variant has to widen `ObjectAlignmentInBytes` to keep
+/// compressed references at all; `entrypoint.sh` enforces the same pairing.
+const FLINK_EIGHT_BYTE_OOPS_CEILING_MIB: u64 = 38_364;
 
 #[test]
 fn the_images_sizing_guard_enforces_the_same_bounds_this_test_does() {
@@ -184,6 +190,20 @@ fn flink_jvm_sizing_fits_its_declared_container() {
                     if v.default {
                         assert_eq!(effective, jvm, "image and descriptor sizing differ");
                     }
+                    // The same pairing `entrypoint.sh` enforces. Without it a
+                    // variant can pass this test and be refused by the image it
+                    // describes, which is the drift this file exists to catch.
+                    if effective > FLINK_EIGHT_BYTE_OOPS_CEILING_MIB {
+                        let opts = v.knobs["jvm_opts"].as_str().unwrap_or_default();
+                        assert!(
+                            opts.contains("ObjectAlignmentInBytes=16"),
+                            "flink {}: process_mib={effective} derives a heap past the \
+                             8-byte compressed-oops boundary and must declare \
+                             -XX:ObjectAlignmentInBytes=16 in jvm_opts, or every \
+                             reference doubles",
+                            v.id
+                        );
+                    }
                     effective
                 })
                 .collect()
@@ -199,7 +219,7 @@ fn flink_jvm_sizing_fits_its_declared_container() {
         for effective in process_sizes {
             assert!(
                 effective >= floor && effective <= (limit - slack).min(FLINK_PROCESS_CEILING_MIB),
-                "flink {}: effective process {effective}m must be >= {floor}m, <= 34816m and leave {slack}m slack in {limit}m",
+                "flink {}: effective process {effective}m must be >= {floor}m, <= {FLINK_PROCESS_CEILING_MIB}m and leave {slack}m slack in {limit}m",
                 container.name
             );
         }

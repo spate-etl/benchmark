@@ -69,13 +69,22 @@ CPU is the scarce resource here and memory is not: one arm runs at a time, so
 the host's memory only ever holds one envelope beside the infrastructure. Every
 arm gets 96 GiB — 3 GiB per envelope CPU — against a largest measured peak of
 56 GiB (vector, whose prefetch and in-flight batches scale with its request
-concurrency). JVM process totals keep their 24 GiB-era
-sizing rather than scaling with the container: on this envelope every larger
-heap tried measured slower — GC churn grows with the heap while the live set
-does not, and past ~32g the JVM also drops compressed references — so the
-envelope's extra memory serves the page cache and native buffers instead.
-`entrants_are_valid` bounds each JVM between that era sizing and the
-compressed-oops boundary.
+concurrency). A JVM arm's process total is bounded below by its 24 GiB-era
+sizing, so that no arm is quietly denied memory it was allocated, and above by
+the **compressed-oops boundary**: past it every reference doubles, which costs
+more than the extra heap buys. Where that boundary sits is a function of
+`ObjectAlignmentInBytes` — 32 GiB of heap at the default 8, 64 GiB at 16 — so an
+arm that needs more heap than 32 GiB may buy it by widening the alignment, at
+the cost of padding every object. `entrants_are_valid` bounds each JVM between
+the era sizing and whichever boundary its declared alignment implies.
+
+Heap above the era sizing is a tuning question and not a free win: on a live set
+that does not grow with the heap, larger heaps have measured slower or flat —
+GC churn scales with the heap while the retained set does not. The case for a
+larger heap is a live set that genuinely needs it, which has to be shown per arm
+rather than assumed. Flink's sink is the worked example: it retains
+`parallelism x (buffered_rows + inflight x max_rows)` payloads, so its batch
+size and its heap are one question, not two.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would

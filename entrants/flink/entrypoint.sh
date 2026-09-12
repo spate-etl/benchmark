@@ -10,8 +10,17 @@ fi
 
 if [[ "${1:-}" == taskmanager ]]; then
     process_mib=${BENCH_PROCESS_MIB:-21504}
-    if [[ ! "$process_mib" =~ ^[0-9]+$ ]] || (( process_mib < 21504 || process_mib > 34816 )); then
-        echo "TaskManager process budget violates the current 21504..34816 MiB sizing guard" >&2
+    if [[ ! "$process_mib" =~ ^[0-9]+$ ]] || (( process_mib < 21504 || process_mib > 73728 )); then
+        echo "TaskManager process budget violates the current 21504..73728 MiB sizing guard" >&2
+        exit 1
+    fi
+    # Compressed references stop at a 32736 MiB heap under the default 8-byte
+    # alignment and at 65504 MiB under 16 (both measured on this image's JVM).
+    # Flink derives heap = 0.9 x process - 1792, so 38364 is where 8-byte runs
+    # out and 73728 (64563 MiB heap) is the most 16-byte can carry.
+    if (( process_mib > 38364 )) && [[ "${BENCH_JVM_OPTS:-}" != *ObjectAlignmentInBytes=16* ]]; then
+        echo "process_mib=$process_mib derives a heap above 32 GiB and needs" \
+             "-XX:ObjectAlignmentInBytes=16 in jvm_opts to keep compressed references" >&2
         exit 1
     fi
     memory_limit=$(cat /sys/fs/cgroup/memory.max)
