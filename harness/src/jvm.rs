@@ -106,6 +106,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use crate::docker::docker_try;
 
@@ -844,20 +845,34 @@ pub fn percentile(sorted: &[f64], q: f64) -> f64 {
 /// distroless image. It does need the container to exist: call this **before**
 /// `sampler::stop_sut`, which removes it.
 ///
-/// The copy goes to a temp file and is deleted again. A bind mount would have
-/// avoided the round trip and is forbidden here — on macOS it crosses VirtioFS,
-/// and the rule for this harness is never to bind-mount a measured path.
+/// The copy goes to a temp file and is deleted again, unless `keep` names a file
+/// to leave it at. A bind mount would have avoided the round trip and is
+/// forbidden here — on macOS it crosses VirtioFS, and the rule for this harness
+/// is never to bind-mount a measured path.
+///
+/// `keep` exists because the parsed `gc_*` metrics answer only the questions
+/// this module already asks. Sizing a heap needs the log itself — post-Full-GC
+/// occupancy, whether compressed oops came up — and on a tuning box nothing but
+/// `results/` is uploaded, so a discarded copy is gone with the instance.
 ///
 /// # Errors
 ///
 /// [`JvmError::LogUnavailable`] if the container or the path is not there, and
 /// [`JvmError::ReadFailed`] if the copy cannot be read back.
-pub fn read_gc_log(container: &str, path: &str) -> Result<String, JvmError> {
-    let dest = std::env::temp_dir().join(format!(
-        "spate-bench-gc-{}-{}.log",
-        std::process::id(),
-        crate::report::now_ms()
-    ));
+pub fn read_gc_log(container: &str, path: &str, keep: Option<&Path>) -> Result<String, JvmError> {
+    let dest = match keep {
+        Some(at) => {
+            if let Some(parent) = at.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| JvmError::ReadFailed(e.to_string()))?;
+            }
+            at.to_path_buf()
+        }
+        None => std::env::temp_dir().join(format!(
+            "spate-bench-gc-{}-{}.log",
+            std::process::id(),
+            crate::report::now_ms()
+        )),
+    };
     let dest_str = dest.to_string_lossy().into_owned();
     let source = format!("{container}:{path}");
     docker_try(&["cp", &source, &dest_str]).map_err(|why| JvmError::LogUnavailable {
@@ -866,7 +881,9 @@ pub fn read_gc_log(container: &str, path: &str) -> Result<String, JvmError> {
         why,
     })?;
     let text = std::fs::read_to_string(&dest).map_err(|e| JvmError::ReadFailed(e.to_string()));
-    let _ = std::fs::remove_file(&dest);
+    if keep.is_none() {
+        let _ = std::fs::remove_file(&dest);
+    }
     text
 }
 
@@ -927,8 +944,9 @@ pub fn measure(
     container: &str,
     path: &str,
     uptime_window: Option<(f64, f64)>,
+    keep: Option<&Path>,
 ) -> Result<GcSummary, JvmError> {
-    parse_gc_log(&read_gc_log(container, path)?)?.summarise(uptime_window)
+    parse_gc_log(&read_gc_log(container, path, keep)?)?.summarise(uptime_window)
 }
 
 #[cfg(test)]

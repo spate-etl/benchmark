@@ -58,10 +58,10 @@ RUN --mount=type=cache,target=/root/.m2 \
 # ---------------------------------------------------------------------------
 FROM alpine:3 AS connector
 
-ARG CKC_VERSION=v1.4.0
-# sha256 of clickhouse-kafka-connect-v1.4.0.zip, computed from the downloaded
+ARG CKC_VERSION=v1.5.0
+# sha256 of clickhouse-kafka-connect-v1.5.0.zip, computed from the downloaded
 # release asset at pin time.
-ARG CKC_SHA256=e146cf1205c3a15630fcdf667556da931cb3269e63b1f3f3bedf7dfd1ffc2cb0
+ARG CKC_SHA256=53e31ccd96734b8fb1f251279da17863b9b193f0764a61280461aa314050ecc6
 
 RUN wget -q -O /release.zip \
       "https://github.com/ClickHouse/clickhouse-kafka-connect/releases/download/${CKC_VERSION}/clickhouse-kafka-connect-${CKC_VERSION}.zip" \
@@ -139,27 +139,40 @@ ENV BOOTSTRAP=spate-bench-redpanda:29092 \
     OFFSET_RESET=earliest \
     TASKS_MAX=32 \
     BUFFER_COUNT=2000 \
-    BUFFER_FLUSH_MS=1000
+    POLL_RECORDS=2000 \
+    BUFFER_FLUSH_MS=1000 \
+    CLIENT_VERSION=V2
 
-# JVM sizing: 20480m heap + 768m direct (the consumers' fetch buffers and the
-# HTTP client's socket I/O) + 256m metaspace. Deliberately NOT scaled with the
-# container: measured on the 96 GiB envelope at 32 tasks, this heap carries
-# 1.16M rows/s where 31g carries 1.07M and 90g carries 0.79M — GC churn grows
-# with the heap while the live set does not. The envelope's extra memory
-# serves the page cache and native buffers instead; `entrants_are_valid`
-# bounds the total between what a 24 GiB container affords and the
-# compressed-oops boundary. Xms = Xmx so the heap never grows
-# mid-measurement. The launcher's shipped G1 (KAFKA_JVM_PERFORMANCE_OPTS in
-# kafka-run-class.sh) is kept: rule 1, the system's own default collector.
-ENV KAFKA_HEAP_OPTS="-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m"
+# entrypoint.sh composes KAFKA_HEAP_OPTS from these; Xms = Xmx.
+#
+# 63488m = 65536 - HeapBaseMinAddress, the largest zero-based compressed-oops
+# heap at ObjectAlignmentInBytes=16 (measured on this image's JVM; README has
+# the boundary table). 65536m would lose compressed oops entirely.
+ENV HEAP_MIB=63488 \
+    DIRECT_MIB=768 \
+    METASPACE_MIB=256
+
+# Appended to KAFKA_OPTS by entrypoint.sh, which rejects flags that would defeat
+# the sizing knob or the GC log. Swept via the jvm_opts knob.
+#
+# Each task holds (bufferCount - 1 + max.poll.records) messages as Connect Struct
+# plus the connector's jsonMap, both live until the insert returns, at ~77 KiB per
+# message: ~11.7 GiB across 32 tasks once alignment pads it. Eden has to exceed
+# that or every insert's working set is promoted, hence G1NewSizePercent=40
+# (~25 GiB) against the shipped 5.
+#
+# UnlockExperimentalVMOptions must precede G1NewSizePercent or the JVM refuses to
+# start.
+ENV JVM_OPTS="-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16 -XX:G1NewSizePercent=40"
 
 # The GC log the descriptor's gc_log names. KAFKA_OPTS, not KAFKA_GC_LOG_OPTS:
 # kafka-run-class.sh assembles its own GC logging only behind the -loggc flag,
 # which connect-standalone.sh never passes in any mode — KAFKA_OPTS is on the
 # exec line unconditionally. Decorations (uptime,level,tags) are what
 # harness/src/jvm.rs parses; filecount=0 keeps one unrotated file for the
-# driver to copy out.
-ENV KAFKA_OPTS="-Xlog:gc*:file=/opt/kafka/logs/gc.log:uptime,level,tags:filecount=0"
+# driver to copy out. safepoint is logged alongside gc* so time-to-safepoint can
+# be ruled in or out.
+ENV KAFKA_OPTS="-Xlog:gc*,safepoint:file=/opt/kafka/logs/gc.log:uptime,level,tags:filecount=0"
 
 # Kafka 4.x configures log4j2 in YAML; ours is the shipped connect-log4j2.yaml
 # shape with root WARN and console only (see log4j2.yaml for why).

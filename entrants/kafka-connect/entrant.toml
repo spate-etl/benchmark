@@ -43,7 +43,7 @@ short = "Kafka Connect"
 # every run.
 strategy = "command"
 command  = ["sh", "-c", "printf '%s-%s\\n' \"$(ls /opt/kafka/libs | sed -n 's/^connect-runtime-\\(.*\\)\\.jar$/\\1/p')\" \"$(ls /opt/kafka/plugins/clickhouse-kafka-connect | sed -n 's/^clickhouse-kafka-connect-\\(v[0-9.]*\\)-confluent\\.jar$/\\1/p')\""]
-pinned   = "4.3.1-v1.4.0"
+pinned   = "4.3.1-v1.5.0"
 
 [build]
 context    = "../.."
@@ -113,7 +113,11 @@ GROUP_ID            = "{{group_id}}"
 OFFSET_RESET        = "{{offset_reset}}"
 TASKS_MAX           = "{{knob:tasks}}"
 BUFFER_COUNT        = "{{knob:buffer_count}}"
+POLL_RECORDS        = "{{knob:poll_records}}"
 BUFFER_FLUSH_MS     = "{{knob:buffer_flush_ms}}"
+CLIENT_VERSION      = "{{knob:client_version}}"
+HEAP_MIB            = "{{knob:heap_mib}}"
+JVM_OPTS            = "{{knob:jvm_opts}}"
 
 # bufferFlushTime must be > 0 whenever bufferCount > 0: the connector's
 # at-least-once buffer flushes on size OR time, and a zero flush time strands
@@ -131,13 +135,20 @@ instead of completing — minutes per cell, reported as a timeout for an arm
 that is working.
 """
 
+[[constraints]]
+knob     = "poll_records"
+at_least = 1
+why      = """
+Renders consumer.max.poll.records, which Connect refuses to start on at 0.
+"""
+
 [[variants]]
 id       = "rowbinary-mv"
 label    = "Kafka Connect · clickhouse-kafka-connect · RowBinary + MV"
 approach = "realistic"
 default  = true
-knobs    = { tasks = 32, buffer_count = 2000, buffer_flush_ms = 1000 }
-# Verified in the v1.4.0 source: inserts go as RowBinary
+knobs    = { tasks = 32, buffer_count = 2000, poll_records = 2000, buffer_flush_ms = 1000, client_version = "V2", heap_mib = 63488, jvm_opts = "-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16 -XX:G1NewSizePercent=40" }
+# Verified in the v1.5.0 source: inserts go as RowBinary
 # (ClickHouseWriter.java:1066; RowBinaryWithDefaults only when the target has
 # DEFAULT columns, and the landing table has none).
 reports  = { wire_format = "rowbinary" }

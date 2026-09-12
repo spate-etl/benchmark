@@ -51,8 +51,8 @@ esac
 nl='
 '
 for name in BOOTSTRAP REGISTRY_URL TOPIC GROUP_ID OFFSET_RESET TASKS_MAX \
-            BUFFER_COUNT BUFFER_FLUSH_MS CLICKHOUSE_HOST CLICKHOUSE_PORT \
-            CLICKHOUSE_PASSWORD; do
+            BUFFER_COUNT POLL_RECORDS BUFFER_FLUSH_MS CLIENT_VERSION \
+            CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_PASSWORD; do
   eval "v=\${${name}}"
   case "$v" in
     *\|* | *\&* | *\\* | *"$nl"*)
@@ -75,7 +75,9 @@ render() {
     -e "s|@OFFSET_RESET@|${OFFSET_RESET}|g" \
     -e "s|@TASKS_MAX@|${TASKS_MAX}|g" \
     -e "s|@BUFFER_COUNT@|${BUFFER_COUNT}|g" \
+    -e "s|@POLL_RECORDS@|${POLL_RECORDS}|g" \
     -e "s|@BUFFER_FLUSH_MS@|${BUFFER_FLUSH_MS}|g" \
+    -e "s|@CLIENT_VERSION@|${CLIENT_VERSION}|g" \
     -e "s|@CLICKHOUSE_HOST@|${CLICKHOUSE_HOST}|g" \
     -e "s|@CLICKHOUSE_PORT@|${CLICKHOUSE_PORT}|g" \
     -e "s|@CLICKHOUSE_PASSWORD@|${CLICKHOUSE_PASSWORD}|g" \
@@ -96,9 +98,61 @@ if grep -n '^[^#]*@[A-Z_][A-Z0-9_]*@' /opt/kafka/connect-data/worker.properties 
   exit 1
 fi
 
-# Foreground, worker + connector in one JVM. kafka-run-class.sh appends
-# KAFKA_OPTS (the GC log) and honours KAFKA_HEAP_OPTS / KAFKA_LOG4J_OPTS from
-# the image ENV.
+# Validated before the heap bound below reads the alignment out of it. Sizing
+# belongs to HEAP_MIB and the driver reads the GC log; a cell setting either
+# through jvm_opts would silently invalidate its own measurement.
+# Unquoted: JVM_OPTS is a flag list to be split on whitespace.
+for opt in ${JVM_OPTS:-}; do
+  case "$opt" in
+    -Xlog*|-Xmx*|-Xms*|-XX:*MaxHeapSize*|-XX:*InitialHeapSize*|-XX:*MaxDirectMemorySize*|-XX:*MaxMetaspaceSize*)
+      echo "FATAL: use HEAP_MIB for sizing; GC logging is mandatory. Refused: ${opt}" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$HEAP_MIB" in
+  '' | *[!0-9]*)
+    echo "FATAL: HEAP_MIB must be a positive integer of MiB. Got: ${HEAP_MIB}" >&2
+    exit 1
+    ;;
+esac
+
+# Largest zero-based compressed-oops heap, addressable - HeapBaseMinAddress:
+# 32768 - 2048 at the default 8-byte object alignment, 65536 - 2048 at 16. Past
+# it the JVM silently pays a base add, and above 32736m/65504m drops compressed
+# oops entirely, doubling every reference.
+case "${JVM_OPTS:-}" in
+  *-XX:ObjectAlignmentInBytes=16*) oops_max=63488 ;;
+  *)                               oops_max=30720 ;;
+esac
+if [ "$HEAP_MIB" -gt "$oops_max" ]; then
+  echo "FATAL: HEAP_MIB=${HEAP_MIB} is past the ${oops_max}m zero-based" \
+       "compressed-oops boundary for this object alignment." >&2
+  exit 1
+fi
+
+# An eighth of the container stays outside the JVM for thread stacks, the JIT
+# code cache and the page cache.
+limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+if [ "$limit" != max ]; then
+  total_mib=$(( HEAP_MIB + DIRECT_MIB + METASPACE_MIB ))
+  if [ "$(( total_mib * 1048576 ))" -gt "$(( limit - limit / 8 ))" ]; then
+    echo "FATAL: heap+direct+metaspace ${total_mib}m does not leave an eighth of" \
+         "the container's $(( limit / 1048576 ))m outside the JVM." >&2
+    exit 1
+  fi
+fi
+
+export KAFKA_HEAP_OPTS="-Xms${HEAP_MIB}m -Xmx${HEAP_MIB}m \
+-XX:MaxDirectMemorySize=${DIRECT_MIB}m -XX:MaxMetaspaceSize=${METASPACE_MIB}m"
+
+# Appended so the GC log configuration wins, and in the order given, because
+# -XX:+UnlockExperimentalVMOptions must precede the flags it unlocks.
+export KAFKA_OPTS="${KAFKA_OPTS} ${JVM_OPTS:-}"
+
+# Foreground, worker + connector in one JVM. kafka-run-class.sh honours
+# KAFKA_OPTS / KAFKA_HEAP_OPTS / KAFKA_LOG4J_OPTS from the environment.
 exec /opt/kafka/bin/connect-standalone.sh \
   /opt/kafka/connect-data/worker.properties \
   /opt/kafka/connect-data/clickhouse-sink.properties
