@@ -35,6 +35,7 @@ set -euo pipefail
 cd "$REPO"
 BENCH=./target/release/bench
 DECIDE="python3 $REPO/.github/aws/tune-entrant-decide.py"
+BACKPRESSURE="python3 $REPO/.github/aws/tune-entrant-backpressure.py"
 ENTRANT=${SELECTOR%%:*}
 TOPIC=comparison-sensor-batches
 # ~1.7x MIN_WINDOW_S (120s) at this arm's published rate — long enough that a
@@ -55,6 +56,20 @@ knob_args_for() { # comma-separated k=v,k=v (may be empty) -> --knob k=v ...
   for kv in "${kv[@]}"; do printf '%s\n' "--knob" "$kv"; done
 }
 
+# Flink's own busy/backpressure/idle metrics, per job vertex, polled every 15s
+# for the duration of one cell and appended to $1 — diagnostic only, never part
+# of a published or tuning record (no validate.rs/ALLOWED_UNITS concern). A
+# poll failure (no job running between reps, the JobManager container not
+# found) is recorded as an error line, not a script failure: this must never
+# be able to break the actual measurement it runs alongside.
+poll_backpressure() { # outfile label
+  local outfile=$1 label=$2
+  while true; do
+    $BACKPRESSURE "$label" >> "$outfile" 2>&1 || true
+    sleep 15
+  done
+}
+
 # Runs one cell (reps=3, plus the harness's own A/A control on the — here
 # only — arm), against $BATCHES, and captures its slice of $TUNING_FILE's new
 # lines into $2.
@@ -65,11 +80,17 @@ cell() { # label outfile knob_spec
   local before after
   before=$(lines_in "$TUNING_FILE")
   note "cell $label (batches=$BATCHES, knobs=${spec:-<committed default>})"
+  local bp_log="/tmp/backpressure-$label.jsonl"
+  : > "$bp_log"
+  poll_backpressure "$bp_log" "$label" &
+  local poll_pid=$!
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --reps 3 --trigger tuning \
     "${knob_args[@]}" >>"$LOG" 2>&1
+  kill "$poll_pid" >/dev/null 2>&1 || true
+  wait "$poll_pid" 2>/dev/null || true
   after=$(lines_in "$TUNING_FILE")
   tail -n "+$((before + 1))" "$TUNING_FILE" > "$outfile"
-  note "cell $label: $((after - before)) record(s) appended"
+  note "cell $label: $((after - before)) record(s) appended, $(lines_in "$bp_log") backpressure poll(s)"
 }
 
 # The topic is fixed depth per prefill (harness/src/corpus.rs asserts depth is
@@ -100,7 +121,7 @@ note "prefilling $BATCHES batches for the screen"
 # Both cells dry-run first: --dry-run checks the entrant's [[constraints]]
 # without starting a container, and this is the last chance to catch a
 # typo'd knob before spending box time on it.
-for spec in "" "sink_parallelism=8,max_rows=50000,buffered_rows=100000"; do
+for spec in "" "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4"; do
   mapfile -t args < <(knob_args_for "$spec")
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --trigger tuning --dry-run "${args[@]}" >>"$LOG" 2>&1
 done
@@ -111,18 +132,29 @@ CANDIDATES=/tmp/candidates.jsonl
 add_candidate() { $DECIDE add_candidate "$1" "$2" "$3" >> "$CANDIDATES"; }
 
 cell baseline /tmp/cell-baseline.jsonl ""
-cell sink-8 /tmp/cell-sink-8.jsonl "sink_parallelism=8,max_rows=50000,buffered_rows=100000"
+cell sink8-inflight4 /tmp/cell-sink8-inflight4.jsonl "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4"
 
 base=$($DECIDE score /tmp/cell-baseline.jsonl)
-sink8=$($DECIDE score /tmp/cell-sink-8.jsonl)
-# max_rows=50000/buffered_rows=100000 at sink_parallelism=8 gives the SAME
-# 8x(100000+50000)=1.2M total retained payloads as baseline's
-# 32x(25000+12500)=1.2M — the point of this cell is to hold that total fixed
-# while each sink instance's own batch grows 4x, isolating "does fewer/larger
-# buffers help" from "does the total retained set matter", which the batch-
-# size-only ladder measured earlier this session could not separate (see
-# issue #86's own follow-up discussion).
-add_candidate sink_parallelism_8 "sink_parallelism=8,max_rows=50000,buffered_rows=100000" "$sink8"
+sink8=$($DECIDE score /tmp/cell-sink8-inflight4.jsonl)
+# A follow-up to an already-measured cell (sink_parallelism=8, max_rows=50000,
+# buffered_rows=100000, inflight=1): that cell matched baseline's retention
+# and eliminated its GC pathology, but still lost 42% throughput, most likely
+# because real ClickHouse concurrency (sink_parallelism x inflight) dropped
+# from baseline's 32 to just 8. This cell recovers that concurrency —
+# 8x4=32, matching baseline — while ALSO holding retention at baseline's
+# level: 8x(50000+4x25000)=8x150000=1.2M, same as baseline's 32x37500=1.2M.
+#
+# The batch size (25000, not 50000) is deliberate, not a smaller ask: the
+# connector's rate limiter starts at max_rows and only climbs toward
+# max_rows x inflight by +10 messages per successful request (a fixed
+# Flink default, not a knob), so reaching the full inflight=4 ceiling needs
+# (max_rows x inflight - max_rows) / 10 x max_rows rows per subtask —
+# 187.5M here. At max_rows=50000 that number is 750M, far beyond even the
+# full 40M-batch corpus (~367M rows/subtask); at 25000 it fully saturates
+# during the confirm run's full corpus (~367M available) and reaches ~78%
+# of the way (~effective inflight 3 of 4) within the shorter screen
+# (~147M available) — good enough to see a real signal, not just noise.
+add_candidate sink8_inflight4 "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4" "$sink8"
 
 note "screen results (baseline, then the candidate actually run):"
 echo "$base" | tee -a "$LOG" >> "$RUNGS"
@@ -161,5 +193,9 @@ if [ -f "$TUNING_FILE" ]; then
 fi
 aws s3 cp "$RUNGS" "$S3_RUN/logs/entrant-rungs.jsonl" || note "rungs upload refused"
 aws s3 cp "$LOG" "$S3_RUN/logs/tune-entrant.log" || note "tune-entrant.log upload refused"
+for bp in /tmp/backpressure-*.jsonl; do
+  [ -f "$bp" ] || continue
+  aws s3 cp "$bp" "$S3_RUN/logs/$(basename "$bp")" || note "$(basename "$bp") upload refused"
+done
 
 note "done"
