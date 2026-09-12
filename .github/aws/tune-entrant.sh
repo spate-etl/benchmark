@@ -38,9 +38,9 @@ DECIDE="python3 $REPO/.github/aws/tune-entrant-decide.py"
 BACKPRESSURE="python3 $REPO/.github/aws/tune-entrant-backpressure.py"
 ENTRANT=${SELECTOR%%:*}
 TOPIC=comparison-sensor-batches
-# ~1.7x MIN_WINDOW_S (120s) at this arm's published rate — long enough that a
-# cell isn't flagged short_window, short enough to afford the whole ladder.
-SCREEN_BATCHES=16000000
+# The fastest cell is what has to clear MIN_WINDOW_S (120s): at 73.5 rows/batch
+# this holds 155s even at 9.5M rows/s, against 253s at baseline's 5.81M.
+SCREEN_BATCHES=20000000
 CONFIRM_BATCHES=40000000
 LOG=/tmp/tune-entrant.log
 RUNGS=/tmp/entrant-rungs.jsonl
@@ -118,45 +118,41 @@ BATCHES=$SCREEN_BATCHES
 note "prefilling $BATCHES batches for the screen"
 "$BENCH" prefill --env "$ENV_ID" --batches "$BATCHES" >>"$LOG" 2>&1
 
-# Both cells dry-run first: --dry-run checks the entrant's [[constraints]]
-# without starting a container, and this is the last chance to catch a
-# typo'd knob before spending box time on it.
-for spec in "" "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4"; do
+# --dry-run checks the entrant's [[constraints]] without starting a container:
+# the last chance to catch a typo'd knob before spending box time on it.
+HEAP_KNOB=process_mib=34816
+ROWS_KNOB="$HEAP_KNOB,max_rows=25000,buffered_rows=50000"
+for spec in "" "$HEAP_KNOB" "$ROWS_KNOB"; do
   mapfile -t args < <(knob_args_for "$spec")
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --trigger tuning --dry-run "${args[@]}" >>"$LOG" 2>&1
 done
-note "both cells validated dry-run"
+note "all three cells validated dry-run"
+
+# Surfaces a broken poller at the top of the log instead of as an artefact of
+# error lines after the box is gone. Never gates the run.
+note "backpressure preflight: $($BACKPRESSURE preflight 2>&1 || true)"
 
 CANDIDATES=/tmp/candidates.jsonl
 : > "$CANDIDATES"
 add_candidate() { $DECIDE add_candidate "$1" "$2" "$3" >> "$CANDIDATES"; }
 
 cell baseline /tmp/cell-baseline.jsonl ""
-cell sink8-inflight4 /tmp/cell-sink8-inflight4.jsonl "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4"
+cell heap /tmp/cell-heap.jsonl "$HEAP_KNOB"
+cell rows25k /tmp/cell-rows25k.jsonl "$ROWS_KNOB"
 
 base=$($DECIDE score /tmp/cell-baseline.jsonl)
-sink8=$($DECIDE score /tmp/cell-sink8-inflight4.jsonl)
-# A follow-up to an already-measured cell (sink_parallelism=8, max_rows=50000,
-# buffered_rows=100000, inflight=1): that cell matched baseline's retention
-# and eliminated its GC pathology, but still lost 42% throughput, most likely
-# because real ClickHouse concurrency (sink_parallelism x inflight) dropped
-# from baseline's 32 to just 8. This cell recovers that concurrency —
-# 8x4=32, matching baseline — while ALSO holding retention at baseline's
-# level: 8x(50000+4x25000)=8x150000=1.2M, same as baseline's 32x37500=1.2M.
+# The sink holds parallelism x (buffered_rows + inflight x max_rows) payloads at
+# ~1066 B each: 1.2M today, 2.4M at the candidate, which projects to ~12.4 GiB
+# live against a measured ~11.2 GiB today in a 17.2 GiB heap. So max_rows cannot
+# move without the heap moving too — process_mib=34816 is the top of
+# entrypoint.sh's guard and derives 28.9 GiB (0.9 x process_mib - 1792).
 #
-# The batch size (25000, not 50000) is deliberate, not a smaller ask: the
-# connector's rate limiter starts at max_rows and only climbs toward
-# max_rows x inflight by +10 messages per successful request (a fixed
-# Flink default, not a knob), so reaching the full inflight=4 ceiling needs
-# (max_rows x inflight - max_rows) / 10 x max_rows rows per subtask —
-# 187.5M here. At max_rows=50000 that number is 750M, far beyond even the
-# full 40M-batch corpus (~367M rows/subtask); at 25000 it fully saturates
-# during the confirm run's full corpus (~367M available) and reaches ~78%
-# of the way (~effective inflight 3 of 4) within the shorter screen
-# (~147M available) — good enough to see a real signal, not just noise.
-add_candidate sink8_inflight4 "sink_parallelism=8,max_rows=25000,buffered_rows=50000,inflight=4" "$sink8"
+# The heap gets its own cell so the two are separable: rows25k - heap is the
+# batch size, heap - baseline is the heap.
+add_candidate heap "$HEAP_KNOB" "$($DECIDE score /tmp/cell-heap.jsonl)"
+add_candidate rows25k "$ROWS_KNOB" "$($DECIDE score /tmp/cell-rows25k.jsonl)"
 
-note "screen results (baseline, then the candidate actually run):"
+note "screen results (baseline, then the candidates actually run):"
 echo "$base" | tee -a "$LOG" >> "$RUNGS"
 cat "$CANDIDATES" | tee -a "$LOG" >> "$RUNGS"
 
