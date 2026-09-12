@@ -69,13 +69,27 @@ CPU is the scarce resource here and memory is not: one arm runs at a time, so
 the host's memory only ever holds one envelope beside the infrastructure. Every
 arm gets 96 GiB — 3 GiB per envelope CPU — against a largest measured peak of
 56 GiB (vector, whose prefetch and in-flight batches scale with its request
-concurrency). JVM process totals keep their 24 GiB-era
-sizing rather than scaling with the container: on this envelope every larger
-heap tried measured slower — GC churn grows with the heap while the live set
-does not, and past ~32g the JVM also drops compressed references — so the
-envelope's extra memory serves the page cache and native buffers instead.
-`entrants_are_valid` bounds each JVM between that era sizing and the
-compressed-oops boundary.
+concurrency). A JVM arm is sized to its own measured live set rather than to the
+container, and `entrants_are_valid` bounds each one between the 24 GiB-era
+sizing as a floor and the compressed-oops boundary as a ceiling.
+
+Where that live set is small, the era sizing stands and the envelope's extra
+memory serves the page cache and native buffers: Flink's sink retains ~350 MiB,
+and every larger heap tried for it measured slower, because GC churn grows with
+the heap while the live set does not. Where it is not small, the heap follows it
+— Kafka Connect holds a whole poll of decoded records per task until its insert
+returns, ~10 GiB across 32 tasks, and a heap sized for Flink's live set collects
+that continuously.
+
+Two things decide the ceiling, and both are measured per arm rather than assumed.
+The compressed-oops boundary depends on object alignment — a heap above
+`32768 - HeapBaseMinAddress` loses zero-based addressing at the default 8-byte
+alignment, and above `65536 - HeapBaseMinAddress` at 16 — so an arm that wants
+more than ~30 GiB pays either a base add on every reference or, past the
+right-hand edge, 8-byte references throughout. And a heap large enough that the
+collector never runs inside the drain window publishes deferred work as
+throughput, which is the mirror of the rule below. Read both off the arm's own
+`gc.log`; neither is safe to infer.
 
 That is a fairness decision rather than a convenience. A garbage-collected
 runtime held to a tight heap collects more often, and the resulting pauses would

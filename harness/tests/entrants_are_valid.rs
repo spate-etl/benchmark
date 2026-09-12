@@ -226,20 +226,24 @@ fn kafka_connect_jvm_sizing_fits_its_declared_container() {
         .expect("kafka-connect entrant");
 
     let dockerfile = std::fs::read_to_string(kc.dir.join("Dockerfile")).expect("read Dockerfile");
-    let heap_opts = dockerfile
-        .lines()
-        .find_map(|l| l.trim().split_once("KAFKA_HEAP_OPTS=\"").map(|(_, v)| v))
-        .and_then(|v| v.split('"').next())
-        .expect("the Dockerfile sets KAFKA_HEAP_OPTS on one line");
-
-    let flag = |prefix: &str| -> u64 {
-        heap_opts
-            .split_whitespace()
-            .find_map(|t| t.strip_prefix(prefix))
-            .and_then(mib)
-            .unwrap_or_else(|| panic!("KAFKA_HEAP_OPTS carries no parseable {prefix}"))
+    let env_mib = |name: &str| -> u64 {
+        dockerfile
+            .lines()
+            .find_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("ENV ")
+                    .unwrap_or(l)
+                    .strip_prefix(&format!("{name}="))
+            })
+            .and_then(|v| v.trim_end_matches(" \\").trim().parse().ok())
+            .unwrap_or_else(|| panic!("the Dockerfile sets no parseable {name}"))
     };
-    let jvm = flag("-Xmx") + flag("-XX:MaxDirectMemorySize=") + flag("-XX:MaxMetaspaceSize=");
+    let native = env_mib("DIRECT_MIB") + env_mib("METASPACE_MIB");
+
+    // The heap is a knob, so the descriptor is the source of truth and the image
+    // only supplies the default. Both must agree for the by-hand run recipe.
+    assert_eq!(kc.spec.env["HEAP_MIB"], "{{knob:heap_mib}}");
+    assert_eq!(kc.spec.env["JVM_OPTS"], "{{knob:jvm_opts}}");
 
     let worker = kc
         .spec
@@ -251,29 +255,65 @@ fn kafka_connect_jvm_sizing_fits_its_declared_container() {
         .find(|c| c.role == Role::DataPlane)
         .expect("a data-plane container");
     let limit = mib(&worker.memory).expect("container memory parses");
-    // The same budgets as the Flink check: the 24 GiB-era total as the floor,
-    // and 35072m — a 31744m heap at the compressed-oops boundary plus direct
-    // memory and metaspace — as the ceiling.
+    // The 24 GiB-era total, as the floor below which Connect is handicapped.
     const ERA_TOTAL_MIB: u64 = 21_504;
-    const OOPS_BOUNDARY_TOTAL_MIB: u64 = 35_072;
     let floor = (limit - limit / 8).min(ERA_TOTAL_MIB);
-    assert!(
-        jvm >= floor,
-        "kafka-connect: heap+direct+metaspace {jvm}m is under the {floor}m its \
-         {limit}m container affords; Connect is being handicapped"
-    );
-    assert!(
-        jvm <= limit.min(OOPS_BOUNDARY_TOTAL_MIB),
-        "kafka-connect: heap+direct+metaspace {jvm}m exceeds its container's \
-         {limit}m or the compressed-oops boundary"
-    );
-    let heap = flag("-Xmx");
-    assert!(
-        heap <= 31_744,
-        "kafka-connect: -Xmx{heap}m is past the compressed-oops boundary; every \
-         reference doubles there and the configuration is slower than a smaller \
-         heap"
-    );
+
+    for variant in &kc.spec.variants {
+        let heap = variant.knobs["heap_mib"]
+            .as_integer()
+            .expect("heap_mib integer") as u64;
+        let opts = variant.knobs["jvm_opts"].as_str().expect("jvm_opts string");
+
+        if variant.default {
+            assert_eq!(
+                heap,
+                env_mib("HEAP_MIB"),
+                "image and descriptor heap differ"
+            );
+        }
+
+        // Compressed oops stay ZERO based below these, measured on the arm's own
+        // Temurin 21 (linux/arm64). Each is `addressable - HeapBaseMinAddress`:
+        // 32768 - 2048 at the default 8-byte alignment, 65536 - 2048 at 16. Above
+        // its boundary a heap keeps compressed oops only up to 32736m / 65504m,
+        // and pays a base add on every reference to do it.
+        let zero_based_max: u64 = if opts.contains("-XX:ObjectAlignmentInBytes=16") {
+            63_488
+        } else {
+            30_720
+        };
+        // entrypoint.sh bounds the value that reaches the JVM, which also covers
+        // a hand-run image; neither file is obviously the source of truth.
+        let entrypoint =
+            std::fs::read_to_string(kc.dir.join("entrypoint.sh")).expect("read entrypoint.sh");
+        assert!(
+            entrypoint.contains(&format!("oops_max={zero_based_max}")),
+            "entrypoint.sh does not bound HEAP_MIB at {zero_based_max}m"
+        );
+        assert!(
+            heap <= zero_based_max,
+            "kafka-connect {}: -Xmx{heap}m is past the {zero_based_max}m zero-based \
+             compressed-oops boundary for its alignment; every reference costs more there",
+            variant.id
+        );
+
+        let jvm = heap + native;
+        assert!(
+            jvm >= floor,
+            "kafka-connect {}: heap+direct+metaspace {jvm}m is under the {floor}m its \
+             {limit}m container affords; Connect is being handicapped",
+            variant.id
+        );
+        // The same eighth of slack the entrypoint enforces, for thread stacks,
+        // the JIT code cache and the page cache.
+        assert!(
+            jvm <= limit - limit / 8,
+            "kafka-connect {}: heap+direct+metaspace {jvm}m does not leave an eighth \
+             of its {limit}m container outside the JVM",
+            variant.id
+        );
+    }
 }
 
 #[test]
