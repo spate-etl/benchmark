@@ -34,16 +34,22 @@ The driver reads `entrant.toml`; each result records the effective knobs.
 | Task off-heap memory | 512 MiB | Configured separately from managed and network memory |
 | Object reuse / operator chaining | enabled / enabled | Avoid copies on eligible chained edges |
 | Checkpoints | 5 s, AT_LEAST_ONCE, filesystem | Shared named volume mounted on JobManager and TaskManagers |
-| `max_rows` / `buffered_rows` | 50,000 / 100,000 | Per sink subtask; buffered rows must exceed batch rows |
-| `inflight` / `linger_ms` | 2 / 1,000 ms | Requests per sink subtask; timer can flush below the row cap |
+| `max_rows` / `buffered_rows` | 12,500 / 25,000 | Per sink subtask; buffered rows must exceed batch rows |
+| `inflight` / `linger_ms` | 1 / 1,000 ms | Requests per sink subtask; timer can flush below the row cap |
 | `max_batch_bytes` | 16 MiB | Independent batch limit; exposed for large-batch experiments |
 | `avro_mode` | generic | Optional generated specific records use the same canonical schema and shipped deserializer |
 
-At width 32 the configured capacities are **3.2 million buffered rows plus up to
-3.2 million rows in flight**. They are limits, not measured occupancy. The sink
-retains a map and cached wire bytes for each row, so multiplying wire size alone
-underestimates heap demand. Checkpoints serialize buffered maps; in-flight
-requests must complete before the checkpoint can proceed.
+At width 32 the configured capacities are **800,000 buffered rows plus up to
+400,000 rows in flight**. They are limits, not measured occupancy. The sink
+retains a map and cached wire bytes for each row — ~1,066 bytes per payload
+measured — so multiplying wire size alone underestimates heap demand.
+Checkpoints serialize buffered maps; in-flight requests must complete before the
+checkpoint can proceed.
+
+The sink's width is the job's width: one value end to end. A narrower sink was
+measured at width 8 and lost 42%, because effective ClickHouse concurrency is
+`sink_parallelism × inflight`; unequal widths also force a repartitioning edge
+that serializes `SensorRow` on a hop the chained graph pays nothing for.
 
 The descriptor also exposes Kafka poll/fetch limits, ClickHouse connection and
 network-buffer settings, and extra TaskManager JVM options. Their defaults match
@@ -58,10 +64,13 @@ produces `GenericRecordAvroTypeInfo`, whose stream serializer is Avro, not Kryo.
 The shipped decoder calls `datumReader.read(null, ...)`: pipeline object reuse
 does not make that decoder reuse the previous record.
 
-`SensorRow` is a Flink POJO. With Flink 2.2.1's automatic type extraction its two
-`LocalDateTime` fields are generic types and its tags are `NullableList<String>`.
-A POJO can contain a generic field. The connector's "typed/POJO mode" is a
-separate concept: it consumes the supplied `DataMapper`.
+`SensorRow` is a Flink POJO, and every field resolves to a native serializer:
+timestamps are `Instant`, which `TypeExtractor` handles as a basic type, where
+`LocalDateTime` falls back to Kryo. `pipeline.generic-types: false` refuses the
+job at submission if that ever stops holding. `SensorRowMapper.toMap` converts to
+`LocalDateTime` at the one boundary that needs it — `DataWriter.writeDateTime64`
+accepts nothing else. The connector's "typed/POJO mode" is a separate concept: it
+consumes the supplied `DataMapper`.
 
 Equal parallelism permits forward edges, but chaining also depends on operator
 strategies, slot sharing and exchange mode. Tests verify one chain at widths
@@ -93,7 +102,8 @@ not reliable in this release: `flush()` updates them with the remaining buffer
 after `createNextAvailableBatch()` has removed the submitted rows. Read batch
 size from ClickHouse's `ch_rows_per_insert` instead.
 
-Larger batches cost retention rather than buying throughput here. The sink holds
+Larger batches cost retention, and whether they buy throughput is open — issue
+#86 measures it against this default. The sink holds
 `buffered_rows` plus `inflight × max_rows` payloads per subtask, each a map and
 a copy of the encoded row, so the configured capacity is what the heap carries.
 
