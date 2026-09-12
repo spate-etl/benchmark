@@ -304,27 +304,39 @@ note "prefilling $SCREEN_BATCHES batches for the screen"
 note "building $ARM"
 "$BENCH" build "$ARM"
 
-# Identical across the four tuned cells, so poll_records is the only variable.
-# ConcGCThreads: the c00 log showed 6 concurrent markers against 23 parallel
-# workers and 23.6 GB/s of allocation, with 71 to-space exhaustions and 40 Full
-# GCs — marking was not finishing before the heap filled.
-# AlwaysPreTouch: c00 ran with Pre-touch disabled, so 62 GiB of first-touch page
-# faults landed inside the measured window.
+# Shared GC backdrop. ConcGCThreads: c00's log showed 6 concurrent markers
+# against 23 parallel workers and 23.6 GB/s of allocation, with 71 to-space
+# exhaustions and 40 Full GCs — marking was not finishing before the heap
+# filled. AlwaysPreTouch: c00 ran with pre-touch disabled, so 62 GiB of
+# first-touch faults landed inside the measured window.
 TUNED="-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16 \
 -XX:G1NewSizePercent=60 -XX:ConcGCThreads=12 -XX:+AlwaysPreTouch \
 -XX:+ExitOnOutOfMemoryError"
 
-# The control. 63488m is only legal with 16-byte alignment — at the default
-# 8-byte alignment the zero-based boundary is 30720m — so "untouched" here means
-# G1's own ergonomics, with the one flag the heap size requires.
+# G1's own ergonomics, with the one flag 63488m requires: at the default 8-byte
+# alignment the zero-based boundary is 30720m.
 CONTROL="-XX:ObjectAlignmentInBytes=16"
 
-poll() { # id poll_records opts
-  cell "$1" 1 "$SCREEN_BATCHES" \
-    --knob "poll_records=$2" --knob "buffer_count=$2" --knob "jvm_opts=$3"
+# 30720m is zero-based at 8-byte alignment, so the padding buys nothing there
+# and comes off. Heap and alignment therefore move together, both in the
+# direction a smaller heap would actually be deployed.
+SMALL="-XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=60 \
+-XX:ConcGCThreads=12 -XX:+AlwaysPreTouch -XX:+ExitOnOutOfMemoryError"
+
+# Start marking earlier, held back from TUNED so it is one variable against it
+# rather than a second change bundled with ConcGCThreads.
+IHOP="$TUNED -XX:-G1UseAdaptiveIHOP -XX:InitiatingHeapOccupancyPercent=25"
+
+cellk() { # id heap poll opts
+  cell "$1" 1 "$SCREEN_BATCHES" --knob "heap_mib=$2" \
+    --knob "poll_records=$3" --knob "buffer_count=$3" --knob "jvm_opts=$4"
 }
 
-poll p2000-tuned   2000 "$TUNED"
+# The one-factor questions first, each against p500-tuned, so stopping early
+# still answers them: does the bundle beat stock ergonomics, does a smaller heap
+# beat a bigger one, does IHOP clear the remaining Full GCs.
+cellk p500-tuned   63488  500 "$TUNED"
+
 if [ "$(best_rows)" -lt "$GATE_ROWS_PER_S" ]; then
   note "GATE: $(best_rows) rows/s on the tuned bundle, under $GATE_ROWS_PER_S."
   note "c00 reached 2899046 on the old bundle, so the new flags cost throughput."
@@ -333,10 +345,14 @@ if [ "$(best_rows)" -lt "$GATE_ROWS_PER_S" ]; then
   exit 0
 fi
 
-poll p1000-tuned   1000 "$TUNED"
-poll p750-tuned     750 "$TUNED"
-poll p500-tuned     500 "$TUNED"
-poll p500-control   500 "$CONTROL"
+cellk p500-control 63488  500 "$CONTROL"
+cellk p500-30g     30720  500 "$SMALL"
+cellk p500-ihop    63488  500 "$IHOP"
+
+# Then the poll_records shape on the fixed backdrop. p2000 connects to c00.
+cellk p2000-tuned  63488 2000 "$TUNED"
+cellk p1000-tuned  63488 1000 "$TUNED"
+cellk p750-tuned   63488  750 "$TUNED"
 
 note "screen complete"
 cat "$PROGRESS"
