@@ -204,39 +204,220 @@ if [ -f "$LOG" ]; then aws s3 cp "$LOG" "$S3_RUN/logs/ladder.log" || note "ladde
 aws s3 cp "$PROFILE" "$S3_RUN/logs/$ENV_ID.toml" || note "profile upload refused"
 if [ -f "$CEIL" ]; then aws s3 cp "$CEIL" "$S3_RUN/logs/$ENV_ID.ceilings.json" || note "ceilings upload refused"; fi
 
-cat <<'EOF'
-
-=== the box is now held open for a tuning session ===
-
-The ladder has run; its rungs are in /tmp/rungs.jsonl and in $S3_RUN/logs/.
-The session's remaining work: set the profile from the rungs, build the
-entrants, and measure arms with --trigger tuning for the 50% headroom check.
-
-  sudo -i; cd /opt/bench
-  bench=target/release/bench
-
-To move a cap, edit environments/<env>.toml, `docker rm -f` the container it
-re-caps, and re-run `$bench ceiling --measure --write --env <env>`. Changing
-the partition count needs the topic dropped — the delete is asynchronous, so
-poll depth to zero before prefilling again.
-
-EOF
-
-# Hold, then end the payload cleanly a quarter-hour inside its own timeout.
+# ---------------------------------------------------------------------------
+# The vector source/chunk screen.
 #
-# Not `sleep infinity`: run-bench.sh runs the payload under `timeout`, and being
-# killed by it is a non-zero exit, which makes the user-data trap write
-# _FAILED.json and the collector report a box failure. A tuning box reaching the
-# end of its budget is the expected outcome, not a fault, so it exits zero and
-# the run is claimed as the tuning run it is.
+# Scripted rather than typed into a held session: the SSM console freezes, and a
+# session nobody can see is a box burning $5/hour blind. Every cell uploads its
+# records and one progress line BEFORE the next starts, so
+# `aws s3 cp $S3_RUN/logs/progress.jsonl -` is the whole monitoring story and it
+# survives the agent dying.
 #
-# The session does not extend the box's life. Save anything worth keeping to
-# $S3_RUN before the deadline below.
-budget=$(( (TTL_HOURS - 2) * 3600 - 900 ))
-deadline=$(( SECONDS + budget ))
-note "holding for $(( budget / 60 ))m; the box terminates itself after that"
-while [ "$SECONDS" -lt "$deadline" ]; do
-  note "held, $(( (deadline - SECONDS) / 60 ))m of session budget left"
-  sleep 600
+# Screening only. What this settles is declared in the descriptor and
+# re-measured as an ordinary published run — see methodology/comparability.md.
+# ---------------------------------------------------------------------------
+ARM=vector:json-each-row
+# 12M batches is ~882M landed rows: ~7 minutes a drain at the 2.10M rows/s this
+# arm last published, and a cell is two drains because the driver always
+# measures its first arm again as an A/A control. It stays above MIN_WINDOW_S
+# until 7.35M rows/s, well past anything expected here.
+SCREEN_BATCHES=12000000
+PROGRESS=/tmp/progress.jsonl
+# The anchor reproduces 2,095,054 rows/s. Materially below means the baseline
+# has moved and a curve built on it compares to nothing. It carries the 0.58
+# upgrade and the batch-seal fix (max_bytes raised so max_events binds), so it
+# is a sanity gate, not a regression gate.
+GATE_ROWS_PER_S=1600000
+# Remap in-flight residency scales with the source count, so a source cell is
+# projected from a measured cell before it is spent rather than discovered as an
+# OOM kill. 80 GiB of the 96 GiB envelope.
+MEM_CEILING=85899345920
+
+records() { ls "tuning/$ENV_ID/vector/"*.jsonl 2>/dev/null | head -1; }
+record_lines() { local f; f=$(records); [ -n "$f" ] && wc -l < "$f" || echo 0; }
+
+# A cell is two drains and uploads only once it ends, which is too coarse to
+# abort on. The heartbeat ships the running cell's log and an elapsed line every
+# half minute, so `aws s3 cp $S3_RUN/logs/live-cell.log -` shows a cell going
+# wrong while it is still going wrong.
+CURRENT=/tmp/current-cell
+heartbeat() {
+  local id start
+  while sleep 30; do
+    [ -s "$CURRENT" ] || continue
+    id=$(cut -d' ' -f1 "$CURRENT"); start=$(cut -d' ' -f2 "$CURRENT")
+    [ -n "$id" ] || continue
+    jq -nc --arg cell "$id" --argjson elapsed "$(( SECONDS - start ))" \
+       --arg tail "$(tail -c 2000 "/tmp/cell-$id.log" 2>/dev/null)" \
+       '{cell:$cell,elapsed_s:$elapsed,tail:$tail}' \
+      > /tmp/live.json 2>/dev/null || continue
+    aws s3 cp /tmp/live.json "$S3_RUN/logs/live.json" >/dev/null 2>&1 || true
+    aws s3 cp "/tmp/cell-$id.log" "$S3_RUN/logs/live-cell.log" >/dev/null 2>&1 || true
+  done
+}
+heartbeat &
+HEARTBEAT=$!
+trap 'kill "$HEARTBEAT" 2>/dev/null || true' EXIT
+
+cell() { # id knob...
+  local id=$1; shift
+  local log=/tmp/cell-$id.log t0=$SECONDS rc=0 before after
+  before=$(record_lines)
+  : > /tmp/.cellmark
+  : > "$log"
+  echo "$id $SECONDS" > "$CURRENT"
+
+  note "cell $id: $*"
+  "$BENCH" run "$ARM" --reps 1 --batches "$SCREEN_BATCHES" --env "$ENV_ID" \
+    --trigger tuning "$@" > "$log" 2>&1 || rc=$?
+  : > "$CURRENT"
+  after=$(record_lines)
+
+  aws s3 cp "$log" "$S3_RUN/logs/cell-$id.log" || note "cell log upload refused"
+  # `cp` and not `sync`: the instance role has no ListBucket, by design, so
+  # nothing here may compare against the bucket.
+  find tuning -type f -newer /tmp/.cellmark 2>/dev/null | while read -r f; do
+    aws s3 cp "$f" "$S3_RUN/tuning/$id/${f#tuning/}" || note "upload refused: $f"
+  done
+
+  python3 - "$id" "$rc" "$((SECONDS - t0))" "$before" "$after" "$(records)" "$*" \
+    >> "$PROGRESS" <<'PY'
+import json, statistics, sys
+cell, rc, secs, before, after, path, knobs = sys.argv[1:8]
+out = {"cell": cell, "rc": int(rc), "secs": int(secs), "knobs": knobs.strip(),
+       "records": int(after) - int(before)}
+try:
+    with open(path) as fh:
+        new = fh.read().splitlines()[int(before):int(after)]
+    vals = {}
+    for line in new:
+        r = json.loads(line)
+        # The A/A half is the same arm under a second label; it measures rig
+        # noise, not this cell, so it is excluded from the cell's own figure.
+        if r.get("kind") != "measurement" or r.get("variant", {}).get("aa_label"):
+            continue
+        for k in ("rows_per_s", "rows_per_s_per_core", "cores_used",
+                  "peak_anon_bytes", "cpu_us_per_row", "ch_cpu_us_per_row",
+                  "ch_rows_per_insert"):
+            if k in r.get("metrics", {}):
+                vals.setdefault(k, []).append(r["metrics"][k]["value"])
+    def med(k, nd=0):
+        if not vals.get(k):
+            return None
+        m = statistics.median(vals[k])
+        return round(m, nd) if nd else round(m)
+    out.update({
+        "rows_per_s": med("rows_per_s"),
+        "rows_per_s_per_core": med("rows_per_s_per_core"),
+        "cores_used": med("cores_used", 2),
+        "peak_anon_bytes": med("peak_anon_bytes"),
+        "cpu_us_per_row": med("cpu_us_per_row", 2),
+        "ch_cpu_us_per_row": med("ch_cpu_us_per_row", 3),
+        "ch_rows_per_insert": med("ch_rows_per_insert"),
+    })
+except Exception as e:
+    out["error"] = str(e)
+print(json.dumps(out), flush=True)
+PY
+  aws s3 cp "$PROGRESS" "$S3_RUN/logs/progress.jsonl" || note "progress upload refused"
+  tail -1 "$PROGRESS"
+}
+
+# One field of one cell, or empty if the cell did not report it.
+figure() { # cell field
+  python3 -c "
+import json,sys
+for l in open('$PROGRESS'):
+    r = json.loads(l)
+    if r.get('cell') == '$1' and r.get('$2') is not None:
+        print(int(r['$2'])); break
+"
+}
+
+# Does cell \$1 beat cell \$2 on the lead metric by at least 5%?
+beats() { # cell reference
+  local a b
+  a=$(figure "$1" rows_per_s_per_core); b=$(figure "$2" rows_per_s_per_core)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -gt "$(( b * 105 / 100 ))" ]
+}
+
+# The bring-up above left one message on the topic, and prefill refuses a
+# partially-filled corpus rather than topping it up. Drop and wait: the delete
+# is asynchronous, and prefilling before it lands spreads the corpus over a
+# topic that is still going away.
+note "dropping $TOPIC before the screen's prefill"
+docker exec spate-bench-redpanda rpk topic delete "$TOPIC" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  depth=$(docker exec spate-bench-redpanda rpk topic describe -p "$TOPIC" 2>/dev/null \
+    | awk 'NR>1{s+=$6} END{print s+0}')
+  [ "${depth:-0}" = 0 ] && break
+  sleep 2
 done
-note "session budget spent"
+
+note "prefilling $SCREEN_BATCHES batches for the screen"
+"$BENCH" prefill --env "$ENV_ID" --batches "$SCREEN_BATCHES"
+note "building vector"
+"$BENCH" build vector
+
+# v0 — the committed configuration, with the transform in the spelling that
+# preceded the rewrite. Every later cell is read against this or against the
+# cell it varies from.
+cell v0 --knob transform=twopass
+
+anchor=$(figure v0 rows_per_s)
+if [ -z "$anchor" ] || [ "$anchor" -lt "$GATE_ROWS_PER_S" ]; then
+  note "GATE: the anchor measured ${anchor:-no} rows/s against 2095054 on the"
+  note "published 0.57 reps. The baseline has moved, so nothing built on it"
+  note "would be comparable. Stopping."
+  cat "$PROGRESS"
+  exit 0
+fi
+
+# The three decisive cells, each against the reference it varies from: v1 vs v0
+# isolates the VRL rewrite, v2 vs v1 the runner's in-flight budget, v3 vs v2 the
+# source count. v3 carries v2's chunk size because 16 remaps at the shipped 1000
+# projects past the envelope — the point of v2 running first.
+cell v1 --knob transform=fused
+cell v2 --knob transform=fused --knob chunk_size_events=64
+cell v3 --knob transform=fused --knob chunk_size_events=64 --knob sources=16
+
+if ! beats v1 v0 && ! beats v2 v1 && ! beats v3 v2; then
+  note "GATE: none of the VRL rewrite, the chunk size or the source count"
+  note "cleared 5% against the cell it varies from. No lever here is reachable"
+  note "from configuration. Stopping rather than pricing the refinements."
+  cat "$PROGRESS"
+  exit 0
+fi
+
+# Source cells are projected from v2's measured residency before being spent:
+# the fixed terms (librdkafka prefetch, sink encoders and buffer) do not scale
+# with the source count, the remap term does.
+mem_v2=$(figure v2 peak_anon_bytes)
+project() { # sources -> projected bytes at v2's chunk size
+  python3 -c "
+fixed = 21.6e9
+per_remap = max(($mem_v2 - fixed) / 8.0, 0)
+print(int(fixed + per_remap * $1))"
+}
+
+for n in 32 4; do
+  if [ -z "$mem_v2" ]; then
+    note "v2 reported no residency, so sources=$n cannot be projected; running"
+    note "only the source count that is smaller than the measured one."
+    [ "$n" -gt 8 ] && continue
+    projected=0
+  else
+    projected=$(project "$n")
+  fi
+  if [ "$projected" -gt "$MEM_CEILING" ]; then
+    note "skipping sources=$n: projects $(( projected / 1000000000 ))GB from v2's"
+    note "measured $(( mem_v2 / 1000000000 ))GB, past the envelope. Not spending a cell on an OOM."
+    continue
+  fi
+  cell "v_s$n" --knob transform=fused --knob chunk_size_events=64 --knob "sources=$n"
+done
+
+cell v6 --knob transform=fused --knob chunk_size_events=256 --knob sources=16
+
+note "screen complete"
+cat "$PROGRESS"
