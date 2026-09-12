@@ -14,7 +14,6 @@ import org.apache.flink.connector.clickhouse.sink.ClickHouseClientConfig;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroDeserializationSchema;
-import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
@@ -56,11 +55,6 @@ import java.util.Map;
  *       {@code SINK_MAX_BATCH_BYTES}, {@code SINK_LINGER_MS},
  *       {@code SINK_MAX_IN_FLIGHT}, {@code SINK_MAX_ROW_BYTES} — the sink's batch
  *       shape. See README.md for why each default is what it is.</li>
- *   <li>{@code SINK_PARALLELISM} — the sink operator's own width, independent of
- *       the job's. Empty (the committed default) tracks the job's width at
- *       runtime, which keeps today's one-to-one forward chain; a different value
- *       is exploratory (see {@link #sinkParallelism} and {@link #pipeline}) and,
- *       like reduced consumer width, falls under methodology issue #78.</li>
  *   <li>{@code EXPECT_PARALLELISM} — an <em>assertion</em>, never a setting. See
  *       {@link #assertParallelism}.</li>
  * </ul>
@@ -92,73 +86,39 @@ public final class ComparisonJob {
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         assertParallelism(env);
-        final int sinkParallelism = sinkParallelism(env);
 
         System.out.printf(
-                "flink arm: table=%s startingOffsets=%s format=%s parallelism=%d sinkParallelism=%d%n",
+                "flink arm: table=%s startingOffsets=%s format=%s parallelism=%d%n",
                 table,
                 startingOffsets,
                 ClickHouseFormat.RowBinaryWithNamesAndTypes,
-                env.getParallelism(),
-                sinkParallelism);
+                env.getParallelism());
 
         final KafkaSource<GenericRecord> source = kafkaSource(schema, startingOffsets);
 
-        pipeline(env, source, sink(SensorRow.class, new SensorRowMapper(), table), schemaJson, table,
-                sinkParallelism);
+        pipeline(env, source, sink(SensorRow.class, new SensorRowMapper(), table), schemaJson, table);
 
         env.execute("comparison-flink");
     }
 
-    /**
-     * Assemble the same graph in production and in topology/type tests.
-     *
-     * <p>{@code sinkParallelism == env.getParallelism()} (every measurement to date)
-     * keeps the existing one-to-one forward chain: {@code flatten-events} and the
-     * sink stay a single job graph vertex, exactly as before this parameter existed.
-     *
-     * <p>A different {@code sinkParallelism} cannot forward-chain — Flink has no
-     * one-to-one mapping between N upstream instances and M downstream ones — so a
-     * repartitioning edge is unavoidable, and which one is a real choice.
-     * {@code rescale()} partitions round-robin onto a <em>subset</em> of downstream
-     * instances sized by the parallelism ratio, rather than all of them the way
-     * {@code rebalance()}/{@code shuffle()} do; Flink's own docs note this "would
-     * require only local data transfers instead of transferring data over network,
-     * depending on other configuration values such as the number of slots of
-     * TaskManagers." This entrant runs exactly one TaskManager holding every slot
-     * (see the envelope's {@code control-plane}/{@code data-plane} split in
-     * entrant.toml), so every subtask rescale() would connect already lives in that
-     * one process — the condition Flink's docs name for a local rather than
-     * network transfer. {@code rebalance()}/{@code shuffle()} are all-to-all by
-     * construction and go through the network/shuffle service unconditionally,
-     * regardless of co-location. "Local" here means no Netty, no socket, no
-     * network buffer pool — it does NOT mean no serialisation: a repartitioning
-     * edge of any kind still serialises {@code SensorRow} into the channel and
-     * allocates a fresh instance on the receiving side, work the forward-chained
-     * default pays for on neither hop. That cost is real and belongs in how a
-     * measurement at unequal widths is read, not assumed away by "local."
-     */
+    /** Assemble the same graph in production and in topology/type tests. */
     static void pipeline(StreamExecutionEnvironment env, KafkaSource<GenericRecord> source,
-                         Sink<SensorRow> sink, String schemaJson, String table, int sinkParallelism) {
+                         Sink<SensorRow> sink, String schemaJson, String table) {
         final DataStreamSource<GenericRecord> batches =
                 env.fromSource(source, WatermarkStrategy.noWatermarks(), "kafka-sensor-batches");
         batches.uid("kafka-sensor-batches");
+        // Inheriting the same width permits forward edges; the generated job graph
+        // determines chaining. Encoding and checkpoint serialization still happen.
         // Specific records implement GenericRecord, but their PojoTypeInfo fails
         // Flink's reflective input-type validation against that interface. Supply
         // the unchanged output POJO type through the public flatMap overload.
-        final DataStream<SensorRow> flattened = batches.flatMap(new FlattenEvents(schemaJson),
+        batches.flatMap(new FlattenEvents(schemaJson),
                         TypeInformation.of(SensorRow.class))
                 .name("flatten-events")
-                .uid("flatten-events");
-
-        final boolean sameWidth = sinkParallelism == env.getParallelism();
-        final DataStream<SensorRow> toSink = sameWidth ? flattened : flattened.rescale();
-        final var sinkVertex = toSink.sinkTo(sink)
+                .uid("flatten-events")
+                .sinkTo(sink)
                 .name("clickhouse-" + table)
                 .uid("clickhouse-sink");
-        if (!sameWidth) {
-            sinkVertex.setParallelism(sinkParallelism);
-        }
     }
 
     /**
@@ -191,10 +151,10 @@ public final class ComparisonJob {
             // that disables itself when its input goes missing is not a check.
             throw new IllegalStateException(
                     "EXPECT_PARALLELISM is unset or not positive. It is not optional: without it"
-                            + " nothing verifies that the job's default width is the one it was"
-                            + " configured with, and a sweep would record values it never ran at."
-                            + " The image sets a default matching config.yaml; the driver sets it"
-                            + " from the descriptor's `parallelism` knob.");
+                            + " nothing verifies that the parallelism this job runs at is the one"
+                            + " it was configured with, and a sweep would record values it never"
+                            + " ran at. The image sets a default matching config.yaml; the driver"
+                            + " sets it from the descriptor's `parallelism` knob.");
         }
         final int actual = env.getParallelism();
         if (actual != expected) {
@@ -208,64 +168,6 @@ public final class ComparisonJob {
                             + " config.yaml, this job would run at the image's default while"
                             + " every record claimed the value that was asked for.");
         }
-    }
-
-    /**
-     * The sink's own width. Empty (the default variant's committed value) means
-     * "follow the job's default width" — resolved here, at runtime, against
-     * {@code env.getParallelism()} rather than baked into a separate knob value,
-     * so that overriding {@code parallelism} alone (e.g. a consumer-width sweep
-     * under methodology issue #78) cannot leave a stale, unrelated sink width
-     * behind it. A prior version of this knob defaulted to a fixed integer, which
-     * meant {@code --knob parallelism=16} alone silently introduced an unplanned
-     * {@code rescale()} — this job would resolve {@code sinkParallelism=32} against
-     * a job now running at 16 and insert a repartitioning edge nobody asked for,
-     * making an existing exploratory sweep (widths 8/16 from PR #75) no longer
-     * reproducible from the same invocation, with the record giving no indication
-     * why.
-     *
-     * <p>{@code sinkParallelism} must evenly divide, or be evenly divided by,
-     * {@code env.getParallelism()} — {@link #pipeline} assigns each sink instance a
-     * FIXED subset of upstream instances (see its own doc), and an uneven split
-     * is exactly the "slowest consumer owns two partitions" pathology
-     * {@code methodology/envelope.md} already gives as the reason per-entrant
-     * width tracks the topic's partition count. It must also be strictly
-     * positive: Flink accepts {@code -1} ({@code PARALLELISM_DEFAULT}) and
-     * resolves it to the job's default at runtime, which would silently take the
-     * {@code rescale()} branch for what is actually an equal-width job — an
-     * unplanned repartition recorded as {@code sinkParallelism=-1}.
-     */
-    private static int sinkParallelism(StreamExecutionEnvironment env) {
-        return resolveSinkParallelism(Cfg.str("SINK_PARALLELISM", ""), env.getParallelism());
-    }
-
-    /**
-     * The parsing and validation half of {@link #sinkParallelism}, split out so it
-     * can be tested against arbitrary inputs without touching the process
-     * environment — {@code System.getenv} offers no supported way to fake a
-     * variable from a test.
-     */
-    static int resolveSinkParallelism(String raw, int parallelism) {
-        final int sinkParallelism = raw.isEmpty() ? parallelism : Integer.parseInt(raw.trim());
-        if (sinkParallelism <= 0) {
-            throw new IllegalArgumentException(
-                    "SINK_PARALLELISM=" + sinkParallelism + " must be strictly positive. -1"
-                            + " (Flink's PARALLELISM_DEFAULT) resolves to the job's default width"
-                            + " at runtime, which this check catches before it becomes a rescale()"
-                            + " edge nobody asked for.");
-        }
-        final int hi = Math.max(sinkParallelism, parallelism);
-        final int lo = Math.min(sinkParallelism, parallelism);
-        if (hi % lo != 0) {
-            throw new IllegalArgumentException(
-                    "SINK_PARALLELISM=" + sinkParallelism + " does not evenly divide, or divide"
-                            + " into, parallelism=" + parallelism + ". rescale() assigns each sink"
-                            + " instance a fixed subset of upstream instances sized by that ratio;"
-                            + " an uneven split gives some sink instances more upstream partitions"
-                            + " than others, the same partition-count-vs-width imbalance"
-                            + " methodology/envelope.md already rules out for the job's own width.");
-        }
-        return sinkParallelism;
     }
 
     // OffsetResetStrategy is deprecated in kafka-clients 4.x (superseded by

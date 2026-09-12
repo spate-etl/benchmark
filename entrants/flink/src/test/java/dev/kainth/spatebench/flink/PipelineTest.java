@@ -49,9 +49,8 @@ class PipelineTest {
     void equalParallelismProducesOneChainAndTheRowIsAPojo() {
         var type = assertInstanceOf(PojoTypeInfo.class, TypeExtractor.getForClass(SensorRow.class));
         assertEquals(12, type.getArity());
-        // A POJO is not itself a promise of no Kryo: each field's own resolved
-        // type is what config.yaml's pipeline.generic-types: false also enforces
-        // at submission.
+        // A POJO is not itself a promise of no Kryo; config.yaml's
+        // pipeline.generic-types: false enforces the same thing at submission.
         for (int i = 0; i < type.getArity(); i++) {
             var field = type.getPojoFieldAt(i);
             assertFalse(field.getTypeInformation() instanceof GenericTypeInfo,
@@ -64,62 +63,12 @@ class PipelineTest {
                 var env = StreamExecutionEnvironment.getExecutionEnvironment(configuration);
                 env.setParallelism(parallelism);
                 ComparisonJob.pipeline(env, ComparisonJob.kafkaSource(SensorBatchSchema.parse(SensorBatchSchema.json()), "earliest", mode),
-                        new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events", parallelism);
+                        new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events");
                 var graph = env.getStreamGraph().getJobGraph();
                 assertEquals(1, graph.getNumberOfVertices());
                 assertEquals(parallelism, graph.getVertices().iterator().next().getParallelism());
                 assertTrue(env.getConfig().isObjectReuseEnabled());
             }
-        }
-    }
-
-    @Test
-    void sinkParallelismEmptyTracksTheJobsWidthAtRuntime() {
-        assertEquals(32, ComparisonJob.resolveSinkParallelism("", 32));
-        assertEquals(16, ComparisonJob.resolveSinkParallelism("", 16));
-    }
-
-    @Test
-    void sinkParallelismRejectsNonPositiveValuesIncludingFlinksParallelismDefault() {
-        // -1 is Flink's own PARALLELISM_DEFAULT sentinel: accepted by Flink's API,
-        // resolved to the job's width at runtime, and exactly the value that would
-        // silently take pipeline()'s rescale() branch for what is really an
-        // equal-width job if this check did not exist.
-        var ex = assertThrows(IllegalArgumentException.class,
-                () -> ComparisonJob.resolveSinkParallelism("-1", 32));
-        assertTrue(ex.getMessage().contains("strictly positive"), ex.getMessage());
-        assertThrows(IllegalArgumentException.class,
-                () -> ComparisonJob.resolveSinkParallelism("0", 32));
-    }
-
-    @Test
-    void sinkParallelismRejectsWidthsThatDoNotEvenlyDivideTheJobsParallelism() {
-        // 32 has no factor of 5; some sink instance would own a different number of
-        // upstream partitions than the others under rescale()'s fixed-subset split.
-        var ex = assertThrows(IllegalArgumentException.class,
-                () -> ComparisonJob.resolveSinkParallelism("5", 32));
-        assertTrue(ex.getMessage().contains("evenly divide"), ex.getMessage());
-        // Every genuine divisor pair is accepted, in both directions.
-        for (int width : new int[] {1, 2, 4, 8, 16, 32}) {
-            assertEquals(width, ComparisonJob.resolveSinkParallelism(Integer.toString(width), 32));
-        }
-    }
-
-    @Test
-    void differingSinkParallelismRescalesIntoATwoVertexGraphAtItsOwnWidth() {
-        var env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.setParallelism(32);
-        ComparisonJob.pipeline(env,
-                ComparisonJob.kafkaSource(SensorBatchSchema.parse(SensorBatchSchema.json()), "earliest", "specific"),
-                new DiscardingSink<>(), SensorBatchSchema.json(), "sensor_events", 8);
-        var graph = env.getStreamGraph().getJobGraph();
-        // A repartitioning edge (rescale here) is a chain break: the source+flatten
-        // half and the sink are now separate vertices, unlike the equal-width case
-        // above, which chains into exactly one.
-        assertEquals(2, graph.getNumberOfVertices());
-        for (var vertex : graph.getVertices()) {
-            int expected = vertex.getName().contains("clickhouse") ? 8 : 32;
-            assertEquals(expected, vertex.getParallelism(), vertex.getName());
         }
     }
 
