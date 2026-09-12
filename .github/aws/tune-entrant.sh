@@ -70,6 +70,21 @@ poll_backpressure() { # outfile label
   done
 }
 
+# The TaskManager's GC log, copied out while a rep is up. The harness reads this
+# file into gc_* metrics and deletes its copy (jvm.rs read_gc_log), so without
+# this the run's only evidence of what the JVM actually did leaves with the box.
+# It carries the two things the tuning records cannot answer: whether compressed
+# references survived the heap and the 16-byte alignment ("Compressed Oops:
+# Enabled"), and post-mixed-cycle occupancy, which is a live set where
+# jvm_heap_live_peak_bytes is a max over every pause.
+capture_gc() { # outfile
+  local outfile=$1
+  while true; do
+    docker cp "spate-bench-sut-tm:/opt/flink/log/gc.log" "$outfile" >/dev/null 2>&1 || true
+    sleep 15
+  done
+}
+
 # Runs one cell (reps=3, plus the harness's own A/A control on the — here
 # only — arm), against $BATCHES, and captures its slice of $TUNING_FILE's new
 # lines into $2.
@@ -84,13 +99,26 @@ cell() { # label outfile knob_spec
   : > "$bp_log"
   poll_backpressure "$bp_log" "$label" &
   local poll_pid=$!
+  local gc_log="/tmp/gc-$label.log"
+  capture_gc "$gc_log" &
+  local gc_pid=$!
+  # A cell that dies (TM OOM-kill at the top of the ladder is the expected way)
+  # must not take the run with it: under `set -e` that would skip every later
+  # cell AND the S3 uploads at the bottom, losing the cells that did succeed.
+  local rc=0
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --reps 3 --trigger tuning \
-    "${knob_args[@]}" >>"$LOG" 2>&1
-  kill "$poll_pid" >/dev/null 2>&1 || true
-  wait "$poll_pid" 2>/dev/null || true
+    "${knob_args[@]}" >>"$LOG" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || note "cell $label FAILED (exit $rc) — continuing the ladder"
+  kill "$poll_pid" "$gc_pid" >/dev/null 2>&1 || true
+  wait "$poll_pid" "$gc_pid" 2>/dev/null || true
   after=$(lines_in "$TUNING_FILE")
-  tail -n "+$((before + 1))" "$TUNING_FILE" > "$outfile"
+  # Absent when the very first cell dies before writing a record. An empty
+  # slice scores zero on every metric, which `decide` rejects as not credible —
+  # the outcome a dead cell should have.
+  : > "$outfile"
+  [ -f "$TUNING_FILE" ] && tail -n "+$((before + 1))" "$TUNING_FILE" > "$outfile"
   note "cell $label: $((after - before)) record(s) appended, $(lines_in "$bp_log") backpressure poll(s)"
+  note "cell $label oops: $(grep -m1 'Compressed Oops' "$gc_log" 2>/dev/null || echo 'no gc.log captured')"
 }
 
 # The topic is fixed depth per prefill (harness/src/corpus.rs asserts depth is
@@ -120,9 +148,15 @@ note "prefilling $BATCHES batches for the screen"
 
 # --dry-run checks the entrant's [[constraints]] without starting a container:
 # the last chance to catch a typo'd knob before spending box time on it.
-HEAP_KNOB=process_mib=34816
-ROWS_KNOB="$HEAP_KNOB,max_rows=25000,buffered_rows=50000"
-for spec in "" "$HEAP_KNOB" "$ROWS_KNOB"; do
+#
+# 73728 derives a 64563 MiB heap, the most that keeps compressed references at
+# ObjectAlignmentInBytes=16 (they stop at 65505, measured). The alignment is not
+# optional above a 32 GiB heap and entrypoint.sh refuses the pairing without it.
+HEAP_KNOB="process_mib=73728,jvm_opts=-XX:ObjectAlignmentInBytes=16"
+rows_knob() { echo "$HEAP_KNOB,max_rows=$1,buffered_rows=$(( $1 * 2 ))"; }
+ROWS_25K=$(rows_knob 25000)
+ROWS_50K=$(rows_knob 50000)
+for spec in "$HEAP_KNOB" "$ROWS_25K" "$ROWS_50K"; do
   mapfile -t args < <(knob_args_for "$spec")
   "$BENCH" run "$SELECTOR" --batches "$BATCHES" --trigger tuning --dry-run "${args[@]}" >>"$LOG" 2>&1
 done
@@ -136,23 +170,26 @@ CANDIDATES=/tmp/candidates.jsonl
 : > "$CANDIDATES"
 add_candidate() { $DECIDE add_candidate "$1" "$2" "$3" >> "$CANDIDATES"; }
 
-cell baseline /tmp/cell-baseline.jsonl ""
-cell heap /tmp/cell-heap.jsonl "$HEAP_KNOB"
-cell rows25k /tmp/cell-rows25k.jsonl "$ROWS_KNOB"
+cell heaponly /tmp/cell-heaponly.jsonl "$HEAP_KNOB"
+cell rows25k /tmp/cell-rows25k.jsonl "$ROWS_25K"
+cell rows50k /tmp/cell-rows50k.jsonl "$ROWS_50K"
 
-base=$($DECIDE score /tmp/cell-baseline.jsonl)
-# The sink holds parallelism x (buffered_rows + inflight x max_rows) payloads at
-# ~1066 B each: 1.2M today, 2.4M at the candidate, which projects to ~12.4 GiB
-# live against a measured ~11.2 GiB today in a 17.2 GiB heap. So max_rows cannot
-# move without the heap moving too — process_mib=34816 is the top of
-# entrypoint.sh's guard and derives 28.9 GiB (0.9 x process_mib - 1792).
+base=$($DECIDE score /tmp/cell-heaponly.jsonl)
+# heaponly is the control, not a rung: it shares the heap and the alignment with
+# both candidates, so the only thing left varying is max_rows. Comparing them
+# against the committed default instead would confound batch size with a 3.4x
+# heap and an object-alignment change.
 #
-# The heap gets its own cell so the two are separable: rows25k - heap is the
-# batch size, heap - baseline is the heap.
-add_candidate heap "$HEAP_KNOB" "$($DECIDE score /tmp/cell-heap.jsonl)"
-add_candidate rows25k "$ROWS_KNOB" "$($DECIDE score /tmp/cell-rows25k.jsonl)"
+# Retention is parallelism x (buffered_rows + inflight x max_rows), ~1.2M / 2.4M
+# / 4.8M payloads across these three. Its per-payload cost is the open question:
+# the previous run's two cells at one heap imply ~7.3 KiB, a synthetic replica
+# of the payload implies ~1.1 KiB, and jvm_heap_live_peak_bytes cannot settle it
+# because it is a max over every pause, not a live set. The captured gc.log is
+# what answers it, from post-mixed-cycle occupancy.
+add_candidate rows25k "$ROWS_25K" "$($DECIDE score /tmp/cell-rows25k.jsonl)"
+add_candidate rows50k "$ROWS_50K" "$($DECIDE score /tmp/cell-rows50k.jsonl)"
 
-note "screen results (baseline, then the candidates actually run):"
+note "screen results (heaponly, then the candidates):"
 echo "$base" | tee -a "$LOG" >> "$RUNGS"
 cat "$CANDIDATES" | tee -a "$LOG" >> "$RUNGS"
 
@@ -162,20 +199,25 @@ cat "$CANDIDATES" | tee -a "$LOG" >> "$RUNGS"
 # nothing — worth knowing before writing the promotion PR either way.
 $DECIDE check_batch_caps "$CANDIDATES" | tee -a "$LOG"
 
-decision=$($DECIDE decide "$base" "$CANDIDATES")
+decision=$($DECIDE decide "$base" "$CANDIDATES" heaponly "$HEAP_KNOB")
 echo "$decision" | tee -a "$LOG"
 IFS=$'\t' read -r winner winner_knobs < <(
   python3 -c "import json,sys; d=json.load(sys.stdin); print(d['name'] + '\t' + d['knobs'])" <<< "$decision"
 )
 
-if [ "$winner" = baseline ]; then
-  note "no candidate cleared its own A/A spread within the GC/throttle budget; the committed default stands. Skipping the confirm run."
+# The winner is confirmed even when it is heaponly: unlike the committed
+# default, heaponly is itself a configuration change and worth a full-corpus
+# number. Only a failed topic drop skips the confirm.
+confirm_ok=1
+if [ "$winner" = heaponly ]; then
+  note "no batch size cleared its own A/A spread within the GC/throttle budget; heaponly stands"
 else
-  note "winner: $winner ($winner_knobs); confirming at the full corpus"
-  drop_topic || { note "topic drop timed out; skipping confirm"; winner=baseline; }
+  note "winner: $winner ($winner_knobs)"
 fi
+note "confirming $winner at the full corpus"
+drop_topic || { note "topic drop timed out; skipping confirm"; confirm_ok=0; }
 
-if [ "$winner" != baseline ]; then
+if [ "$confirm_ok" = 1 ]; then
   BATCHES=$CONFIRM_BATCHES
   note "prefilling $BATCHES batches for the confirm run"
   "$BENCH" prefill --env "$ENV_ID" --batches "$BATCHES" >>"$LOG" 2>&1
@@ -189,9 +231,9 @@ if [ -f "$TUNING_FILE" ]; then
 fi
 aws s3 cp "$RUNGS" "$S3_RUN/logs/entrant-rungs.jsonl" || note "rungs upload refused"
 aws s3 cp "$LOG" "$S3_RUN/logs/tune-entrant.log" || note "tune-entrant.log upload refused"
-for bp in /tmp/backpressure-*.jsonl; do
-  [ -f "$bp" ] || continue
-  aws s3 cp "$bp" "$S3_RUN/logs/$(basename "$bp")" || note "$(basename "$bp") upload refused"
+for extra in /tmp/backpressure-*.jsonl /tmp/gc-*.log; do
+  [ -f "$extra" ] || continue
+  aws s3 cp "$extra" "$S3_RUN/logs/$(basename "$extra")" || note "$(basename "$extra") upload refused"
 done
 
 note "done"

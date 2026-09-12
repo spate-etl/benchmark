@@ -33,3 +33,6 @@ docs/contract/
 # `bench validate` refuses these records under results/ and would not see them
 # here — so the one way they could quietly accumulate is `git add -A`.
 /tuning
+
+# Python bytecode from running the tuning helpers locally.
+__pycache__/
