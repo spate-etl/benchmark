@@ -19,10 +19,17 @@ import json
 import statistics
 import sys
 
+# The harness's LEAD_METRIC (harness/src/driver.rs): the metric it differences
+# for aa_spread, and the one the benchmark publishes.
+LEAD = "rows_per_s_per_core"
+
 GC_MAX_RATIO = 1.5
 GC_FLOOR_US = 5_000_000
 THROTTLE_MAX_RATIO = 1.5
-THROTTLE_FLOOR = 100
+# Periods per second. nr_throttled is a raw CFS-period counter differenced over
+# the window, so an unnormalised comparison partly measures duration: a cell
+# that drains at half speed accrues twice the periods at identical pressure.
+THROTTLE_FLOOR_PER_S = 0.25
 
 
 def load_jsonl(path):
@@ -49,12 +56,30 @@ def score(path):
 
     aa_metrics = verdicts[0].get("metrics", {}) if verdicts else {}
 
+    def throttle_rates():
+        """nr_throttled per second of drain. There is no window metric, so the
+        window is ch_written_rows / rows_per_s — both published per rep."""
+        for r in reps:
+            m = r.get("metrics", {})
+            rows = m.get("ch_written_rows", {}).get("value", 0.0)
+            rate = m.get("rows_per_s", {}).get("value", 0.0)
+            thr = m.get("nr_throttled", {}).get("value")
+            if rows > 0 and rate > 0 and thr is not None:
+                yield thr / (rows / rate)
+
+    rates = list(throttle_rates())
+
     return {
         "n": len(reps),
         "rows_per_s": med("rows_per_s"),
         "rows_per_s_per_core": med("rows_per_s_per_core"),
         "gc_pause_total_us": med("gc_pause_total_us"),
         "nr_throttled": med("nr_throttled"),
+        # Rate, not count: see THROTTLE_FLOOR_PER_S. Absent inputs give None,
+        # which is_safe treats as a cell it cannot clear rather than a pass.
+        "throttled_per_s": statistics.median(rates) if rates else None,
+        "jvm_heap_live_peak_bytes": med("jvm_heap_live_peak_bytes"),
+        "jvm_heap_configured_bytes": med("jvm_heap_configured_bytes"),
         "ch_cpu_us_per_row": med("ch_cpu_us_per_row"),
         # See tune-entrant.sh: the check that max_rows, not max_batch_bytes
         # or linger_ms, is the cap actually binding a cell's batch.
@@ -69,34 +94,55 @@ def is_safe(candidate, base):
     ratio+floor of baseline. The floor keeps a near-zero baseline reading
     from making any nonzero candidate reading a trip."""
     gc_limit = max(base["gc_pause_total_us"] * GC_MAX_RATIO, GC_FLOOR_US)
-    thr_limit = max(base["nr_throttled"] * THROTTLE_MAX_RATIO, THROTTLE_FLOOR)
+    if candidate["throttled_per_s"] is None or base["throttled_per_s"] is None:
+        return False
+    thr_limit = max(base["throttled_per_s"] * THROTTLE_MAX_RATIO, THROTTLE_FLOOR_PER_S)
     return (
         candidate["gc_pause_total_us"] <= gc_limit
-        and candidate["nr_throttled"] <= thr_limit
+        and candidate["throttled_per_s"] <= thr_limit
     )
 
 
 def is_credible(candidate, base):
-    """The candidate's rows_per_s gain over baseline exceeds ITS OWN A/A
-    spread — not any other sweep's, and not a bare positive delta."""
-    if base["rows_per_s"] <= 0:
+    """The candidate's gain over baseline exceeds ITS OWN A/A spread.
+
+    Scored on rows_per_s_per_core because that is what `aa_spread` measures —
+    the harness differences its LEAD_METRIC (driver.rs), which is this one — and
+    what the benchmark publishes. Gating a rows_per_s gain with a
+    rows_per_s_per_core spread compares two different quantities, and they move
+    in opposite directions on this arm.
+
+    A cell that did not produce three reps and an A/A verdict is not a
+    measurement: a partial cell medians only its surviving reps, and an absent
+    verdict leaves aa_spread at 0.0, which would reduce this test to gain > 0.
+    """
+    if base[LEAD] <= 0 or candidate["n"] < 3 or candidate["aa_spread"] <= 0.0:
         return False
-    gain = (candidate["rows_per_s"] - base["rows_per_s"]) / base["rows_per_s"]
+    declared = candidate.get("aa_spread_declared")
+    if declared is not None and candidate["aa_spread"] > declared:
+        # The rig itself says this cell's twin did not hold still, at which
+        # point a difference against it is not evidence either way.
+        return False
+    gain = (candidate[LEAD] - base[LEAD]) / base[LEAD]
     return gain > candidate["aa_spread"]
 
 
-def decide(base, candidates):
-    """The candidate with the highest rows_per_s among those actually run
-    that are both safe and credible. Falls back to baseline — the committed
-    default stands — when none clear both bars."""
+def decide(base, candidates, base_name="baseline", base_knobs=""):
+    """The best of the candidates actually run that are both safe and credible,
+    by the lead metric. Falls back to the base cell when none clear both bars.
+
+    The base is whatever the ladder measured its candidates against, which is
+    not always the committed default — name it so the caller cannot confirm the
+    wrong knobs."""
     scored = [
         {**c, "safe": is_safe(c["cell"], base), "credible": is_credible(c["cell"], base)}
         for c in candidates
     ]
     eligible = [c for c in scored if c["safe"] and c["credible"]]
     if not eligible:
-        return {"name": "baseline", "knobs": "", "cell": base, "safe": True, "credible": True}
-    return max(eligible, key=lambda c: c["cell"]["rows_per_s"])
+        return {"name": base_name, "knobs": base_knobs, "cell": base,
+                "safe": True, "credible": True}
+    return max(eligible, key=lambda c: c["cell"][LEAD])
 
 
 def max_rows_in(knobs):
@@ -141,7 +187,7 @@ def main(argv):
     elif cmd == "decide":
         base = json.loads(argv[2])
         candidates = load_jsonl(argv[3])
-        print(json.dumps(decide(base, candidates)))
+        print(json.dumps(decide(base, candidates, *argv[4:6])))
     else:
         sys.exit(f"unknown command {cmd!r}")
 
