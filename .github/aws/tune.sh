@@ -204,39 +204,134 @@ if [ -f "$LOG" ]; then aws s3 cp "$LOG" "$S3_RUN/logs/ladder.log" || note "ladde
 aws s3 cp "$PROFILE" "$S3_RUN/logs/$ENV_ID.toml" || note "profile upload refused"
 if [ -f "$CEIL" ]; then aws s3 cp "$CEIL" "$S3_RUN/logs/$ENV_ID.ceilings.json" || note "ceilings upload refused"; fi
 
-cat <<'EOF'
-
-=== the box is now held open for a tuning session ===
-
-The ladder has run; its rungs are in /tmp/rungs.jsonl and in $S3_RUN/logs/.
-The session's remaining work: set the profile from the rungs, build the
-entrants, and measure arms with --trigger tuning for the 50% headroom check.
-
-  sudo -i; cd /opt/bench
-  bench=target/release/bench
-
-To move a cap, edit environments/<env>.toml, `docker rm -f` the container it
-re-caps, and re-run `$bench ceiling --measure --write --env <env>`. Changing
-the partition count needs the topic dropped — the delete is asynchronous, so
-poll depth to zero before prefilling again.
-
-EOF
-
-# Hold, then end the payload cleanly a quarter-hour inside its own timeout.
+# ---------------------------------------------------------------------------
+# The kafka-connect GC screen.
 #
-# Not `sleep infinity`: run-bench.sh runs the payload under `timeout`, and being
-# killed by it is a non-zero exit, which makes the user-data trap write
-# _FAILED.json and the collector report a box failure. A tuning box reaching the
-# end of its budget is the expected outcome, not a fault, so it exits zero and
-# the run is claimed as the tuning run it is.
+# Scripted rather than typed into a held session, because the console freezes
+# and a session nobody can see is a box burning $5/hour blind. Every cell
+# uploads its records, its GC logs and one progress line BEFORE the next starts,
+# so `aws s3 cp $S3_RUN/logs/progress.jsonl -` is the whole monitoring story and
+# it survives the agent dying.
 #
-# The session does not extend the box's life. Save anything worth keeping to
-# $S3_RUN before the deadline below.
-budget=$(( (TTL_HOURS - 2) * 3600 - 900 ))
-deadline=$(( SECONDS + budget ))
-note "holding for $(( budget / 60 ))m; the box terminates itself after that"
-while [ "$SECONDS" -lt "$deadline" ]; do
-  note "held, $(( (deadline - SECONDS) / 60 ))m of session budget left"
-  sleep 600
+# Screening only. What this settles is declared in the descriptor and
+# re-measured as an ordinary published run — see methodology/comparability.md.
+# ---------------------------------------------------------------------------
+ARM=kafka-connect
+# 12M batches is ~894M landed rows: 11 minutes a drain at the 1.33M rows/s this
+# arm last published, under 3 at the rate the diagnosis predicts. It stays above
+# MIN_WINDOW_S until about 7.4M rows/s, past which cells carry ShortWindow — a
+# result worth re-measuring at the full corpus anyway.
+SCREEN_BATCHES=12000000
+PROGRESS=/tmp/progress.jsonl
+# Below 1.6M rows/s neither the version move nor the heap did anything, and the
+# remaining cells would price the same non-answer at $5/hour.
+GATE_ROWS_PER_S=1600000
+
+records() { ls "tuning/$ENV_ID/$ARM/"*.jsonl 2>/dev/null | head -1; }
+record_lines() { local f; f=$(records); [ -n "$f" ] && wc -l < "$f" || echo 0; }
+
+cell() { # id reps batches knob...
+  local id=$1 reps=$2 batches=$3; shift 3
+  local log=/tmp/cell-$id.log t0=$SECONDS rc=0 before after
+  before=$(record_lines)
+  : > /tmp/.cellmark
+
+  note "cell $id: reps=$reps batches=$batches $*"
+  "$BENCH" run "$ARM" --reps "$reps" --batches "$batches" --env "$ENV_ID" \
+    --trigger tuning "$@" > "$log" 2>&1 || rc=$?
+  after=$(record_lines)
+
+  aws s3 cp "$log" "$S3_RUN/logs/cell-$id.log" || note "cell log upload refused"
+  # The GC logs the harness now keeps for a trigger that bars publication, plus
+  # the cell's own records. `cp` and not `sync`: the instance role has no
+  # ListBucket, by design, so nothing here may compare against the bucket.
+  find tuning -type f -newer /tmp/.cellmark 2>/dev/null | while read -r f; do
+    aws s3 cp "$f" "$S3_RUN/tuning/$id/${f#tuning/}" || note "upload refused: $f"
+  done
+
+  python3 - "$id" "$rc" "$((SECONDS - t0))" "$before" "$after" "$(records)" "$*" \
+    >> "$PROGRESS" <<'PY'
+import json, statistics, sys
+cell, rc, secs, before, after, path, knobs = sys.argv[1:8]
+rows = cores = gc = None
+try:
+    with open(path) as fh:
+        new = fh.read().splitlines()[int(before):int(after)]
+    vals = {}
+    for line in new:
+        r = json.loads(line)
+        # The A/A half is the same arm under a second label; it measures rig
+        # noise, not this cell, so it is excluded from the cell's own figure.
+        if r.get("kind") != "measurement" or r.get("variant", {}).get("aa_label"):
+            continue
+        for k in ("rows_per_s", "rows_per_s_per_core", "gc_pause_total_us"):
+            if k in r.get("metrics", {}):
+                vals.setdefault(k, []).append(r["metrics"][k]["value"])
+    med = lambda k: round(statistics.median(vals[k])) if vals.get(k) else None
+    rows, cores, gc = med("rows_per_s"), med("rows_per_s_per_core"), med("gc_pause_total_us")
+except Exception as e:
+    print(json.dumps({"cell": cell, "error": str(e)}), flush=True)
+print(json.dumps({
+    "cell": cell, "rc": int(rc), "secs": int(secs), "knobs": knobs.strip(),
+    "rows_per_s": rows, "rows_per_s_per_core": cores, "gc_pause_total_us": gc,
+    "records": int(after) - int(before),
+}), flush=True)
+PY
+  aws s3 cp "$PROGRESS" "$S3_RUN/logs/progress.jsonl" || note "progress upload refused"
+  tail -1 "$PROGRESS"
+}
+
+best_rows() { python3 -c "
+import json,sys
+v=[json.loads(l).get('rows_per_s') or 0 for l in open('$PROGRESS')]
+print(int(max(v or [0])))"; }
+
+# The bring-up above left one message on the topic, and prefill refuses a
+# partially-filled corpus rather than topping it up. Drop and wait: the delete
+# is asynchronous, and prefilling before it lands spreads the corpus over a
+# topic that is still going away.
+note "dropping $TOPIC before the screen's prefill"
+docker exec spate-bench-redpanda rpk topic delete "$TOPIC" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  depth=$(docker exec spate-bench-redpanda rpk topic describe -p "$TOPIC" 2>/dev/null \
+    | awk 'NR>1{s+=$6} END{print s+0}')
+  [ "${depth:-0}" = 0 ] && break
+  sleep 2
 done
-note "session budget spent"
+
+note "prefilling $SCREEN_BATCHES batches for the screen"
+"$BENCH" prefill --env "$ENV_ID" --batches "$SCREEN_BATCHES"
+note "building $ARM"
+"$BENCH" build "$ARM"
+
+BASE_OPTS="-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16"
+
+# The two that settle whether the diagnosis holds, before anything is spent on
+# the ladder: everything new, then the version and client move alone.
+cell c00-baseline 1 "$SCREEN_BATCHES"
+cell c01-oldheap  1 "$SCREEN_BATCHES" --knob heap_mib=20480 --knob jvm_opts=
+
+if [ "$(best_rows)" -lt "$GATE_ROWS_PER_S" ]; then
+  note "GATE: best cell is $(best_rows) rows/s, under $GATE_ROWS_PER_S — the heap"
+  note "and GC flags did not move it and the ladder would price the same answer."
+  note "stopping the ladder; holding 20m for inspection, then terminating."
+  sleep 1200
+else
+  cell c02-g1new5    1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS"
+  cell c03-g1new25   1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=25"
+  cell c04-pause500  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=500"
+  cell c05-pause1000 1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=1000"
+  cell c06-pretouch  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:+AlwaysPreTouch"
+  cell c07-region64  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:G1HeapRegionSize=64m"
+  # 8-byte alignment at its own zero-based ceiling: does the padding cost more
+  # than the 32 GiB it buys?
+  cell c08-align8    1 "$SCREEN_BATCHES" --knob heap_mib=30720 \
+    --knob "jvm_opts=-XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=40"
+  # The other side of the same mechanism: shrink the in-flight set instead of
+  # growing eden.
+  cell c09-poll1000  1 "$SCREEN_BATCHES" --knob poll_records=1000 --knob buffer_count=1000
+  cell c10-poll500   1 "$SCREEN_BATCHES" --knob poll_records=500  --knob buffer_count=500
+fi
+
+note "screen complete"
+cat "$PROGRESS"
