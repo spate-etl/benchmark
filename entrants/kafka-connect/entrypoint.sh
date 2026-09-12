@@ -122,13 +122,19 @@ esac
 # 32768 - 2048 at the default 8-byte object alignment, 65536 - 2048 at 16. Past
 # it the JVM silently pays a base add, and above 32736m/65504m drops compressed
 # oops entirely, doubling every reference.
+#
+# -XX:-UseCompressedOops opts out: a cell measuring a heap past the cliff says so
+# in the JVM's own vocabulary, which a typo cannot produce and which makes the
+# JVM do what the cell claims rather than leaving it to be inferred.
 case "${JVM_OPTS:-}" in
+  *-XX:-UseCompressedOops*)        oops_max=0 ;;
   *-XX:ObjectAlignmentInBytes=16*) oops_max=63488 ;;
   *)                               oops_max=30720 ;;
 esac
-if [ "$HEAP_MIB" -gt "$oops_max" ]; then
+if [ "$oops_max" -gt 0 ] && [ "$HEAP_MIB" -gt "$oops_max" ]; then
   echo "FATAL: HEAP_MIB=${HEAP_MIB} is past the ${oops_max}m zero-based" \
-       "compressed-oops boundary for this object alignment." >&2
+       "compressed-oops boundary for this object alignment. Pass" \
+       "-XX:-UseCompressedOops in jvm_opts to measure past it deliberately." >&2
   exit 1
 fi
 

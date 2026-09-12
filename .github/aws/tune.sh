@@ -223,9 +223,9 @@ ARM=kafka-connect
 # result worth re-measuring at the full corpus anyway.
 SCREEN_BATCHES=12000000
 PROGRESS=/tmp/progress.jsonl
-# Below 1.6M rows/s neither the version move nor the heap did anything, and the
-# remaining cells would price the same non-answer at $5/hour.
-GATE_ROWS_PER_S=1600000
+# c00 reached 2.90M on the old flag bundle. A first cell below this means the new
+# bundle broke something, and the rest would price the same answer at $5/hour.
+GATE_ROWS_PER_S=2000000
 
 records() { ls "tuning/$ENV_ID/$ARM/"*.jsonl 2>/dev/null | head -1; }
 record_lines() { local f; f=$(records); [ -n "$f" ] && wc -l < "$f" || echo 0; }
@@ -304,34 +304,39 @@ note "prefilling $SCREEN_BATCHES batches for the screen"
 note "building $ARM"
 "$BENCH" build "$ARM"
 
-BASE_OPTS="-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16"
+# Identical across the four tuned cells, so poll_records is the only variable.
+# ConcGCThreads: the c00 log showed 6 concurrent markers against 23 parallel
+# workers and 23.6 GB/s of allocation, with 71 to-space exhaustions and 40 Full
+# GCs — marking was not finishing before the heap filled.
+# AlwaysPreTouch: c00 ran with Pre-touch disabled, so 62 GiB of first-touch page
+# faults landed inside the measured window.
+TUNED="-XX:+UnlockExperimentalVMOptions -XX:ObjectAlignmentInBytes=16 \
+-XX:G1NewSizePercent=60 -XX:ConcGCThreads=12 -XX:+AlwaysPreTouch \
+-XX:+ExitOnOutOfMemoryError"
 
-# The two that settle whether the diagnosis holds, before anything is spent on
-# the ladder: everything new, then the version and client move alone.
-cell c00-baseline 1 "$SCREEN_BATCHES"
-cell c01-oldheap  1 "$SCREEN_BATCHES" --knob heap_mib=20480 --knob jvm_opts=
+# The control. 63488m is only legal with 16-byte alignment — at the default
+# 8-byte alignment the zero-based boundary is 30720m — so "untouched" here means
+# G1's own ergonomics, with the one flag the heap size requires.
+CONTROL="-XX:ObjectAlignmentInBytes=16"
 
+poll() { # id poll_records opts
+  cell "$1" 1 "$SCREEN_BATCHES" \
+    --knob "poll_records=$2" --knob "buffer_count=$2" --knob "jvm_opts=$3"
+}
+
+poll p2000-tuned   2000 "$TUNED"
 if [ "$(best_rows)" -lt "$GATE_ROWS_PER_S" ]; then
-  note "GATE: best cell is $(best_rows) rows/s, under $GATE_ROWS_PER_S — the heap"
-  note "and GC flags did not move it and the ladder would price the same answer."
-  note "stopping the ladder; holding 20m for inspection, then terminating."
-  sleep 1200
-else
-  cell c02-g1new5    1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS"
-  cell c03-g1new25   1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=25"
-  cell c04-pause500  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=500"
-  cell c05-pause1000 1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:MaxGCPauseMillis=1000"
-  cell c06-pretouch  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:+AlwaysPreTouch"
-  cell c07-region64  1 "$SCREEN_BATCHES" --knob "jvm_opts=$BASE_OPTS -XX:G1NewSizePercent=40 -XX:G1HeapRegionSize=64m"
-  # 8-byte alignment at its own zero-based ceiling: does the padding cost more
-  # than the 32 GiB it buys?
-  cell c08-align8    1 "$SCREEN_BATCHES" --knob heap_mib=30720 \
-    --knob "jvm_opts=-XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=40"
-  # The other side of the same mechanism: shrink the in-flight set instead of
-  # growing eden.
-  cell c09-poll1000  1 "$SCREEN_BATCHES" --knob poll_records=1000 --knob buffer_count=1000
-  cell c10-poll500   1 "$SCREEN_BATCHES" --knob poll_records=500  --knob buffer_count=500
+  note "GATE: $(best_rows) rows/s on the tuned bundle, under $GATE_ROWS_PER_S."
+  note "c00 reached 2899046 on the old bundle, so the new flags cost throughput."
+  note "stopping rather than measuring poll_records against a broken backdrop."
+  cat "$PROGRESS"
+  exit 0
 fi
+
+poll p1000-tuned   1000 "$TUNED"
+poll p750-tuned     750 "$TUNED"
+poll p500-tuned     500 "$TUNED"
+poll p500-control   500 "$CONTROL"
 
 note "screen complete"
 cat "$PROGRESS"

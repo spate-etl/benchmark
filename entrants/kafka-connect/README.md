@@ -254,7 +254,9 @@ inserts already carried ~155,000 rows.
 Measured locally against this arm's own jars, per 3.8 KiB message of 100 events:
 `AvroConverter.toConnectData` allocates 163 KiB, and `StructToJsonMap.toJsonMap`
 a further 435 KiB while retaining only 44 KiB of it. At the rate that sweep
-sustained, the worker allocates **~8 GB/s**, or ~6 KiB per output row. Against
+sustained, the worker allocates **~10.8 GB/s**, or ~8 KiB per output row — the
+connector encodes every event, and the MV drops 26.5% of them afterwards, so
+messages are `rows / (100 x 0.735)` and not `rows / 100`. Against
 default G1 — `G1NewSizePercent=5`, so ~1 GiB of eden — every insert's working set
 outlives eden and is promoted.
 
