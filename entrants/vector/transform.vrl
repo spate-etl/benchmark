@@ -1,61 +1,60 @@
-# The transform, restated in VRL. One decoded SensorBatch in, up to 100 rows
-# out.
+# The transform, restated in VRL. One decoded SensorBatch in, up to 100 rows out.
 #
-# The fan-out contract this program leans on: "Multiple log events can be
-# emitted from remap by assigning an array to the root path `.`" — Vector emits
-# one event per element. Acknowledgement state is shared across all children
-# (end-to-end acknowledgements architecture), so the source's offset commits
-# only after ClickHouse has acked every row derived from the message. That is
-# what makes this arm's at-least-once real rather than nominal.
+# Assigning an array to `.` makes remap emit one event per element, with
+# acknowledgement state shared across the children, so the source's offset
+# commits only once ClickHouse has acked every row derived from the message.
 #
-# The constants are RESTATED here, not imported: `methodology/` makes the
+# The constants are restated here rather than imported: `methodology/` makes the
 # flatten, the filters and the derived columns user code in every system, and
-# `harness/tests/each_arm_restates_the_transform.rs` holds the sentinel-unit
-# inequality and the quality-floor comparison in the CODE below to
-# `workload/workload.toml`. Its needles are spelled nowhere in this comment,
-# deliberately: the test matches by substring, and a comment that contained a
-# needle would satisfy it while the program drifted. An arm whose transform
-# came from the oracle that marks it could not disagree with the marking scheme,
-# and an arm that cannot fail is not being tested.
+# `harness/tests/each_arm_restates_the_transform.rs` holds the two below to
+# `workload/workload.toml`. It matches by substring over the whole file, so no
+# comment here may spell either needle.
 
 batch_id = int!(.batch_id)
 sensor   = string!(.sensor)
 
-# The specified coalesce: `region` is a nullable Avro union and the target
-# column is LowCardinality(String), not Nullable, so null becomes ''.
+# `region` is a nullable Avro union; the column is LowCardinality(String), not
+# Nullable.
 region = .region
 region = if region == null { "" } else { string!(region) }
 
 batch_ts = from_unix_timestamp!(int!(.batch_ts_ms), unit: "milliseconds")
 send_ts  = from_unix_timestamp!(int!(.send_ts_us),  unit: "microseconds")
 
-# Both filters in one pass: drop the sentinel unit, and drop rows whose quality
-# is non-null and below the floor. `q == null ||` short-circuits before the
-# fallible float coercion, so a null quality survives without being coerced.
-kept = filter(array!(.events)) -> |_i, e| {
-    q = e.quality
-    e.unit != "drop" && (q == null || float!(q) >= 0.2)
-}
-
-# value_scaled = value * 1000 / (seq + 1), integer division truncating toward
-# zero. VRL's `/` is float division, and f64 is exact here: the numerator is
-# below 2^41 and the divisor at most 100, both exactly representable and far
-# below 2^53, so the quotient's integer part is exact and `to_int` truncates
-# toward zero — the specified semantics. The `?? 0.0` arms the type checker's
-# divide-by-zero case; it is unreachable because seq >= 0, so seq + 1 >= 1.
+# `del` rather than a plain read throughout: VRL clones the whole variable to
+# read one field off it, and clones an array again on assignment
+# (vectordotdev/vector#6770). `del(.events)` moves the array off the event, and
+# `del(e.field)` reads without copying the record. Mutating the closure's local
+# is invisible — its return value replaces the element.
 #
-# `upcase` is Unicode uppercase, which equals ASCII uppercase on this corpus:
-# metric names are drawn from a fixed set of lowercase ASCII identifiers
-# (workload/schema/sensor_batch.avsc), and the correctness gate's checksum over
-# name_upper would fail this arm if that ever stopped being true.
-. = map_values(kept) -> |e| {
-    seq   = int!(e.seq)
-    value = int!(e.value)
-    scaled = to_int(value * 1000 / (seq + 1) ?? 0.0)
-    {
-        "batch_id": batch_id, "event_seq": seq, "sensor": sensor, "region": region,
-        "name_upper": upcase(string!(e.name)), "unit": string!(e.unit),
-        "value": value, "value_scaled": scaled, "quality": e.quality, "tags": e.tags,
-        "batch_ts": batch_ts, "send_ts": send_ts
+# `recursive: false` is load-bearing: rows legitimately carry a null `quality`
+# and an empty `tags`, which a recursive compact would strip. Only the
+# top-level nulls, the filtered-out rows, may go.
+#
+# `q == null ||` short-circuits before the fallible coercion, so a null quality
+# is never coerced.
+#
+# f64 is exact for value_scaled: the numerator is below 2^41 and the divisor at
+# most 100, so `to_int` truncates toward zero as specified. `?? 0.0` only arms
+# the type checker's divide-by-zero case, unreachable since seq >= 0.
+#
+# `upcase` is Unicode, equal to ASCII uppercase on this corpus's fixed set of
+# lowercase ASCII metric names; the gate's checksum over name_upper catches it
+# if that stops being true.
+. = compact(map_values(array!(del(.events))) -> |e| {
+    q = del(e.quality)
+    u = string!(del(e.unit))
+    if u != "drop" && (q == null || float!(q) >= 0.2) {
+        seq   = int!(del(e.seq))
+        value = int!(del(e.value))
+        scaled = to_int(value * 1000 / (seq + 1) ?? 0.0)
+        {
+            "batch_id": batch_id, "event_seq": seq, "sensor": sensor, "region": region,
+            "name_upper": upcase(string!(del(e.name))), "unit": u,
+            "value": value, "value_scaled": scaled, "quality": q, "tags": del(e.tags),
+            "batch_ts": batch_ts, "send_ts": send_ts
+        }
+    } else {
+        null
     }
-}
+}, recursive: false)
