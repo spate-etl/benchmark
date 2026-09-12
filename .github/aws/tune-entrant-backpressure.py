@@ -11,6 +11,7 @@ harness (unlike the manual run recipe in entrants/flink/README.md), so this
 resolves its address on the bench docker network directly rather than going
 through localhost.
 """
+import ipaddress
 import json
 import subprocess
 import sys
@@ -22,15 +23,32 @@ METRICS = "busyTimeMsPerSecond,backPressuredTimeMsPerSecond,idleTimeMsPerSecond"
 
 
 def jm_address():
+    """The JobManager's address on the bench network, or (None, why-not).
+
+    The network name goes through a JSON map, not the Go template: a hyphen in a
+    template field path is a parse error. Docker also renders a stopped
+    container's zero IPAddress as the truthy string "invalid IP", so the address
+    is validated rather than tested for emptiness.
+    """
     out = subprocess.run(
-        [
-            "docker", "inspect", JM_CONTAINER,
-            "--format", "{{.NetworkSettings.Networks." + NETWORK + ".IPAddress}}",
-        ],
+        ["docker", "inspect", JM_CONTAINER, "--format", "{{json .NetworkSettings.Networks}}"],
         capture_output=True, text=True, timeout=5,
     )
-    ip = out.stdout.strip()
-    return ip or None
+    if out.returncode != 0:
+        return None, out.stderr.strip() or f"docker inspect exited {out.returncode}"
+    try:
+        networks = json.loads(out.stdout)
+    except json.JSONDecodeError as e:
+        return None, f"docker inspect {JM_CONTAINER} gave no JSON: {e}"
+    ip = (networks.get(NETWORK) or {}).get("IPAddress") or ""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return None, (
+            f"{JM_CONTAINER} is on {sorted(networks)} with IPAddress={ip!r} —"
+            f" not a usable address on {NETWORK}"
+        )
+    return ip, None
 
 
 def get_json(url):
@@ -39,9 +57,9 @@ def get_json(url):
 
 
 def poll(label):
-    ip = jm_address()
-    if not ip:
-        return {"label": label, "error": "jobmanager container not found or not on the network"}
+    ip, why = jm_address()
+    if ip is None:
+        return {"label": label, "error": why}
 
     base = f"http://{ip}:8081"
     try:
