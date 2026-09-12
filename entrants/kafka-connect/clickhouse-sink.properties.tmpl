@@ -7,8 +7,6 @@
 #     (ClickHouseSinkConfig.java:233-234 at v1.4.0; a user-supplied
 #     clickhouseSettings value would win, and this arm supplies none, so the
 #     defaults hold) — which is exactly what server-side attribution requires.
-#   - client_version: the effective default is V1; inserts are RowBinary either
-#     way (ClickHouseWriter.java:1066).
 #   - errors.tolerance: the default `none` is kept. A poison record fails the
 #     task loudly; `all` would drop it silently, and a silent drop voids the
 #     loss gate — faster for the wrong reason.
@@ -23,7 +21,8 @@
 name=@GROUP_ID@
 connector.class=com.clickhouse.kafka.connect.ClickHouseSinkConnector
 
-# One task per partition (8). A ninth task would own no partitions.
+# One task per partition. A task beyond the partition count owns none, and a
+# count below it leaves one task owning two partitions and pacing the drain.
 tasks.max=@TASKS_MAX@
 topics=@TOPIC@
 
@@ -53,6 +52,10 @@ exactlyOnce=false
 # the driver refuse such a cell before a container starts.
 bufferCount=@BUFFER_COUNT@
 bufferFlushTime=@BUFFER_FLUSH_MS@
+
+# V2 takes the DataStreamWriter path added in v1.5.0, which serializes RowBinary
+# straight to the network stream; V1 stages the batch through a piped stream.
+client_version=@CLIENT_VERSION@
 
 # Shipped default, stated because it matters: each task batches its own
 # partitions separately, which is what keeps the connector's derived

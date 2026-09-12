@@ -8,7 +8,7 @@ first; this file records only what is specific to Kafka Connect.
 Delivery is **at-least-once** (`exactlyOnce=false`, the connector's
 `AtLeastOnceBufferStrategy`), with worker offset flushes matched to the 5 s
 durability cadence every arm runs. The insert format is **RowBinary**,
-uncompressed, over HTTP — verified in the v1.4.0 source
+uncompressed, over HTTP — verified in the v1.5.0 source
 (`ClickHouseWriter.java:1066`; `RowBinaryWithDefaults` is chosen only when the
 target has `DEFAULT` columns, and the landing table has none).
 
@@ -36,12 +36,83 @@ materialized view's SQL, which is exactly what makes it worth measuring.
 
 | Knob | Value | Reaches Connect as | What it controls |
 |---|---|---|---|
-| `tasks` | **8** | `tasks.max` | One task per **partition** (8). A ninth task would own no partitions; fewer leaves a task owning two partitions and pacing the drain, the same arithmetic as Flink's parallelism. |
-| `buffer_count` | **2000** | `bufferCount` | Records (messages) per buffered insert. At 100 events/message that is ~200,000 landed events and ~147,000 surviving rows per insert after the MV's filters — the same order as the other arms' batch sizes, inside ClickHouse's recommended 10k–100k+ band. The connector's own default is `bufferCount=0` — buffering disabled entirely, an insert per poll — so setting it at all is the difference between batched and per-poll inserts. `consumer.max.poll.records` is rendered from the same variable, so a sweep over this knob moves both together. |
+| `tasks` | **32** | `tasks.max` | One task per **partition** (32). A 33rd task would own no partitions; fewer leaves a task owning two partitions and pacing the drain, the same arithmetic as Flink's parallelism. |
+| `buffer_count` | **200** | `bufferCount` | Records (messages) per buffered insert. At 100 events/message that is ~20,000 landed events and ~15,100 surviving rows per insert after the MV's filters, inside ClickHouse's recommended 10k-100k band. Measured as the optimum of a 100..2000 sweep; see *Why 200*. The connector's own default is `bufferCount=0` — buffering disabled entirely, an insert per poll — so setting it at all is the difference between batched and per-poll inserts. |
+| `poll_records` | **200** | `consumer.max.poll.records` | How much one poll delivers, and so how much one insert carries: the buffer flushes as soon as it reaches `bufferCount`. Separate from `buffer_count` because the two set the peak differently — see the sizing note below. |
 | `buffer_flush_ms` | **1000** | `bufferFlushTime` | Bounds sustained-mode latency, matching Flink's 1000 ms linger. **Must be > 0 whenever `bufferCount` > 0**: the buffer flushes on size *or* time, so a zero flush time strands a sub-`bufferCount` tail and a drain never completes. Enforced by the descriptor's `[[constraints]]` floor (`at_least = 1`) — the driver refuses such a cell before a container starts; only the conditional only-when-buffering form is inexpressible, and every committed variant pins `buffer_count` > 0. |
+| `client_version` | **V2** | `client_version` | V2 takes the `DataStreamWriter` path added in v1.5.0, which serializes RowBinary straight to the network stream; V1 stages the batch through a piped stream. |
+| `heap_mib` | **63488** | `-Xms`/`-Xmx` | See *JVM sizing* below. |
+| `jvm_opts` | *(see below)* | appended to `KAFKA_OPTS` | Extra JVM flags. `entrypoint.sh` refuses any that would set the heap or redirect the GC log. |
 
-These are **per task**, so cross-arm quantities are products: up to
-`tasks × buffer_count` = 16,000 messages (~1.6M events) buffered across the arm.
+### Why 200
+
+`poll_records` sets how much one insert carries, and therefore how much decoded
+data is live when a young collection arrives. Swept at the committed heap and
+flags, 12M batches, one repetition each:
+
+| poll | rows/s | rows/s/core | GC % of wall clock | client us/row | server us/row | total | rows/INSERT |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2000 | 3,324,263 | 123,768 | 30.5% | — | 0.489 | — | 153,135 |
+| 500 | 4,656,123 | 167,879 | 8.0% | 5.96 | 0.553 | 6.51 | 37,939 |
+| 400 | 4,564,131 | 169,140 | 6.2% | 5.91 | 0.600 | 6.51 | 30,298 |
+| 300 | 4,556,750 | 170,843 | 5.4% | 5.85 | 0.637 | 6.49 | 25,072 |
+| **200** | **4,863,068** | **189,119** | **3.6%** | **5.29** | 0.794 | **6.08** | 15,101 |
+| 100 | 4,277,898 | 176,455 | 1.9% | 5.67 | 1.145 | 6.81 | 7,539 |
+
+Two costs move in opposite directions. GC falls monotonically as the batch
+shrinks, because survivors per collection scale with what is in flight.
+Server-side cost rises monotonically, because ClickHouse charges more per row for
+smaller blocks. Total cost per row is the sum, and it has a single minimum at
+200; 100 is past it, with `ch_cpu_us_per_row` more than doubled against 500.
+
+The throughput column dips at 400 and 300 and the total-cost column does not,
+which is why the decision rests on cost rather than on the throughput reading
+alone. Those two cells cost what 500 costs per row and simply used fewer cores.
+
+Some of the per-core gain is work moving into the shared ClickHouse rather than
+disappearing: server cost is 44% higher at 200 than at 500. Total system cost
+still falls 6.6%, so it is a real saving, but `rows_per_s_per_core` read alone
+overstates it.
+
+### JVM sizing
+
+Each task holds `(bufferCount - 1 + poll_records)` messages live until its insert
+returns — the buffer only clears afterwards — as both a Connect `Struct` and the
+connector's `jsonMap` derived from it. Measured against this schema at 77,397 B
+per message, that is **~9.9 GiB across 32 tasks**, or ~11.7 GiB once 16-byte
+object alignment pads it.
+
+Eden has to exceed that, or every insert's working set is promoted to the old
+generation and collected there. Hence `-XX:G1NewSizePercent=60` (~37 GiB of eden)
+rather than the shipped 5, and a heap large enough to carry it. Measured at
+`poll_records=500`: the shipped value gives 7,016 collections of which 576 are
+mixed and 44% of wall clock in GC; 60 gives 540 collections, none mixed, at 8%.
+
+`-XX:ConcGCThreads=12` doubles the shipped 6. With 23 parallel workers and over
+20 GB/s of allocation, marking did not finish before the heap filled, and the arm
+took 40 Full GCs and 71 to-space exhaustions in a 305s drain; both are now zero.
+`-XX:+AlwaysPreTouch` moves 62 GiB of first-touch page faults to start-up rather
+than inside the measured window. `InitiatingHeapOccupancyPercent` is deliberately
+absent: pinned at 25 it produced an identical GC profile — same collection count,
+same mixed and full counts, same concurrent cycles — and changed nothing.
+
+`63488m` is not a round 64 GiB because the compressed-oops boundaries are not
+round. Measured on this image's own Temurin 21 (linux/arm64), reading
+`[gc,init] Compressed Oops` out of `-Xlog:gc*`:
+
+| object alignment | zero-based ≤ | compressed oops ≤ |
+|---|---:|---:|
+| 8 (default) | 30,720m | 32,736m |
+| 16 | **63,488m** | 65,504m |
+
+Both zero-based edges are `addressable - HeapBaseMinAddress`. Above them the JVM
+pays a base add on every reference; above the right-hand column it drops
+compressed oops and every reference doubles. `-XX:ObjectAlignmentInBytes=16`
+costs +18.4% on retained size for this workload's small, numerous objects, which
+the extra 32 GiB of heap more than absorbs.
+
+Both `entrypoint.sh` and `entrants_are_valid` bound `heap_mib` at the zero-based
+edge for whichever alignment `jvm_opts` sets.
 
 ### Values fixed in the templates
 
@@ -50,12 +121,11 @@ These are **per task**, so cross-arm quantities are products: up to
 | `exactlyOnce` | `false` | At-least-once, matched guarantee-for-guarantee. `true` adds state-store round-trips no other arm pays for a guarantee no other arm offers. |
 | `errors.tolerance` | `none` (default kept) | A poison record fails the task loudly. `all` drops silently, and a silent drop voids the loss gate — faster for the wrong reason. |
 | `offset.flush.interval.ms` | `5000` | The matched durability cadence (shipped: 60000). |
-| `consumer.max.poll.records` | `= buffer_count` | One poll fills one buffered insert at every value of the knob (rendered from the same variable). Shipped 500 puts four polls under every 2000-record flush. |
-| `consumer.max.partition.fetch.bytes` | `8388608` | Shipped 1 MiB is ~258 messages/partition/fetch at this corpus's ~4.0 KiB (4065 B) mean framed message, starving a 2000-record buffer. `fetch.max.bytes` stays at the shipped 50 MiB. |
+| `consumer.max.partition.fetch.bytes` | `8388608` | Shipped 1 MiB is ~258 messages/partition/fetch at this corpus's ~4.0 KiB (4065 B) mean framed message, starving the poll. `fetch.max.bytes` stays at the shipped 50 MiB. |
 | `ignorePartitionsWhenBatching` | `false` (default kept) | Per-partition batching is what keeps the connector's derived dedup token coherent. |
-| `client_version` | unset (effective `V1`) | RowBinary either way; the shipped default is measured. |
 | `clickhouseSettings` | unset | The connector sets `async_insert=0, wait_end_of_query=1` as non-overriding defaults on every insert (`ClickHouseSinkConfig.java:233-234`; a user-supplied value would win, and this arm supplies none) — exactly what server-side attribution requires. |
-| JVM sizing | `-Xms20480m -Xmx20480m -XX:MaxDirectMemorySize=768m -XX:MaxMetaspaceSize=256m` | Deliberately not scaled with the 96 GiB container: this heap measured 1.16M rows/s at 32 tasks where 31g measured 1.07M and 90g measured 0.79M. The same era-sizing rule as the Flink TaskManager, enforced by `entrants_are_valid`. GC is the launcher's shipped G1 (rule 1). |
+| Direct memory, metaspace | `768m`, `256m` | Neither scales with the batch, so they stay fixed while `heap_mib` is a knob. |
+| Collector | G1 | Matched to the Flink arm, and measured slightly ahead of generational ZGC on this rig. ZGC also has no compressed oops, which costs +29.2% on retained size here. |
 
 `GROUP_ID` is the **connector name**, not a consumer `group.id`: Connect derives
 a sink's consumer group as `connect-<name>`, so the fresh consumer group each
@@ -70,8 +140,8 @@ configures log4j2 in YAML, and the shipped Connect config is root `INFO` with a
 rolling *file* appender: disk writes on the hot path, inside the measured
 cgroup, for output nothing reads.
 
-GC is G1 (the launcher's shipped `KAFKA_JVM_PERFORMANCE_OPTS`). `-Xlog:gc*`
-writes `/opt/kafka/logs/gc.log` for the driver to read — set via `KAFKA_OPTS`,
+`-Xlog:gc*,safepoint` writes `/opt/kafka/logs/gc.log` for the driver to read —
+set via `KAFKA_OPTS`,
 not `KAFKA_GC_LOG_OPTS`, because `kafka-run-class.sh` assembles its own GC
 logging only behind the `-loggc` flag, which `connect-standalone.sh` never
 passes in any mode; `KAFKA_OPTS` is on the exec line unconditionally.
@@ -140,12 +210,12 @@ the tail — see the knob table.
 |---|---|---|
 | Connect runtime | `apache/kafka:4.3.1` (ASF's own image) | 4.3.1 |
 | JVM | Temurin JRE (image default) | 21 |
-| ClickHouse sink | `clickhouse-kafka-connect-v1.4.0.zip` (GitHub release, sha256-pinned) | v1.4.0 |
+| ClickHouse sink | `clickhouse-kafka-connect-v1.5.0.zip` (GitHub release, sha256-pinned) | v1.5.0 |
 | Avro converter | `io.confluent:kafka-connect-avro-converter` | 8.3.0 |
 | Registry client | `io.confluent:kafka-schema-registry-client` (transitive) | 8.3.0 |
 | Avro | `org.apache.avro:avro` (transitive) | per `dependencies.txt` |
 
-`[version]` in the descriptor resolves `4.3.1-v1.4.0` from the jar filenames
+`[version]` in the descriptor resolves `4.3.1-v1.5.0` from the jar filenames
 that actually run (the Connect runtime jar and the plugin jar); the Dockerfile
 fails the build if either filename pattern drifts. Joined with `-` rather than
 `+` because the driver's version parser accepts only `[0-9A-Za-z.-]` tokens.
@@ -194,9 +264,11 @@ The converter's non-Central origin is declared in `[[deviations]]`.
   applies), and the server-side CPU column is the honest measure of its target
   load.
 - **The upstream integration test for array-of-Struct → `Array(Tuple)` is
-  `@Disabled`** (for an unrelated flag) at v1.4.0, so the nested write path
+  `@Disabled`** (for an unrelated flag) at v1.5.0, so the nested write path
   this arm depends on is not exercised by the connector's own CI. First local
-  smoke of a live drain is the verification, not the upstream suite.
+  smoke of a live drain is the verification, not the upstream suite — and that
+  applies doubly since `client_version=V2` takes a different RowBinary encoder
+  from V1's.
 - **The MV-attribution belief in `harness/src/serverside.rs` is what this arm
   verifies.** An insert into the landing table names the view's target in
   `tables` as well, so attribution by `hasAny` catches it; the landing table is
@@ -210,11 +282,30 @@ The converter's non-Central origin is declared in `[[deviations]]`.
   Connect 2.7+ compatibility; Kafka 4.3's Connect API is well inside that
   range, but a base-image major bump should re-check it.
 
-## Gregg's question (candidate)
+## Gregg's question
 
-Why X and not 2X: the leading candidate is per-record materialization on the
-client — the converter builds a `GenericRecord`, converts it to a Connect
-`Struct` (a second full copy with per-field boxing), and the connector then
-walks that `Struct` against the target's `DESCRIBE` to serialize RowBinary — three
-traversals of every batch where Spate does one. To be confirmed against the GC
-log and the server-side CPU split on the reference environment.
+Why X and not 2X: **the collector was the constraint, and now it is not.** The
+arm as first published spent **1,440-1,848s of a ~1,987s window** in
+stop-the-world pause, in `Full (G1 Compaction Pause)`, so most of the 26.7 cores
+it used were G1's 23 parallel workers rather than work. ClickHouse was never the
+limit: `ch_cpu_us_per_row` was 0.601, third lowest of any arm.
+
+The cause is how much the decode path allocates. Measured against this arm's own
+jars, per 3.8 KiB message of 100 events, `AvroConverter.toConnectData` allocates
+163 KiB and `StructToJsonMap.toJsonMap` a further 435 KiB while retaining only
+44 KiB of it — about 10.8 GB/s at the rate that sweep sustained. Against the
+shipped `G1NewSizePercent=5`, which gives ~1 GiB of eden, every insert's working
+set outlived its collection and was promoted; old gen filled with short-lived
+garbage, the concurrent mark never finished on 6 threads, and the arm took 40
+Full GCs and 71 to-space exhaustions in a 305s drain.
+
+Sizing eden past the in-flight set, doubling the marking threads and shrinking
+the batch removes it: **0 Full GCs, 0 to-space exhaustions, GC at 3.6% of wall
+clock**, and CPU per row down from 20.07 to 5.29 us.
+
+What binds now is the decode path itself. At 32 tasks — capped by the partition
+count, since a task beyond it owns no partitions — each thread decodes and
+serializes one 100-event message in roughly 0.5 ms. That product is the ceiling,
+and the arm now runs close enough to it that further GC work buys little. The
+remaining levers are more partitions, or a cheaper decode path inside the
+connector, which is its own code rather than configuration.

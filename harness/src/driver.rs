@@ -32,7 +32,7 @@
 //! line between a reported refusal and a recorded one now falls, and why.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::ceiling::{self, Ceiling};
@@ -1310,6 +1310,8 @@ fn measure(
     // it is not evidence.
     let sut = resolve_sut(arm, &image)?;
 
+    let gc_keep = gc_log_kept_at(root, opts, arm.entrant.id(), &arm.variant.id, rep);
+
     // Everything from here on can name what failed, so it is recorded.
     let outcome = assert_pinned_version(
         arm.entrant.id(),
@@ -1330,6 +1332,7 @@ fn measure(
             &image,
             expected_rows,
             schema_id,
+            gc_keep.as_deref(),
         )
     });
 
@@ -1781,6 +1784,7 @@ fn run_arm(
     image: &str,
     expected_rows: u64,
     schema_id: u32,
+    gc_keep: Option<&Path>,
 ) -> Result<Measurement, String> {
     // The arm's own objects go first, and the lifecycle is: teardown
     // (defensive) → TRUNCATE → create at the start, teardown again when the
@@ -2010,7 +2014,7 @@ fn run_arm(
     // nothing to read — so this is the last moment the figures are obtainable,
     // and it is after the samplers have stopped, so whatever the copy costs
     // falls outside the measurement window.
-    let gc = read_gc(arm, &parts);
+    let gc = read_gc(arm, &parts, gc_keep);
 
     let logs = containers.stop();
 
@@ -2833,7 +2837,38 @@ const JVM_RUNTIME: &str = "jvm";
 /// made. The alternative, an empty summary, would publish
 /// `gc_pause_total_us: 0` for an arm whose instrumentation broke, flattering
 /// exactly the run that went wrong.
-fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
+/// Where this repetition's GC logs are kept, for a run that cannot publish.
+///
+/// `read_gc_log` deletes its copy and only `results/` is uploaded off the AWS
+/// box, so a tuning cell's log is otherwise gone with the instance — and sizing
+/// a heap needs the log itself, not the `gc_*` metrics parsed out of it: Full-GC
+/// post-occupancy, and whether compressed oops came up.
+///
+/// `None` for a publishing run, which keeps the existing behaviour exactly.
+///
+/// The cells of one sweep share an entrant, variant and rep — that is what a
+/// sweep is — so the name carries a v7 UUID, the same time-ordered shape as
+/// [`Report::run_id`]. A wall-clock stamp would be millisecond-resolution and
+/// collide, which would silently leave the ladder holding one log.
+///
+/// The prefix is a path stem; [`read_gc`] appends a container name, so a
+/// multi-container arm gets one file each.
+fn gc_log_kept_at(
+    root: &Path,
+    opts: &RunOptions,
+    entrant: &str,
+    variant: &str,
+    rep: u32,
+) -> Option<PathBuf> {
+    opts.trigger.bars_publication().then(|| {
+        crate::results::root_for(root, opts.trigger)
+            .join(&opts.env_id)
+            .join(entrant)
+            .join(format!("{variant}-rep{rep}-{}.gc", uuid::Uuid::now_v7()))
+    })
+}
+
+fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)], keep_at: Option<&Path>) -> Gc {
     let mut gc = Gc::default();
     if arm.entrant.spec.entrant.runtime != JVM_RUNTIME {
         return gc;
@@ -2865,7 +2900,8 @@ fn read_gc(arm: &Arm<'_>, parts: &[(String, Option<SutCost>)]) -> Gc {
         // charges the arm for its own start-up exactly as the sampler's window
         // does. The mapping is approximate and `GcSummary::from_uptime_s` says
         // what was actually covered.
-        match jvm::measure(name, gc_log, Some((0.0, cost.window_s))) {
+        let keep = keep_at.map(|dir| dir.join(format!("{}.gc.log", c.name)));
+        match jvm::measure(name, gc_log, Some((0.0, cost.window_s)), keep.as_deref()) {
             Ok(summary) => match c.role {
                 Role::DataPlane => gc.data_plane = Some(summary),
                 Role::ControlPlane => gc.control_plane = Some(summary),
@@ -3809,6 +3845,40 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), toml::Value::Integer(*v)))
                 .collect(),
+        }
+    }
+
+    /// The Flink sink tuning cost two AWS runs partly because a cell's GC log
+    /// was unrecoverable. A publishing run must keep behaving as it did.
+    #[test]
+    fn only_a_run_that_cannot_publish_keeps_its_gc_log() {
+        let root = Path::new("/repo");
+
+        let kept = gc_log_kept_at(root, &tuning_opts(&[]), "kafka-connect", "rowbinary-mv", 2)
+            .expect("a tuning cell keeps its GC log");
+        assert!(
+            kept.starts_with(root.join(crate::results::TUNING_DIR)),
+            "a kept log belongs beside the records it describes, not in results/: {kept:?}"
+        );
+        let name = kept.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("rowbinary-mv-rep2-"), "{name}");
+
+        // Cells of one sweep share entrant, variant and rep, so the name has to
+        // separate them or the ladder overwrites itself down to one log.
+        let again = gc_log_kept_at(root, &tuning_opts(&[]), "kafka-connect", "rowbinary-mv", 2)
+            .expect("a tuning cell keeps its GC log");
+        assert_ne!(kept, again);
+
+        for trigger in [Trigger::Nightly, Trigger::Manual, Trigger::Release] {
+            let opts = RunOptions {
+                trigger,
+                ..tuning_opts(&[])
+            };
+            assert_eq!(
+                gc_log_kept_at(root, &opts, "kafka-connect", "rowbinary-mv", 1),
+                None,
+                "{trigger:?} publishes, so it keeps nothing"
+            );
         }
     }
 
