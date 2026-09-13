@@ -1,43 +1,26 @@
-# The Vector arm's whole topology: 8 kafka sources -> 8 remap transforms -> 1
+# The Vector arm's topology: N kafka sources -> N remap transforms -> 1
 # clickhouse sink, in one process on the 32 CPU / 96 GiB envelope.
 #
-# This file is a TEMPLATE. `__AVRO_SCHEMA_JSON__` is replaced at image build
-# with the committed workload/schema/sensor_batch.avsc, minified and embedded as
-# a double-quoted YAML scalar — methodology/ forbids re-declaring the schema
-# inline, and baking it from the one committed file is what keeps that true for
-# a system with no Schema Registry client. Every dollar-brace placeholder is
-# resolved by Vector's own env-var interpolation at start-up, which 0.57 gates
-# behind VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true — set in the
-# Dockerfile. Without the flag the placeholders stay literal text (the `:-`
-# defaults live inside the interpolator, so they are NOT applied) and the
-# numeric fields fail config deserialization — loudly, at the Dockerfile's
-# `vector validate`. The interpolator reads the RAW file text, comments
-# included, so no comment in this file may spell a literal placeholder. The
-# defaults after `:-` equal the published knobs, so a reviewer starting the
-# container by hand gets the configuration the numbers describe.
+# This file is a TEMPLATE. The image build substitutes `__AVRO_SCHEMA_JSON__`
+# with the committed workload/schema/sensor_batch.avsc (methodology/ forbids
+# re-declaring the schema inline, and Vector has no Schema Registry client), and
+# expands the marked region below to N sources, N remaps and N sink inputs. Every dollar-brace placeholder is resolved by Vector's own env-var
+# interpolation, which 0.58 gates behind
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true — set in the Dockerfile.
+# Without it the placeholders stay literal and the numeric fields fail config
+# deserialization at the Dockerfile's `vector validate`. The interpolator reads
+# the RAW file text, comments included, so no comment here may spell a literal
+# placeholder. Defaults after `:-` equal the published knobs.
 #
-# WHY EIGHT SOURCES: a Vector kafka source is one librdkafka consumer whose
-# decoding runs in that source's own task, so a single source cannot spread
-# eight partitions' decode across cores. The maintainers' scaling guidance
-# (vectordotdev/vector discussion #15884) is one Vector INSTANCE per partition,
-# cooperative-sticky; the envelope allows one container, so this arm runs the
-# in-process analogue — eight sources in the same consumer group, which the
-# group protocol treats exactly as it would eight processes, settling at one
-# partition each. No upstream doc blesses same-topic multi-source in one
-# process by name; README's "Traps" section flags it for the first live run.
-# `in-1`..`in-7` are YAML aliases of `in-0`: the blocks are IDENTICAL by
-# construction, and the alias makes that a parser-enforced fact rather than a
-# copy-paste promise. (Plain anchors/aliases only — `<<:` merge keys are not
-# supported by Vector's YAML loader. If aliases ever regress, enumerate the
-# eight blocks literally; `vector validate` in the Dockerfile is the guard.)
-#
-# WHY EIGHT REMAPS: structure, not a parallelism requirement. Vector's
-# concurrency model documents remap as a stateless function transform it may
-# parallelize on its own, so a single shared remap is not doomed to one core —
-# but one remap per source keeps each partition's pipeline a straight line with
-# no fan-in point whose scheduling we would be trusting implicitly, and it
-# costs nothing: all eight load the same committed /etc/vector/transform.vrl,
-# so there is still exactly one transform to review.
+# TOPOLOGY: one kafka source splits a queue per assigned partition and decodes
+# each on its own task (src/sources/kafka.rs), so a single source already
+# spreads decode across all 32 partitions. N is a knob because each remap's
+# OUTPUT path is serial — per row it re-clones event metadata, records a
+# latency histogram and walks the row for a size estimate — so N sets how many
+# such paths run in parallel. N sources in one group is the in-process analogue
+# of the instance-per-partition deployment upstream recommends
+# (vectordotdev/vector discussion #15884); the group protocol treats them as it
+# would N processes.
 
 # No published figure comes from an arm's self-report, and an idle API server is
 # still a listener on the measured process.
@@ -45,7 +28,8 @@ api:
   enabled: false
 
 sources:
-  in-0: &kafka_source
+# >>> per-source
+  in-0:
     type: kafka
     bootstrap_servers: "${BOOTSTRAP}"
     topics: ["${TOPIC}"]
@@ -53,143 +37,61 @@ sources:
     # Drain replays a prefilled corpus from the beginning; sustained starts at
     # the tail. The driver supplies the mode's value.
     auto_offset_reset: "${AUTO_OFFSET_RESET:-earliest}"
-    # The durability cadence, matched to the 5 s every arm pays (Spate's offset
-    # commits, Flink's checkpoints). Also Vector's shipped default — set
-    # explicitly so the cadence is a statement, not an inheritance. With
-    # acknowledgements on (sink, below), an offset only commits once ClickHouse
-    # has acked every row derived from the message.
+    # The durability cadence, matched to the 5 s every arm pays. With
+    # acknowledgements on, an offset commits only once ClickHouse has acked
+    # every row derived from the message.
     commit_interval_ms: 5000
     decoding:
       codec: avro
       avro:
-        # THE schema, baked at image build from the committed .avsc. Vector has
-        # no Schema Registry integration, so the schema is static and
+        # Baked at image build from the committed .avsc.
         # `strip_schema_id_prefix` discards the 5-byte Confluent frame without
-        # validating the id — declared as a deviation in entrant.toml, not
-        # smoothed over here.
+        # validating the id — declared as a deviation in entrant.toml.
         schema: __AVRO_SCHEMA_JSON__
         strip_schema_id_prefix: true
     librdkafka_options:
-      # Eight consumers over 32 partitions: cooperative-sticky settles at four
-      # partitions per consumer and rebalances incrementally rather than
-      # stop-the-world, so a late-joining consumer does not stall the other
-      # seven at start-up.
+      # Incremental rebalance, so a late-joining consumer does not stall the
+      # others at start-up.
       "partition.assignment.strategy": "cooperative-sticky"
-      # 8 MiB per fetched message, comfortably above the corpus's largest
-      # Confluent-framed batch; librdkafka's 1 MiB default would truncate
-      # fetches into more round-trips than the payload needs.
+      # Above the corpus's largest Confluent-framed batch; the 1 MiB default
+      # would split fetches into more round-trips than the payload needs.
       "fetch.message.max.bytes": "8388608"
-      # 256 MiB of prefetch per consumer (the option is in KILOBYTES). The
-      # shipped default (~64 MiB in 0.57's librdkafka) is a prefetch bound, and
-      # in drain mode the consumer must never be the starved side: 8 x 256 MiB
-      # is still small against the 96 GiB envelope.
+      # Prefetch bound, in KILOBYTES, applied PER PARTITION — so 256 MiB against
+      # each of the topic's 32 partitions, whatever N is. In drain the consumer
+      # must never be the starved side.
       "queued.max.messages.kbytes": "262144"
-  in-1: *kafka_source
-  in-2: *kafka_source
-  in-3: *kafka_source
-  in-4: *kafka_source
-  in-5: *kafka_source
-  in-6: *kafka_source
-  in-7: *kafka_source
+# <<< per-source
 
-# One remap per source; all eight compile the same committed program. The
-# fan-out happens inside it: assigning an array to `.` emits one event per
-# element, and acknowledgement state is shared across the children, so
-# at-least-once survives the 1:100 explosion.
-#
-# drop_on_error is a decided stance, not the default: Vector's default (false)
-# forwards the ORIGINAL, un-flattened event downstream on a VRL runtime error,
-# and skip_unknown_fields=false would then have ClickHouse reject the whole
-# 262144-row INSERT the raw event rode in — one poison message costing a batch
-# of good rows, or a wedge behind when_full: block. Dropping instead costs
-# exactly that message's rows, which the loss gate counts and publishes.
-# Unreachable on the deterministic corpus; the stance exists for the day it
-# is not.
 transforms:
+# >>> per-source
   shape-0:
     type: remap
     inputs: ["in-0"]
     file: /etc/vector/transform.vrl
+    # Vector's default forwards the ORIGINAL, un-flattened event on a VRL
+    # runtime error, which skip_unknown_fields=false would turn into a rejected
+    # INSERT carrying a whole batch of good rows. Dropping costs that message's
+    # rows, which the loss gate counts. It also skips a per-message clone of the
+    # decoded event that the forwarding path would need.
     drop_on_error: true
-  shape-1:
-    type: remap
-    inputs: ["in-1"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-2:
-    type: remap
-    inputs: ["in-2"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-3:
-    type: remap
-    inputs: ["in-3"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-4:
-    type: remap
-    inputs: ["in-4"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-5:
-    type: remap
-    inputs: ["in-5"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-6:
-    type: remap
-    inputs: ["in-6"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
-  shape-7:
-    type: remap
-    inputs: ["in-7"]
-    file: /etc/vector/transform.vrl
-    drop_on_error: true
+# <<< per-source
 
 sinks:
   clickhouse:
     type: clickhouse
     inputs:
+# >>> per-source
       - shape-0
-      - shape-1
-      - shape-2
-      - shape-3
-      - shape-4
-      - shape-5
-      - shape-6
-      - shape-7
+# <<< per-source
     endpoint: "${CLICKHOUSE_URL}"
     database: default
     table: sensor_events
-    # The variant axis: `arrow_stream` (fetches the table schema from
-    # system.columns once at start-up; added in 0.53 via vector#24373, still
-    # beta in 0.57) or `json_each_row` (the GA control). Not the same
-    # server-side work, which is why both are published.
-    #
-    # Resolved at image build, not by interpolation: `arrow_stream` requires
-    # the batch-encoding block below and `json_each_row` must not carry it, so
-    # each variant is generated as its own config and the entrypoint selects
-    # one by FORMAT. A format the encoder does not match is then not
-    # expressible — see the marked region.
-    format: __FORMAT__
-# >>> arrow-only
-    # What actually selects the Arrow encoder. `format` alone only tells
-    # ClickHouse which format to *expect*: with `format: arrow_stream` and no
-    # batch_encoding, Vector announces `FORMAT ArrowStream` and a
-    # `application/vnd.apache.arrow.stream` content-type, then sends
-    # JSONEachRow in the body. Every insert fails `Code: 117 ... Not an Arrow
-    # IPC stream`, nothing is retried (400 is not retriable) and every batch is
-    # dropped, so the arm lands zero rows while logging no config error.
-    # Vector accepts that pairing; only the server refuses it.
-    batch_encoding:
-      codec: arrow_stream
-# <<< arrow-only
+    format: json_each_row
     # DateTime64 columns receive epoch-derived timestamps; best-effort parsing
-    # is what lands them at full precision rather than rejected.
+    # lands them at full precision rather than rejected.
     date_time_best_effort: true
-    # An unknown field in an insert would mean the transform emitted a column
-    # the table does not have — a bug this arm wants to fail on, not absorb.
+    # An unknown field would mean the transform emitted a column the table does
+    # not have — a bug this arm fails on rather than absorbs.
     skip_unknown_fields: false
     auth:
       strategy: basic
@@ -197,43 +99,34 @@ sinks:
       password: bench
     query_settings:
       async_insert_settings:
-        # ClickHouse 26.3 defaults async_insert ON, under which the server acks
-        # before the data is written — an ack the e2e-acknowledgement chain
-        # below would then trust. Unset here means the server's default; false
-        # means what the guarantee needs.
+        # ClickHouse 26.3 defaults this on, under which the server acks before
+        # the data is written — an ack the acknowledgement chain would trust.
         enabled: false
     batch:
-      # 262144 rows per INSERT, equal to Spate's cap so the cross-arm batch
-      # quantity is comparable. The shipped 10 MiB byte bound would seal at
-      # roughly 40k of these rows first, so the byte cap is lifted to 256 MiB —
-      # high enough that EVENTS bind and the declared batch size is the real
-      # one.
       max_events: ${SINK_BATCH_EVENTS:-262144}
-      max_bytes: 268435456
+      # max_bytes is measured on in-memory ByteSizeOf, not encoded bytes, and a
+      # row of this shape is ~1285 B resident. Set above 262144 of them so
+      # max_events is what seals a batch; at the shipped 10 MiB, or at the
+      # 256 MiB this arm previously carried, bytes sealed it first.
+      max_bytes: 536870912
       # Bounds sustained-mode p99; in drain, batches fill on size first.
-      # Sweepable.
       timeout_secs: ${SINK_BATCH_TIMEOUT_SECS:-1}
     request:
       # Fixed width rather than the default adaptive (ARC) controller: a drain
-      # window is tens of seconds, and ARC spends exactly that long probing its
-      # way up — the measurement would be of the controller's warm-up. Eight is
-      # a starting width matched to the partition count, not a cross-arm
-      # constant (each arm's insert-concurrency knob means something different:
-      # Spate holds inflight-per-shard, Flink inflight-per-subtask). Sweepable.
+      # window is tens of seconds and ARC spends that long probing its way up.
+      # Also the encode width — the sink spawns this many concurrent batch
+      # encoders.
       concurrency: ${SINK_REQUEST_CONCURRENCY:-32}
     buffer:
       type: memory
-      # The shipped default is 500 EVENTS, which cannot even feed one
-      # 262144-row batch; the batcher would starve on every seal. 2x the batch
-      # so the next batch fills while the last drains.
+      # The shipped default is 500 events, which cannot feed one batch. 2x the
+      # batch so the next fills while the last drains.
       max_events: ${SINK_BUFFER_EVENTS:-524288}
       # Backpressure, not loss: `drop_newest` would break at-least-once while
-      # flattering throughput. Block propagates to the sources, which is what
-      # pausing consumption is for.
+      # flattering throughput.
       when_full: block
-    # The load-bearing line. End-to-end acknowledgements are what connect a
-    # ClickHouse ack back to the source's offset commit; without it the 5 s
-    # commit interval commits offsets for rows the sink may still lose.
+    # Connects a ClickHouse ack back to the source's offset commit; without it
+    # the 5 s interval commits offsets for rows the sink may still lose.
     acknowledgements:
       enabled: true
     # The shipped default is gzip, which spends the envelope's scarce CPU to

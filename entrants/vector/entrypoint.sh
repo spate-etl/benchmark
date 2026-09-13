@@ -1,19 +1,20 @@
 #!/bin/sh
-# Selects the variant's config.
+# Selects the config for this source count.
 #
-# Each config hardcodes its own `format` and carries exactly the encoder that
-# format needs, so the pairing cannot be got wrong by an environment variable:
-# FORMAT chooses a file, not a field. An unknown value fails here rather than
-# starting an arm that would measure something nobody asked for.
+# FORMAT is checked rather than used: the configs hardcode json_each_row, and a
+# run that asked for another format would otherwise measure something nobody
+# asked for while the record named the format it requested.
 set -eu
 
-case "${FORMAT:-arrow_stream}" in
-    arrow_stream)  config=/etc/vector/vector-arrow.yaml ;;
-    json_each_row) config=/etc/vector/vector-json.yaml ;;
-    *)
-        echo "FORMAT must be arrow_stream or json_each_row, got '${FORMAT:-}'" >&2
-        exit 1
-        ;;
-esac
+if [ "${FORMAT:-json_each_row}" != json_each_row ]; then
+    echo "FORMAT must be json_each_row, got '${FORMAT:-}'" >&2
+    exit 1
+fi
+
+config=/etc/vector/vector-s${SOURCES:-8}.yaml
+if [ ! -f "$config" ]; then
+    echo "SOURCES must be one of 1 2 4 8 16 32, got '${SOURCES:-}'" >&2
+    exit 1
+fi
 
 exec vector --config "$config"

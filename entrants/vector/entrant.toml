@@ -27,12 +27,13 @@ short = "Vector"
 
 [version]
 # Resolved by running the built image. `vector --version` prints
-# `vector 0.57.0 (aarch64-unknown-linux-gnu ...)`; the second field is the
+# `vector 0.58.0 (aarch64-unknown-linux-gnu ...)`; the second field is the
 # version. `pinned` is asserted against what is resolved, so a base-image bump
-# refuses the run rather than publishing a mislabelled number.
+# refuses the run rather than publishing a mislabelled number. The Dockerfile
+# also pins the image digest, so the two disagree loudly if the tag moves.
 strategy = "command"
 command  = ["sh", "-c", "vector --version | cut -d' ' -f2"]
-pinned   = "0.57.0"
+pinned   = "0.58.0"
 
 [build]
 # The repository root, uniformly for every entrant: the build needs
@@ -43,9 +44,9 @@ dockerfile = "Dockerfile"
 image      = "spate-bench-vector"
 
 # One container, the full envelope, no control plane. Vector is a single native
-# process; the eight Kafka consumers (one per partition) share it. No `gc_log`:
-# not a JVM, so there is no GC log to collect and the record carries an absence
-# rather than a zero.
+# process; every consumer and its per-partition decode tasks share it. No
+# `gc_log`: not a JVM, so there is no GC log to collect and the record carries
+# an absence rather than a zero.
 [envelope]
 cpus   = "32"
 memory = "96g"
@@ -76,6 +77,8 @@ TOPIC                    = "{{topic}}"
 GROUP_ID                 = "{{group_id}}"
 AUTO_OFFSET_RESET        = "{{offset_reset}}"
 VECTOR_THREADS           = "{{knob:threads}}"
+VECTOR_CHUNK_SIZE_EVENTS = "{{knob:chunk_size_events}}"
+SOURCES                  = "{{knob:sources}}"
 SINK_BATCH_EVENTS        = "{{knob:batch_events}}"
 SINK_BATCH_TIMEOUT_SECS  = "{{knob:batch_timeout_secs}}"
 SINK_REQUEST_CONCURRENCY = "{{knob:request_concurrency}}"
@@ -112,41 +115,16 @@ drift from the schema every other arm fetches.
 """
 affects = ["decode-path"]
 
-[[deviations]]
-what = """
-The default variant's wire format, ArrowStream, is marked beta in Vector 0.57's
-documentation.
-"""
-why = """
-It is shipped, documented, and selected by two config lines that must agree —
-`format: arrow_stream` names the format to ClickHouse and
-`batch_encoding.codec: arrow_stream` selects the encoder that produces it — so
-rule 1 permits it and rule 2 requires considering it; the json-each-row
-realistic variant is published as the GA control.
-"""
-affects = ["wire-format"]
-
-# One axis: the wire format, mirroring Spate's native/rowbinary pair. Both are
-# published because ArrowStream and JSONEachRow are not the same amount of
-# server-side work, and the difference belongs to the reader.
-
-[[variants]]
-id       = "arrow"
-label    = "Vector · ArrowStream"
-approach = "realistic"
-default  = true
-env      = { FORMAT = "arrow_stream" }
-knobs    = { threads = 32, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
-reports  = { wire_format = "arrow_stream" }
-
-# The GA wire-format control. Vector's clickhouse sink wrote JSONEachRow only
-# until 0.53 added `format` (vector#24373; the motivating issue vector#24074
-# quotes JSONEachRow as "~4-5x less efficient" server-side); this variant
-# quantifies what the still-beta format buys.
+# One variant. Vector's clickhouse sink also offers ArrowStream, which ClickHouse
+# ingests roughly 6x cheaper, but 0.58 documents that encoder as beta. A number
+# measured through an encoder its own project does not yet call stable says more
+# about the encoder's maturity than about Vector, so this arm does not publish
+# one. JSONEachRow is what the sink has always shipped as GA.
 [[variants]]
 id       = "json-each-row"
 label    = "Vector · JSONEachRow"
 approach = "realistic"
+default  = true
 env      = { FORMAT = "json_each_row" }
-knobs    = { threads = 32, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
+knobs    = { threads = 32, chunk_size_events = 1000, sources = 8, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
 reports  = { wire_format = "json_each_row" }
