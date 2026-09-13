@@ -13,18 +13,22 @@ source is notified once all are processed, worst status wins — and the fan-out
 case rides the same mechanism: each child of a remap's array-assign carries a
 clone of the parent's metadata, whose finalizers are `Arc`-shared
 ([finalization.rs](https://github.com/vectordotdev/vector/blob/master/lib/vector-common/src/finalization.rs)),
-so the offset resolves only when the last child does. Two wire formats are
-published — `json_each_row` (default) and `arrow_stream` — because they are not
-the same amount of server-side work; the `format` option shipped in 0.53 via
-[vector#24373](https://github.com/vectordotdev/vector/pull/24373), whose
+so the offset resolves only when the last child does. The wire format is
+JSONEachRow, the only one the sink has shipped as GA.
+
+The sink also offers ArrowStream, added in 0.53 via
+[vector#24373](https://github.com/vectordotdev/vector/pull/24373) — whose
 motivating issue
 [vector#24074](https://github.com/vectordotdev/vector/issues/24074) quotes
-JSONEachRow as "~4-5x less efficient" server-side. That saving is real and lands
-on ClickHouse, which this envelope does not charge the arm for; client-side
-ArrowStream is the more expensive of the two, because its encoder converts each
-event to `serde_json::Value` and feeds those trees to an arrow-json tape reader.
-JSONEachRow is therefore the default, and ArrowStream — still labelled **beta**
-in the 0.58 docs, so also a declared deviation — is published beside it.
+JSONEachRow as "~4-5x less efficient" server-side — and 0.58 still documents that
+encoder as **beta**. This arm does not publish a number through it. A figure
+measured on an encoder its own project does not yet call stable would describe
+that encoder's maturity rather than Vector, and it would be this benchmark
+choosing the risk on Vector's behalf. Measured on 0.57 it was also the slower
+arm here, 58,215 rows/s/core against 65,657: the ~6x it saves lands on
+ClickHouse, which this envelope does not charge the arm for, while its encoder
+converts each event to `serde_json::Value` and feeds those trees to an
+arrow-json tape reader — the JSONEachRow work and more.
 
 Vector is Rust with the same no-GC story as Spate and may beat it. That is the
 reason to run it.
@@ -61,21 +65,19 @@ a single source logs its partition consumers once each.
 
 ## Configuration
 
-The wire format is chosen by *file*, not by a field. `arrow_stream` needs a
-`batch_encoding` block that `json_each_row` must not carry, so
-[`vector.yaml.tmpl`](vector.yaml.tmpl) marks that block off and the image build
-emits one config per variant; `entrypoint.sh` selects between them on `FORMAT`
-and rejects any other value. Neither config can therefore name a format its
-encoder does not produce — a combination Vector accepts and ClickHouse then
-refuses on every insert.
+The image build emits one config per source count from a single marked region in
+[`vector.yaml.tmpl`](vector.yaml.tmpl), and `entrypoint.sh` selects one by
+`SOURCES`. `FORMAT` is checked rather than used: the configs hardcode
+`json_each_row`, and a run asking for another format is refused rather than
+quietly measuring something the record would misname.
 
-Every other knob reaches the container as an environment variable. Five live in
-[`vector.yaml.tmpl`](vector.yaml.tmpl) as `${...:-default}` placeholders; the
-sixth, `threads`, is `VECTOR_THREADS` — the binary's own variable, with no
-config-file line to hold it — so its default lives only in the Dockerfile `ENV`
-block, beside the other five's. All committed defaults equal the published
-knobs (a harness test holds the Dockerfile, the template and the descriptor to
-the same values), so a hand-run container matches the numbers.
+Every knob reaches the container as an environment variable. Five are
+`${...:-default}` placeholders in [`vector.yaml.tmpl`](vector.yaml.tmpl);
+`threads` and `chunk_size_events` are the binary's own `VECTOR_*` variables with
+no config line to hold them, so their defaults live only in the Dockerfile `ENV`
+block; and `sources` picks a generated file. All committed defaults equal the
+published knobs — a harness test holds the Dockerfile, the template and the
+descriptor to the same values — so a hand-run container matches the numbers.
 
 ### Knobs the driver sets per run
 
@@ -195,9 +197,7 @@ The config itself can be re-checked at any time against the shipped binary:
 
 ```sh
 docker run --rm --entrypoint vector spate-bench-vector \
-    validate --no-environment /etc/vector/vector-json-s8.yaml
-docker run --rm --entrypoint vector spate-bench-vector \
-    validate --no-environment /etc/vector/vector-arrow-s8.yaml
+    validate --no-environment /etc/vector/vector-s8.yaml
 ```
 
 `--entrypoint vector` because the image's entrypoint selects a config from
@@ -229,10 +229,6 @@ Dockerfile is read, not executed, to check it. The `-debian` variant rather than
   arms pay one and then cache), and cannot detect a writer-schema change
   mid-run. Declared in `[[deviations]]`; the baked schema is manufactured at
   image build from the committed `.avsc` so it cannot drift.
-- **`arrow_stream` is beta in 0.58** and fetches the target table's schema from
-  `system.columns` once at sink start-up — a single query, outside the hot
-  path, but a start-up dependency on the target the `json_each_row` variant
-  does not have. Also declared in `[[deviations]]`.
 - **It does not send `insert_deduplication_token`** — like every non-Spate arm.
   The shared DDL sets `non_replicated_deduplication_window = 1000`, so
   ClickHouse hashes this arm's blocks and skips hashing Spate's. Its duplicate
@@ -267,7 +263,7 @@ Dockerfile is read, not executed, to check it. The `-debian` variant rather than
 - **`async_insert` must actually be off on the wire.** The config sends
   `query_settings.async_insert_settings.enabled: false` and `vector validate`
   proves the key parses, but nothing here proves the setting reaches every
-  `arrow_stream` request. On the first live run, check
+  request. On the first live run, check
   `system.query_log.Settings` for the arm's INSERTs: an async ack would make
   the e2e-acknowledgement chain trust a write that is not yet durable.
 - **The per-row cost of the fan-out.** One event in, an array of up to 100
@@ -278,8 +274,6 @@ Dockerfile is read, not executed, to check it. The `-debian` variant rather than
   heap-allocated keys, ~1285 bytes resident for a row that is 115 bytes on the
   wire. Splitting into 2–4 clickhouse sinks would *not* widen encoding, which
   the sink already runs `request_concurrency`-wide.
-- **`arrow_stream` is beta.** If it misbehaves, `json-each-row` is the same arm
-  with one env var changed, and both are published regardless.
 
 ## Gregg's question (rule 6)
 

@@ -115,29 +115,11 @@ drift from the schema every other arm fetches.
 """
 affects = ["decode-path"]
 
-[[deviations]]
-what = """
-The `arrow` variant's wire format, ArrowStream, is marked beta in Vector 0.58's
-documentation.
-"""
-why = """
-It is shipped, documented, and selected by two config lines that must agree —
-`format: arrow_stream` names the format to ClickHouse and
-`batch_encoding.codec: arrow_stream` selects the encoder that produces it — so
-rule 1 permits it and rule 2 requires considering it. The GA json-each-row
-variant is the default, so no published headline rests on a beta encoder.
-"""
-affects = ["wire-format"]
-
-# One axis: the wire format, mirroring Spate's native/rowbinary pair. Both are
-# published because ArrowStream and JSONEachRow are not the same amount of
-# server-side work, and the difference belongs to the reader.
-#
-# JSONEachRow is the default because it is the faster arm on the published
-# metric. Vector's ArrowStream encoder converts every event to serde_json::Value
-# and feeds those trees to an arrow-json tape reader, so it does the JSONEachRow
-# work and more; the format's 6x saving lands on ClickHouse, which this envelope
-# does not charge the arm for and which sits near idle here.
+# One variant. Vector's clickhouse sink also offers ArrowStream, which ClickHouse
+# ingests roughly 6x cheaper, but 0.58 documents that encoder as beta. A number
+# measured through an encoder its own project does not yet call stable says more
+# about the encoder's maturity than about Vector, so this arm does not publish
+# one. JSONEachRow is what the sink has always shipped as GA.
 [[variants]]
 id       = "json-each-row"
 label    = "Vector · JSONEachRow"
@@ -146,15 +128,3 @@ default  = true
 env      = { FORMAT = "json_each_row" }
 knobs    = { threads = 32, chunk_size_events = 1000, sources = 8, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
 reports  = { wire_format = "json_each_row" }
-
-# The beta format, published for the server-side difference. Vector's clickhouse
-# sink wrote JSONEachRow only until 0.53 added `format` (vector#24373; the
-# motivating issue vector#24074 quotes JSONEachRow as "~4-5x less efficient"
-# server-side).
-[[variants]]
-id       = "arrow"
-label    = "Vector · ArrowStream"
-approach = "realistic"
-env      = { FORMAT = "arrow_stream" }
-knobs    = { threads = 32, chunk_size_events = 1000, sources = 8, batch_events = 262144, batch_timeout_secs = 1, request_concurrency = 32, buffer_events = 524288, compression = "none" }
-reports  = { wire_format = "arrow_stream" }

@@ -4,8 +4,7 @@
 # This file is a TEMPLATE. The image build substitutes `__AVRO_SCHEMA_JSON__`
 # with the committed workload/schema/sensor_batch.avsc (methodology/ forbids
 # re-declaring the schema inline, and Vector has no Schema Registry client), and
-# expands the three marked regions below to N sources, N remaps and N sink
-# inputs. Every dollar-brace placeholder is resolved by Vector's own env-var
+# expands the marked region below to N sources, N remaps and N sink inputs. Every dollar-brace placeholder is resolved by Vector's own env-var
 # interpolation, which 0.58 gates behind
 # VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true — set in the Dockerfile.
 # Without it the placeholders stay literal and the numeric fields fail config
@@ -87,21 +86,7 @@ sinks:
     endpoint: "${CLICKHOUSE_URL}"
     database: default
     table: sensor_events
-    # The variant axis. `arrow_stream` is beta in 0.58 and fetches the table
-    # schema from system.columns once at start-up; `json_each_row` is the GA
-    # default. Resolved at image build, not by interpolation: arrow_stream
-    # requires the batch-encoding block below and json_each_row must not carry
-    # it, so each variant is generated as its own config and a format the
-    # encoder does not match is not expressible.
-    format: __FORMAT__
-# >>> arrow-only
-    # `format` alone only tells ClickHouse which format to expect: without this
-    # block Vector announces ArrowStream and then sends JSONEachRow, every
-    # insert fails `Code: 117`, and nothing is retried because 400 is not
-    # retriable. Vector accepts that pairing; only the server refuses it.
-    batch_encoding:
-      codec: arrow_stream
-# <<< arrow-only
+    format: json_each_row
     # DateTime64 columns receive epoch-derived timestamps; best-effort parsing
     # lands them at full precision rather than rejected.
     date_time_best_effort: true

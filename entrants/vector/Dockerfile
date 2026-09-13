@@ -19,10 +19,8 @@
 # methodology/ forbids re-declaring the schema by hand, so there is no second
 # copy to drift. Each substitution asserts its placeholder exists first.
 #
-# One config per (wire format, source count). The source count cannot be a
-# runtime placeholder because YAML has no loop, and the arrow-only region cannot
-# be one because Vector refuses `batch_encoding` alongside any other format —
-# and accepts its ABSENCE under arrow_stream while silently emitting JSONEachRow.
+# One config per source count: the count cannot be a runtime placeholder because
+# YAML has no loop.
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS gen
 
@@ -61,20 +59,13 @@ def expand(text, n):
     assert end not in text, "unpaired per-source marker"
     return text
 
-BEGIN, END = "# >>> arrow-only\n", "# <<< arrow-only\n"
-start, stop, _ = region(base, BEGIN, END)
-arrow_src = base.replace(BEGIN, "").replace(END, "")
-json_src = base[:start] + base[stop:]
-
-for fmt, wire, src in (("arrow", "arrow_stream", arrow_src), ("json", "json_each_row", json_src)):
-    for n in SOURCE_COUNTS:
-        text = expand(src, n).replace("__FORMAT__", wire)
-        assert "__FORMAT__" not in text and "per-source" not in text
-        assert text.count("type: kafka") == n, (fmt, n)
-        assert text.count("type: remap") == n, (fmt, n)
-        assert text.count(f"in-{n - 1}:") == 1 and f"in-{n}:" not in text, (fmt, n)
-        assert ("batch_encoding" in text) == (fmt == "arrow"), fmt
-        open(f"vector-{fmt}-s{n}.yaml", "w").write(text)
+for n in SOURCE_COUNTS:
+    text = expand(base, n)
+    assert "per-source" not in text
+    assert text.count("type: kafka") == n, n
+    assert text.count("type: remap") == n, n
+    assert text.count(f"in-{n - 1}:") == 1 and f"in-{n}:" not in text, n
+    open(f"vector-s{n}.yaml", "w").write(text)
 PY
 
 # ---------------------------------------------------------------------------
@@ -130,16 +121,11 @@ ENV VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true \
 # program against the exact binary that will run it. `--no-environment` skips
 # the health checks, because there is no Kafka or ClickHouse at build time.
 #
-# It does NOT prove the format/encoder pairing: `vector validate` accepts a
-# format with no encoder and an encoder with the wrong format, and only the
-# topology builder refuses the second. Generating the pair from one marked
-# region is what makes that hold; this checks everything else.
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && for cfg in /etc/vector/vector-*.yaml; do \
          vector validate --no-environment "$cfg" || exit 1; \
        done \
-    && grep -q batch_encoding /etc/vector/vector-arrow-s8.yaml \
-    && ! grep -q batch_encoding /etc/vector/vector-json-s8.yaml
+    && grep -q "format: json_each_row" /etc/vector/vector-s8.yaml
 
 # The variant's config is chosen by name rather than by a field, so `vector` is
 # invoked with an explicit `--config`. `vector` is still resolved from PATH, so a
