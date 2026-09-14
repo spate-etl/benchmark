@@ -29,8 +29,8 @@ apache-avro = { workspace = true }
 # are the denominator of a committed ceiling — a silent minor-bump that moved
 # the IPC layout would change what a "reproduced" pass sends; `--locked` is what
 # holds the transitive arrow crates to the lockfile's versions.
-arrow-array = "=59.1.0"
-arrow-ipc = "=59.1.0"
+arrow-array = "=59.3.0"
+arrow-ipc = "=59.3.0"
 arrow-schema = "=59.3.0"
 bytes = { workspace = true }
 rdkafka = { workspace = true }
