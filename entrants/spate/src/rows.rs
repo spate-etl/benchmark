@@ -40,7 +40,7 @@
 //! re-specify one arm and not the other.
 
 use serde::Serialize;
-use spate_clickhouse::{DateTime64Micros, DateTime64Millis};
+use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily, DateTime64Micros, DateTime64Millis};
 use spate_core::deser::RecFamily;
 use spate_core::ops::Emitter;
 
@@ -143,7 +143,7 @@ impl RecFamily for BatchFam {
 /// allocation profile, not the output. `name_upper` is *derived* — a fresh
 /// ASCII-uppercased string — so it is the one owned field, and the single
 /// per-row allocation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ClickHouseRow)]
 pub struct Row<'a> {
     /// Batch identifier.
     pub batch_id: u64,
@@ -179,6 +179,12 @@ pub struct Row<'a> {
 pub struct RowFam;
 impl RecFamily for RowFam {
     type Rec<'buf> = Row<'buf>;
+}
+
+// The blanket impl covers only `Owned<T>`, so a borrowed family states its own
+// insert columns.
+impl ClickHouseRowFamily for RowFam {
+    const COLUMNS: &'static [&'static str] = <Row<'static> as ClickHouseRow>::COLUMNS;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,5 +364,16 @@ mod tests {
             .deserialize(&raw, &ack, &mut probe)
             .expect("decode");
         assert!(probe.1 > 0, "batch 1 must yield surviving rows");
+    }
+
+    /// The insert column list the row struct generates is the workload DDL's,
+    /// in the same order.
+    #[test]
+    fn row_columns_match_the_workload_ddl() {
+        let ddl: Vec<&str> = spate_benchmark_harness::corpus::COLUMNS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(RowFam::COLUMNS, ddl.as_slice());
     }
 }

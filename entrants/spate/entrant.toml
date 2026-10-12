@@ -107,7 +107,9 @@ reports  = { wire_format = "native" }
 
 # The arm to read against Flink, which writes the same wire format: ClickHouse's
 # official Flink connector can only write RowBinaryWithNamesAndTypes because the
-# Java client has no Native writer (clickhouse-java#2509).
+# Java client has no Native writer (clickhouse-java#2509). The framework's
+# `rowbinary` setting sends RowBinaryWithNamesAndTypes, with the column names and
+# types the sink fetched from the server as the header.
 #
 # Its batching differs from the Native variant's, so the pair separates "the
 # framework is faster" from "we chose a faster wire format" only once both
@@ -118,4 +120,4 @@ label    = "Spate · RowBinary"
 approach = "realistic"
 env      = { FORMAT = "rowbinary" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144 }
-reports  = { wire_format = "rowbinary" }
+reports  = { wire_format = "rowbinary_nt" }

@@ -85,9 +85,9 @@ checkpoint round trip, including nulls and timestamp precision.
 ## ClickHouse batches
 
 Typed connector mode forces uncompressed `RowBinaryWithNamesAndTypes`, with
-`async_insert=0`. Spate's RowBinary control uses the closely related `RowBinary`
-format, with 262,144-row batches, 32 shards, four requests per shard and 500 ms
-linger. Configured limits are not actual batch sizes: compare ClickHouse's
+`async_insert=0`. Spate's RowBinary control sends the same
+`RowBinaryWithNamesAndTypes` format, LZ4-compressed, with 262,144-row batches,
+32 shards, four requests per shard and 500 ms linger. Configured limits are not actual batch sizes: compare ClickHouse's
 `ch_rows_per_insert`, query logs, and merge costs.
 
 The shipped adaptive rate limiter initially permits only one full batch's worth

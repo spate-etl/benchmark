@@ -1292,10 +1292,11 @@ pub enum Format {
     /// `spate:native` arm writes, and the format whose absence left that arm
     /// ungated against the target.
     Native,
-    /// Rows only. What `spate:rowbinary` writes.
+    /// Rows only. What the Kafka Connect arm writes.
     RowBinary,
     /// Rows behind a name-and-type header, so the server validates the column
-    /// contract rather than trusting position. What the Flink arm writes.
+    /// contract rather than trusting position. What the Flink arm and
+    /// `spate:rowbinary` write.
     RowBinaryWithNamesAndTypes,
     /// One JSON object per row, newline-separated — the format everything that
     /// cannot speak a binary protocol falls back to, and the one whose

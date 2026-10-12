@@ -392,7 +392,7 @@ pub struct Event {
 pub const TABLE: &str = "sensor_events";
 
 /// The target columns, positional — used to build the Native schema and the
-/// sink `columns` list from one definition. The order is the RowBinary and
+/// ceiling rig's insert list from one definition. The order is the RowBinary and
 /// Native wire contract.
 pub const COLUMNS: &[(&str, &str)] = &[
     ("batch_id", "UInt64"),
