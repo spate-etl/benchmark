@@ -1056,6 +1056,11 @@ struct Measurement {
     /// zero, which the server did answer, and is a different fact from a
     /// `part_log` that could not be read at all.
     merges: Option<serverside::MergeActivity>,
+    /// Bytes ClickHouse received while the arm ran, and the rows landed by the
+    /// time it went quiet.
+    ///
+    /// `None` is "not measured", for the same reason as `server`.
+    received: Option<Received>,
     /// What the arm's JVMs reported about their own collectors, if it has any.
     gc: Gc,
     /// The ClickHouse ingest ceiling this arm was held to, rows per second, or
@@ -1538,6 +1543,11 @@ fn measure(
                 report = report.metric(key, metric);
             }
         }
+        if let Some(received) = &d.received {
+            for (key, metric) in received_metrics(*received) {
+                report = report.metric(key, metric);
+            }
+        }
         // Merge work that ran against the same window. Separate from the cost
         // figures above because it is charged to nobody: `ch_cpu_us` excludes
         // it by construction, and it competes with the arm regardless.
@@ -1892,6 +1902,14 @@ fn run_arm(
         .data_plane()
         .map(|c| format!("spate-bench-sut-{}", c.name));
 
+    // Read just before the arm starts and again once it has gone quiet, so the
+    // difference is what the arm sent: insert bodies as they crossed the wire,
+    // compressed or not. The harness's own row-count polls fall inside too, at
+    // a few hundred bytes each.
+    let receive_bytes =
+        || serverside::receive_bytes(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password).ok();
+    let received_before = receive_bytes();
+
     let mut containers = ArmContainers::start(&specs);
 
     // Open, hold and close the one measurement window. Which function does it is
@@ -2008,6 +2026,11 @@ fn run_arm(
             return Err(with_logs(&why, &logs));
         }
     };
+    let received =
+        serverside::received_between(received_before, receive_bytes()).map(|bytes| Received {
+            bytes,
+            rows: settled.rows,
+        });
 
     // The GC logs, read while the containers still exist. `sampler::stop_sut`
     // runs `docker rm -f`, and `docker cp` against a removed container has
@@ -2299,6 +2322,7 @@ fn run_arm(
         load,
         server,
         merges,
+        received,
         gc,
         ceiling_rows_per_s,
     })
@@ -2763,6 +2787,32 @@ fn merge_metrics(merges: serverside::MergeActivity) -> Vec<(String, Metric)> {
 /// `ProfileEvents` omits any counter whose value is zero, so `crate::serverside`
 /// keeps absence representable precisely to stop a counter a container was
 /// denied arriving here as a measured zero.
+/// Bytes ClickHouse received from the arm's start until it went quiet.
+#[derive(Clone, Copy, Debug)]
+struct Received {
+    bytes: u64,
+    /// Rows in the target when the arm went quiet: every row those bytes carried.
+    rows: u64,
+}
+
+/// The received-bytes figures. The per-row one moves with the arm's insert
+/// compression, which `ch_inserted_bytes`, counted after decompression, does not.
+fn received_metrics(received: Received) -> Vec<(String, Metric)> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte and row counts stay far below f64's exact range"
+    )]
+    let (bytes, rows) = (received.bytes as f64, received.rows as f64);
+    let mut out = vec![("ch_network_receive_bytes".to_owned(), Metric::bytes(bytes))];
+    if rows > 0.0 {
+        out.push((
+            "ch_network_receive_bytes_per_row".to_owned(),
+            Metric::minimize(bytes / rows, "bytes"),
+        ));
+    }
+    out
+}
+
 fn server_metrics(cost: &serverside::ServerSideCost, rows: f64) -> Vec<(String, Metric)> {
     let mut out = Vec::new();
     if let Ok(per_landed) = cost.cpu_us_per_landed_row(rows) {
@@ -4729,6 +4779,28 @@ mod tests {
     /// than present as a zero. `ProfileEvents` omits any counter whose value is
     /// zero, so "the server measured nothing" and "this build has no such
     /// counter" are indistinguishable once a default has been substituted.
+    /// The received bytes publish as a total and per landed row, and a
+    /// repetition that landed nothing publishes no per-row figure at all.
+    #[test]
+    fn received_bytes_publish_as_a_total_and_per_row() {
+        let by_key: BTreeMap<String, Metric> = received_metrics(Received {
+            bytes: 7_501_315,
+            rows: 29_400,
+        })
+        .into_iter()
+        .collect();
+        assert!((by_key["ch_network_receive_bytes"].value - 7_501_315.0).abs() < 1e-6);
+        let per_row = &by_key["ch_network_receive_bytes_per_row"];
+        assert!((per_row.value - 7_501_315.0 / 29_400.0).abs() < 1e-9);
+        assert!(!per_row.higher_is_better);
+
+        let empty = received_metrics(Received {
+            bytes: 512,
+            rows: 0,
+        });
+        assert_eq!(empty.len(), 1, "{empty:?}");
+    }
+
     #[test]
     fn a_counter_the_server_did_not_report_reaches_no_metric_at_all() {
         let mut cost = server_side();
