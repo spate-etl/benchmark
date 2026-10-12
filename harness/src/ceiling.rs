@@ -1496,6 +1496,14 @@ pub struct PassOptions {
     /// of a format this rig cannot emit, happens once and before a container
     /// starts.
     pub ingest: Vec<Format>,
+    /// `None` for the committed pass, which POSTs each pool block as one large
+    /// raw block. `Some` re-encodes the pool as small blocks the way an arm's
+    /// sink sends them, framed with the codec, or raw for `Codec::None`.
+    ///
+    /// That pass is a diagnostic: its passes are compared with each other, and
+    /// never committed as ceilings, because every committed ceiling is the
+    /// large raw-block figure the gate is defined against.
+    pub compression: Option<crate::frames::Codec>,
     /// `YYYY-MM-DD` to stamp on the provenance.
     ///
     /// Supplied by the caller rather than read from a clock here, so that the
@@ -2565,9 +2573,40 @@ fn measure_ingest(
         format.wire_format(),
     );
 
-    let pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
+    let mut pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
         .map(|k| encode_block(format, k * INSERT_BLOCK_BATCHES))
         .collect();
+    if let Some(codec) = opts.compression {
+        // Re-encoded the way an arm's sink sends a compressed insert: many
+        // small blocks, each holding every column, one frame each. Slicing the
+        // one large block instead would put mostly one column in each frame,
+        // which compresses better and decodes faster than anything an arm
+        // sends.
+        let batches_per_frame = (crate::frames::FRAME_BYTES as u64 * INSERT_BLOCK_BATCHES
+            / pool[0].body.len().max(1) as u64)
+            .max(1);
+        for (k, block) in (0u64..).zip(pool.iter_mut()) {
+            let (lo, hi) = (k * INSERT_BLOCK_BATCHES, (k + 1) * INSERT_BLOCK_BATCHES);
+            let mut body = Vec::new();
+            for start in (lo..hi).step_by(usize::try_from(batches_per_frame).unwrap_or(1)) {
+                let small = encode_batches(format, start, batches_per_frame.min(hi - start));
+                body.extend(crate::frames::encode(&small.body, codec, usize::MAX)?);
+            }
+            block.body = body;
+        }
+        let how = if codec == crate::frames::Codec::None {
+            "raw, without frames".to_owned()
+        } else {
+            format!("{} frames, one per block", codec.name())
+        };
+        eprintln!(
+            "  {}: bodies sent as {}-batch blocks of about {} KiB, {how}, so MB/s below is \
+             bytes on the wire",
+            format.wire_format(),
+            batches_per_frame,
+            crate::frames::FRAME_BYTES / 1024,
+        );
+    }
     // Removed by its own `Drop`, so every way out of this function takes it with
     // it — including the four that are refusals.
     let ceiling_table = CeilingTable::create(ep)?;
@@ -2577,7 +2616,15 @@ fn measure_ingest(
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
     // every rung POSTs bytes that are not merely equal but the same.
-    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool)?;
+    // A diagnostic pass is compared with what an arm does, so its POSTs take
+    // the arms' synchronous insert path: the server's default sends them down
+    // the async path, which adds a flush wait to every POST.
+    let settings: &[(&str, &str)] = match opts.compression {
+        None => &[],
+        Some(crate::frames::Codec::None) => &[("async_insert", "0")],
+        Some(_) => &[("async_insert", "0"), ("decompress", "1")],
+    };
+    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool, settings)?;
 
     let mut sweep = Sweep::new(
         INGEST_CONCURRENCY_FROM,

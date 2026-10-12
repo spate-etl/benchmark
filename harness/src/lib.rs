@@ -62,6 +62,7 @@ pub mod driver;
 pub mod entrant;
 pub mod environment;
 pub mod fetcher;
+pub mod frames;
 pub mod http;
 pub mod infra;
 pub mod inserter;

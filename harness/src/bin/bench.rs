@@ -24,6 +24,7 @@ use spate_benchmark_harness::docker;
 use spate_benchmark_harness::driver::{self, Mode, RunOptions, SUSTAINED_WINDOW_S};
 use spate_benchmark_harness::entrant::{self, Entrant, Status};
 use spate_benchmark_harness::environment::Environment;
+use spate_benchmark_harness::frames;
 use spate_benchmark_harness::infra;
 use spate_benchmark_harness::report::{DATASET_VERSION, HARNESS_VERSION, Trigger, now_ms};
 use spate_benchmark_harness::results;
@@ -86,6 +87,7 @@ bench — the Spate Benchmark driver
   bench prefill                  populate the topic once per corpus (do this first)
   bench ceiling [--measure [--write]] [--seconds N] [--threads N]
                 [--ingest-max N] [--only <format>]...
+                [--compression none|lz4|zstd|zstd:N]
                                  prove the infrastructure is not the bottleneck.
                                  Without --measure it reports the committed
                                  ceilings and refuses if they cannot be gated
@@ -118,6 +120,14 @@ bench — the Spate Benchmark driver
                                  are measured and never how. Writing a narrowed
                                  pass is refused when it would leave the rest of
                                  the file describing a different envelope.
+                                 --compression re-encodes the Native pool as
+                                 small blocks, one ClickHouse compressed frame
+                                 each, sent with decompress=1, to measure what
+                                 the target absorbs when it also decompresses.
+                                 `none` sends the same small blocks raw, which
+                                 is the baseline to compare against. Every
+                                 such POST sets async_insert=0, as the arms
+                                 do. A diagnostic: it prints and never writes.
   bench run <selector>... [--reps N] [--dry-run] [--env <id>]
                           [--mode drain|sustained] [--rate N] [--window S]
                           [--trigger nightly|manual|pr|tuning|release]
@@ -385,6 +395,9 @@ struct CeilingArgs {
     /// so that the names this rig accepts are defined once, beside the encoders
     /// that produce them.
     only: Vec<String>,
+    /// `--compression`: send the ingest bodies as compressed frames. A
+    /// diagnostic, so `--write` refuses it.
+    compression: Option<frames::Codec>,
     rest: Vec<String>,
 }
 
@@ -406,6 +419,7 @@ impl CeilingArgs {
             threads: 4,
             ingest_max: ceiling::INGEST_CONCURRENCY_MAX,
             only: Vec::new(),
+            compression: None,
             rest: Vec::new(),
         };
         let mut i = 0;
@@ -418,6 +432,11 @@ impl CeilingArgs {
                     i += 1;
                     out.only
                         .push(args.get(i).ok_or("--only needs a value")?.clone());
+                }
+                "--compression" => {
+                    i += 1;
+                    let raw = args.get(i).ok_or("--compression needs a value")?;
+                    out.compression = Some(frames::Codec::parse(raw)?);
                 }
                 "--seconds" | "--threads" | "--ingest-max" => {
                     i += 1;
@@ -434,6 +453,14 @@ impl CeilingArgs {
                 _ => out.rest.push(a),
             }
             i += 1;
+        }
+        if out.compression.is_some() && (out.write || !out.measure) {
+            return Err(
+                "--compression needs --measure and refuses --write: it is a diagnostic \
+                 pass, and every committed ceiling is the raw-body figure the gate is \
+                 defined against."
+                    .to_owned(),
+            );
         }
         if out.write && !out.measure {
             return Err(
@@ -454,6 +481,14 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
     // Resolved before anything is brought up, so a typo in `--only` costs a line
     // of output rather than a container start and a fifteen-minute pass.
     let combinations = ceiling::select_combinations(&ceiling_args.only)?;
+    if ceiling_args.compression.is_some() && combinations != [ceiling::Format::Native] {
+        return Err(
+            "--compression measures Native only: pass `--only native`. The pass answers \
+             what Native insert compression costs the target, re-encoding the pool into \
+             many small blocks per request the way the Native arm sends them."
+                .to_owned(),
+        );
+    }
 
     if !ceiling_args.measure {
         if !ceiling_args.only.is_empty() {
@@ -513,9 +548,27 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
             consume_threads: ceiling_args.threads,
             ingest_max_concurrency: ceiling_args.ingest_max,
             ingest: combinations,
+            compression: ceiling_args.compression,
             date: iso_day(now_ms()),
         },
     )?;
+
+    if let Some(codec) = ceiling_args.compression {
+        println!(
+            "\n{}: measured with {} bodies of small blocks (diagnostic: compare it with \
+             another --compression pass, not with the committed ceiling, which sends one \
+             large raw block per request)",
+            env.spec.id,
+            codec.name()
+        );
+        for c in &pass.ingest {
+            println!(
+                "  {}: {} rows/s, {:.1} MB/s on the wire, at {} inserters",
+                c.format, c.rows_per_s, c.mb_per_s, c.threads
+            );
+        }
+        return Ok(());
+    }
 
     // A first bootstrap has no committed ceilings file to merge into —
     // creating it is the point of the pass. Only the missing-file case starts

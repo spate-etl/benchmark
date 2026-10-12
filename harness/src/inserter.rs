@@ -49,7 +49,10 @@
 //!
 //! The request is byte-for-byte the shape [`crate::ceiling`]'s host-side
 //! inserter sent: SQL in the query string, the block raw in the body, no
-//! compression, `Connection: close`, one connection per POST. Persistent
+//! compression, `Connection: close`, one connection per POST. A diagnostic pass
+//! with `--compression` is the one exception: it sends `async_insert=0` on every
+//! POST, as every arm does, and unless its codec is `none` its bodies are
+//! compressed frames sent with `decompress=1`. Persistent
 //! connections were measured beside it and came out inside the noise (3.4–3.8
 //! GB/s against 3.3–4.2), so keeping the old shape costs nothing and buys the
 //! one thing worth having — the only variable that changed between the figure
@@ -125,12 +128,22 @@ impl Inserter {
     /// proves against a live server. A second encoder written in Python would be
     /// a second thing to prove.
     ///
+    /// `settings` are added to every POST's query string as `name=value`, for
+    /// example `decompress=1` for a pool whose bodies are ClickHouse compressed
+    /// frames. Names and values must be URL-safe as they stand.
+    ///
     /// # Errors
     ///
     /// If the container will not start, if the pipe closes while the pool is
     /// being handed over, or if the program answers with anything but its ready
     /// line.
-    pub fn start(ep: &Endpoints, sql: &str, pool: &[Block]) -> Result<Self, String> {
+    pub fn start(
+        ep: &Endpoints,
+        sql: &str,
+        pool: &[Block],
+        settings: &[(&str, &str)],
+    ) -> Result<Self, String> {
+        let query_settings = query_suffix(settings);
         // An orphan from an interrupted pass would hold the name.
         let _ = docker_try(&["rm", "-f", INSERTER_CONTAINER]);
 
@@ -156,6 +169,7 @@ impl Inserter {
                 &ep.ch_password,
                 sql,
                 &timeout,
+                &query_settings,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -328,11 +342,12 @@ fn parse_burst(line: &str) -> Result<RemoteBurst, String> {
 const INSERTER_SRC: &str = r##"
 import socket, sys, threading, time, urllib.parse
 
-host, port, user, password, sql, timeout = (
-    sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]))
+host, port, user, password, sql, timeout, query_settings = (
+    sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]),
+    sys.argv[7])
 
 quote = lambda s: urllib.parse.quote(s, safe="")
-path = "/?user=%s&password=%s&query=%s" % (quote(user), quote(password), quote(sql))
+path = "/?user=%s&password=%s&query=%s" % (quote(user), quote(password), quote(sql)) + query_settings
 # Concatenated per POST rather than formatted into a template. The path is
 # percent-encoded, so it is full of % signs and any %-formatting applied to a
 # string containing it dies on the first one — as this did, with
@@ -459,9 +474,28 @@ while True:
         fail("unknown command %r" % (field[0],))
 "##;
 
+/// The settings as the query-string suffix every POST carries.
+fn query_suffix(settings: &[(&str, &str)]) -> String {
+    settings
+        .iter()
+        .map(|(name, value)| format!("&{name}={value}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each setting reaches the POST path as its own query parameter, after the
+    /// statement, and none means no suffix at all.
+    #[test]
+    fn settings_become_query_parameters() {
+        assert_eq!(query_suffix(&[]), "");
+        assert_eq!(
+            query_suffix(&[("async_insert", "0"), ("decompress", "1")]),
+            "&async_insert=0&decompress=1",
+        );
+    }
 
     fn block(rows: u64, body: &[u8]) -> Block {
         Block {
