@@ -2395,6 +2395,8 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "bytes",
+ "cityhash-rs",
+ "lz4_flex",
  "rdkafka",
  "serde",
  "serde_json",
@@ -2402,6 +2404,7 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

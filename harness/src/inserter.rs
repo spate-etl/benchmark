@@ -130,7 +130,15 @@ impl Inserter {
     /// If the container will not start, if the pipe closes while the pool is
     /// being handed over, or if the program answers with anything but its ready
     /// line.
-    pub fn start(ep: &Endpoints, sql: &str, pool: &[Block]) -> Result<Self, String> {
+    ///
+    /// `decompress` adds `decompress=1` to every POST, for a pool whose bodies
+    /// are ClickHouse compressed frames.
+    pub fn start(
+        ep: &Endpoints,
+        sql: &str,
+        pool: &[Block],
+        decompress: bool,
+    ) -> Result<Self, String> {
         // An orphan from an interrupted pass would hold the name.
         let _ = docker_try(&["rm", "-f", INSERTER_CONTAINER]);
 
@@ -156,6 +164,7 @@ impl Inserter {
                 &ep.ch_password,
                 sql,
                 &timeout,
+                if decompress { "1" } else { "0" },
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -328,11 +337,14 @@ fn parse_burst(line: &str) -> Result<RemoteBurst, String> {
 const INSERTER_SRC: &str = r##"
 import socket, sys, threading, time, urllib.parse
 
-host, port, user, password, sql, timeout = (
-    sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]))
+host, port, user, password, sql, timeout, decompress = (
+    sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]),
+    sys.argv[7] == "1")
 
 quote = lambda s: urllib.parse.quote(s, safe="")
 path = "/?user=%s&password=%s&query=%s" % (quote(user), quote(password), quote(sql))
+if decompress:
+    path += "&decompress=1"
 # Concatenated per POST rather than formatted into a template. The path is
 # percent-encoded, so it is full of % signs and any %-formatting applied to a
 # string containing it dies on the first one — as this did, with

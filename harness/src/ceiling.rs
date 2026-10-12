@@ -1496,6 +1496,13 @@ pub struct PassOptions {
     /// of a format this rig cannot emit, happens once and before a container
     /// starts.
     pub ingest: Vec<Format>,
+    /// The frame codec for the ingest bodies, or `None` to POST them raw.
+    ///
+    /// A compressed pass is a diagnostic: it measures what the target absorbs
+    /// when it also has to decompress, and its figures are never committed as
+    /// ceilings, because every committed ceiling is the raw-body figure the
+    /// gate is defined against.
+    pub compression: Option<crate::frames::Codec>,
     /// `YYYY-MM-DD` to stamp on the provenance.
     ///
     /// Supplied by the caller rather than read from a clock here, so that the
@@ -2565,9 +2572,20 @@ fn measure_ingest(
         format.wire_format(),
     );
 
-    let pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
+    let mut pool: Vec<Block> = (0..INSERT_BLOCK_POOL)
         .map(|k| encode_block(format, k * INSERT_BLOCK_BATCHES))
         .collect();
+    if let Some(codec) = opts.compression {
+        for block in &mut pool {
+            block.body = crate::frames::encode(&block.body, codec, crate::frames::FRAME_BYTES)?;
+        }
+        eprintln!(
+            "  {}: bodies sent as {} frames of {} KiB, so MB/s below is compressed bytes",
+            format.wire_format(),
+            codec.name(),
+            crate::frames::FRAME_BYTES / 1024,
+        );
+    }
     // Removed by its own `Drop`, so every way out of this function takes it with
     // it — including the four that are refusals.
     let ceiling_table = CeilingTable::create(ep)?;
@@ -2577,7 +2595,8 @@ fn measure_ingest(
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
     // every rung POSTs bytes that are not merely equal but the same.
-    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool)?;
+    let mut inserter =
+        crate::inserter::Inserter::start(ep, &sql, &pool, opts.compression.is_some())?;
 
     let mut sweep = Sweep::new(
         INGEST_CONCURRENCY_FROM,

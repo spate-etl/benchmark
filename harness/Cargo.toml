@@ -33,6 +33,10 @@ arrow-array = "=59.3.0"
 arrow-ipc = "=59.3.0"
 arrow-schema = "=59.3.0"
 bytes = { workspace = true }
+# ClickHouse's compressed-frame encoding for a ceiling taken with a compressed
+# body (`ceiling --compression`), and nothing else.
+cityhash-rs = "1.0.1"
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -40,6 +44,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true, features = ["parse"] }
 uuid = { workspace = true }
+zstd = "0.13"
 
 [build-dependencies]
 sha2 = { workspace = true }
