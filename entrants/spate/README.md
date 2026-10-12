@@ -42,10 +42,12 @@ no record reports them:
 | `chunk.target_bytes` | 64 KiB (framework default) | Under `native` this is the ClickHouse **block** size, so at ~57 bytes per row a block is about 1,150 rows and one 261,323-row INSERT is roughly 230 concatenated blocks. |
 | `max_inflight_bytes` | derived | Scales with `shards × inflight × max_rows`, so widening egress cannot backpressure on a budget *we* chose. Sound here only because rows bind long before bytes do. |
 
-`chunk.target_bytes` and `compression` are why the committed **Native ingest ceilings are an upper bound**:
-the ceiling rig POSTs one large uncompressed block per request where this arm
-seals many smaller compressed ones, and the ceilings file records that on every
-Native figure.
+`chunk.target_bytes` and `compression` are why the committed **Native ingest
+ceilings describe a different insert from this arm's**. The ceiling rig POSTs one
+large uncompressed block per request, where this arm seals many smaller blocks
+and compresses each with its `compression` codec. Larger blocks amortise
+per-block work, which favours the rig. Which way compression moves the ceiling
+has not been measured.
 
 ## Build
 
