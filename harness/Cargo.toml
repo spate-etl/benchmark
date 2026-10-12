@@ -34,9 +34,13 @@ arrow-ipc = "=59.3.0"
 arrow-schema = "=59.3.0"
 bytes = { workspace = true }
 # ClickHouse's compressed-frame encoding for a ceiling taken with a compressed
-# body (`ceiling --compression`), and nothing else.
+# body (`ceiling --compression`), and nothing else. The spate arm depends on
+# this crate, so cargo unifies these features into the arm's own lz4_flex and
+# zstd: anything enabled here changes how the arm compresses. Only the features
+# the arm's ClickHouse client already enables are named, so its build is the
+# same with this crate as without it.
 cityhash-rs = "1.0.1"
-lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -44,7 +48,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true, features = ["parse"] }
 uuid = { workspace = true }
-zstd = "0.13"
+zstd = { version = "0.13", default-features = false }
 
 [build-dependencies]
 sha2 = { workspace = true }

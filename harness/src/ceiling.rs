@@ -2576,13 +2576,29 @@ fn measure_ingest(
         .map(|k| encode_block(format, k * INSERT_BLOCK_BATCHES))
         .collect();
     if let Some(codec) = opts.compression {
-        for block in &mut pool {
-            block.body = crate::frames::encode(&block.body, codec, crate::frames::FRAME_BYTES)?;
+        // Re-encoded the way an arm's sink sends a compressed insert: many
+        // small blocks, each holding every column, one frame each. Slicing the
+        // one large block instead would put mostly one column in each frame,
+        // which compresses better and decodes faster than anything an arm
+        // sends.
+        let batches_per_frame = (crate::frames::FRAME_BYTES as u64 * INSERT_BLOCK_BATCHES
+            / pool[0].body.len().max(1) as u64)
+            .max(1);
+        for (k, block) in (0u64..).zip(pool.iter_mut()) {
+            let (lo, hi) = (k * INSERT_BLOCK_BATCHES, (k + 1) * INSERT_BLOCK_BATCHES);
+            let mut body = Vec::new();
+            for start in (lo..hi).step_by(usize::try_from(batches_per_frame).unwrap_or(1)) {
+                let small = encode_batches(format, start, batches_per_frame.min(hi - start));
+                body.extend(crate::frames::encode(&small.body, codec, usize::MAX)?);
+            }
+            block.body = body;
         }
         eprintln!(
-            "  {}: bodies sent as {} frames of {} KiB, so MB/s below is compressed bytes",
+            "  {}: bodies sent as {} frames, one {}-batch block of about {} KiB each, so \
+             MB/s below is compressed bytes",
             format.wire_format(),
             codec.name(),
+            batches_per_frame,
             crate::frames::FRAME_BYTES / 1024,
         );
     }

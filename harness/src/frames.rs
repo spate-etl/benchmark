@@ -12,11 +12,12 @@
 //! Written here rather than taken from a ClickHouse client crate so the ceiling
 //! rig shares no code with any arm's insert path.
 
-/// Uncompressed bytes per frame.
+/// Target uncompressed bytes per frame.
 ///
-/// 64 KiB, the chunk size an arm's sink typically seals a compressed block at.
-/// Frame size moves both the ratio and the per-frame cost, so a ceiling taken
-/// with a much larger frame would describe a cheaper insert than an arm sends.
+/// 64 KiB, the chunk size the Spate arm's sink seals a Native block at, one
+/// block per frame. Frame size moves both the ratio and the per-frame cost, so
+/// a ceiling taken with much larger frames would describe a cheaper insert than
+/// the arm sends.
 pub const FRAME_BYTES: usize = 64 * 1024;
 
 const METHOD_LZ4: u8 = 0x82;

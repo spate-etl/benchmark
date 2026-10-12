@@ -49,7 +49,9 @@
 //!
 //! The request is byte-for-byte the shape [`crate::ceiling`]'s host-side
 //! inserter sent: SQL in the query string, the block raw in the body, no
-//! compression, `Connection: close`, one connection per POST. Persistent
+//! compression, `Connection: close`, one connection per POST. A diagnostic pass
+//! with `--compression` is the one exception: its bodies are compressed frames,
+//! sent with `decompress=1`. Persistent
 //! connections were measured beside it and came out inside the noise (3.4–3.8
 //! GB/s against 3.3–4.2), so keeping the old shape costs nothing and buys the
 //! one thing worth having — the only variable that changed between the figure
@@ -125,14 +127,14 @@ impl Inserter {
     /// proves against a live server. A second encoder written in Python would be
     /// a second thing to prove.
     ///
+    /// `decompress` adds `decompress=1` to every POST, for a pool whose bodies
+    /// are ClickHouse compressed frames.
+    ///
     /// # Errors
     ///
     /// If the container will not start, if the pipe closes while the pool is
     /// being handed over, or if the program answers with anything but its ready
     /// line.
-    ///
-    /// `decompress` adds `decompress=1` to every POST, for a pool whose bodies
-    /// are ClickHouse compressed frames.
     pub fn start(
         ep: &Endpoints,
         sql: &str,

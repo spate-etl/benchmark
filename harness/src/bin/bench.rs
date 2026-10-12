@@ -478,6 +478,14 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
     // Resolved before anything is brought up, so a typo in `--only` costs a line
     // of output rather than a container start and a fifteen-minute pass.
     let combinations = ceiling::select_combinations(&ceiling_args.only)?;
+    if ceiling_args.compression.is_some() && combinations != [ceiling::Format::Native] {
+        return Err(
+            "--compression measures Native only: pass `--only native`. The pass sends many \
+             small blocks per request, one frame each, and only Native stays one valid \
+             body when blocks are concatenated."
+                .to_owned(),
+        );
+    }
 
     if !ceiling_args.measure {
         if !ceiling_args.only.is_empty() {
