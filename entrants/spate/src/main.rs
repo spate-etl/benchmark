@@ -22,6 +22,8 @@
 //! - `BOOTSTRAP`, `REGISTRY_URL`, `CLICKHOUSE_URL`, `TOPIC`, `GROUP_ID`
 //! - `THREADS`, `IO_THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS`, `MAX_ROWS`,
 //!   `BUDGET_MIB`
+//! - `COMPRESSION` (`lz4`) — the sink's `compression` value: `lz4`, `zstd` or
+//!   `zstd:<level>`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -183,6 +185,7 @@ fn sink_section(format: Format) -> ComponentConfig {
     let yaml = format!(
         "clickhouse:\n  table: {}\n  \
          user: {}\n  password: {:?}\n  format: {format_key}\n  \
+         compression: {compression:?}\n  \
          settings: {{ async_insert: \"0\" }}\n  \
          shards:\n{replicas}  \
          inflight: {{ max_per_shard: {inflight} }}\n  \
@@ -190,6 +193,7 @@ fn sink_section(format: Format) -> ComponentConfig {
         corpus::TABLE,
         env_str("CLICKHOUSE_USER", "default"),
         env_str("CLICKHOUSE_PASSWORD", "bench"),
+        compression = env_str("COMPRESSION", "lz4"),
     );
     serde_yaml::from_str(&yaml).expect("sink section")
 }
