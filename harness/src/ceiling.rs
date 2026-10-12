@@ -2616,10 +2616,15 @@ fn measure_ingest(
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
     // every rung POSTs bytes that are not merely equal but the same.
-    let framed = opts
-        .compression
-        .is_some_and(|c| c != crate::frames::Codec::None);
-    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool, framed)?;
+    // A diagnostic pass is compared with what an arm does, so its POSTs take
+    // the arms' synchronous insert path: the server's default sends them down
+    // the async path, which adds a flush wait to every POST.
+    let settings: &[(&str, &str)] = match opts.compression {
+        None => &[],
+        Some(crate::frames::Codec::None) => &[("async_insert", "0")],
+        Some(_) => &[("async_insert", "0"), ("decompress", "1")],
+    };
+    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool, settings)?;
 
     let mut sweep = Sweep::new(
         INGEST_CONCURRENCY_FROM,

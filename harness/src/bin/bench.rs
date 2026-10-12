@@ -125,8 +125,9 @@ bench — the Spate Benchmark driver
                                  each, sent with decompress=1, to measure what
                                  the target absorbs when it also decompresses.
                                  `none` sends the same small blocks raw, which
-                                 is the baseline to compare against. A
-                                 diagnostic: it prints and never writes.
+                                 is the baseline to compare against. Every
+                                 such POST sets async_insert=0, as the arms
+                                 do. A diagnostic: it prints and never writes.
   bench run <selector>... [--reps N] [--dry-run] [--env <id>]
                           [--mode drain|sustained] [--rate N] [--window S]
                           [--trigger nightly|manual|pr|tuning|release]
@@ -482,9 +483,9 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
     let combinations = ceiling::select_combinations(&ceiling_args.only)?;
     if ceiling_args.compression.is_some() && combinations != [ceiling::Format::Native] {
         return Err(
-            "--compression measures Native only: pass `--only native`. It is the format \
-             the compressed arms send, and the pass re-encodes it into many small blocks \
-             per request the way they do."
+            "--compression measures Native only: pass `--only native`. The pass answers \
+             what Native insert compression costs the target, re-encoding the pool into \
+             many small blocks per request the way the Native arm sends them."
                 .to_owned(),
         );
     }
