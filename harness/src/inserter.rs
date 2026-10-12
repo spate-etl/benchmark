@@ -331,14 +331,6 @@ fn parse_burst(line: &str) -> Result<RemoteBurst, String> {
 /// Keeping the claim and the code that has to satisfy it in one file is what
 /// makes that checkable by reading.
 ///
-/// The settings as the query-string suffix every POST carries.
-fn query_suffix(settings: &[(&str, &str)]) -> String {
-    settings
-        .iter()
-        .map(|(name, value)| format!("&{name}={value}"))
-        .collect()
-}
-
 /// The protocol, in full. All lines are ASCII and terminated by `\n`.
 ///
 /// * In: `POOL <blocks>`, then per block `BLOCK <rows> <bytes>` followed by
@@ -481,6 +473,14 @@ while True:
     else:
         fail("unknown command %r" % (field[0],))
 "##;
+
+/// The settings as the query-string suffix every POST carries.
+fn query_suffix(settings: &[(&str, &str)]) -> String {
+    settings
+        .iter()
+        .map(|(name, value)| format!("&{name}={value}"))
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
