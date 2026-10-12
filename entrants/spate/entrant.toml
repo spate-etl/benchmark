@@ -138,7 +138,7 @@ env      = { FORMAT = "native" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:3" }
 reports  = { wire_format = "native" }
 
-# zstd at level 1, its cheapest level.
+# zstd at level 1, the cheapest level the sink accepts.
 [[variants]]
 id       = "native-zstd1"
 label    = "Spate · Native · zstd:1"
