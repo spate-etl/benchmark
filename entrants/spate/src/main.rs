@@ -24,7 +24,6 @@
 //!   `BUDGET_MIB`
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -33,7 +32,7 @@ use spate_arm::rows;
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
 use spate_benchmark_harness::corpus;
 use spate_benchmark_harness::{env_str, env_u64};
-use spate_clickhouse::{ClickHouseEncoder, Format, NativeEncoder};
+use spate_clickhouse::{ClickHouseEncoder, ClickHouseSink, Format, NativeEncoder};
 use spate_core::config::{ComponentConfig, PipelineConfig};
 use spate_core::deser::RecFamily;
 use spate_core::error::SinkError;
@@ -155,15 +154,10 @@ impl Egress {
     }
 }
 
-/// The sink section, built from the committed column list so the wire order
-/// cannot drift from the DDL.
+/// The sink section. The insert columns come from [`rows::Row`]'s field order,
+/// which `with_row` checks against the live table.
 fn sink_section(format: Format) -> ComponentConfig {
     let url = env_str("CLICKHOUSE_URL", "http://spate-bench-clickhouse:8123");
-    let columns = corpus::COLUMNS
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(", ");
     let format_key = match format {
         Format::Native => "native",
         Format::RowBinary => "rowbinary",
@@ -187,7 +181,7 @@ fn sink_section(format: Format) -> ComponentConfig {
         .map(|_| format!("    - replicas: [{url:?}]\n"))
         .collect::<String>();
     let yaml = format!(
-        "clickhouse:\n  table: {}\n  columns: [{columns}]\n  \
+        "clickhouse:\n  table: {}\n  \
          user: {}\n  password: {:?}\n  format: {format_key}\n  \
          settings: {{ async_insert: \"0\" }}\n  \
          shards:\n{replicas}  \
@@ -218,33 +212,28 @@ fn run(format: Format) {
     let avro = AvroDeserializerBuilder::from_settings(
         &AvroSettings {
             mode: AvroMode::Confluent,
-            registry: Some(RegistrySection {
-                url: env_str("REGISTRY_URL", "http://spate-bench-redpanda:8081"),
-                username: None,
-                password: None,
-            }),
+            registry: Some(RegistrySection::new(env_str(
+                "REGISTRY_URL",
+                "http://spate-bench-redpanda:8081",
+            ))),
             ..AvroSettings::default()
         },
         &pipeline.io_handle(),
     )
     .expect("avro builder");
 
-    let sink = spate_clickhouse::from_component_config(&sink_section(format)).expect("ch sink");
-    // `native` needs the server's real column types; `rowbinary` does not.
-    let native_schema = match format {
-        Format::Native => Some(
-            pipeline
-                .block_on(sink.native_schema())
-                .expect("native schema"),
-        ),
-        Format::RowBinary => None,
-        other => panic!("{}", unsupported(other)),
-    };
+    let sink = pipeline
+        .block_on(
+            spate_clickhouse::from_component_config(&sink_section(format))
+                .expect("ch sink config")
+                .with_row::<rows::RowFam>(),
+        )
+        .expect("ch sink");
 
     let d = avro
         .build_datum::<rows::BatchFam>()
         .expect("datum deserializer");
-    let enc = encoder(format, native_schema);
+    let enc = encoder(format, &sink);
     let report = pipeline
         .sink(sink)
         .expect("sink")
@@ -266,14 +255,16 @@ fn run(format: Format) {
     std::process::exit(report.exit_code());
 }
 
-/// Build the encoder for the selected wire format.
-fn encoder<F: RecFamily>(
-    format: Format,
-    native: Option<Arc<spate_clickhouse::NativeSchema>>,
-) -> EitherEncoder<F> {
+/// Build the encoder for the selected wire format, over the column types the
+/// sink fetched from the server.
+fn encoder<F: RecFamily>(format: Format, sink: &ClickHouseSink) -> EitherEncoder<F> {
     match format {
-        Format::Native => EitherEncoder::Native(NativeEncoder::new(native.expect("native schema"))),
-        Format::RowBinary => EitherEncoder::RowBinary(ClickHouseEncoder::new()),
+        Format::Native => EitherEncoder::Native(NativeEncoder::new(
+            sink.native_schema().expect("native schema"),
+        )),
+        Format::RowBinary => {
+            EitherEncoder::RowBinary(ClickHouseEncoder::with_schema(sink.schema()))
+        }
         other => panic!("{}", unsupported(other)),
     }
 }

@@ -94,7 +94,8 @@ the recorded toolchain wrong.
 - **`native` is not like-for-like with Flink.** It is what a real deployment runs,
   so it is published — but the arm to read against Flink is `rowbinary`,
   because ClickHouse's official Flink connector can only write
-  `RowBinaryWithNamesAndTypes`. The gap between the two is server-side rather than
+  `RowBinaryWithNamesAndTypes`, which is what the framework's `rowbinary`
+  setting sends. The gap between the two is server-side rather than
   in our encoder: client CPU per row is near enough equal, while ClickHouse's own
   cost differs by more than 3×. Presenting Native against Flink would be claiming
   credit for a gap in the Java client.
