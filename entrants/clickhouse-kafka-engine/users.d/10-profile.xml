@@ -21,7 +21,7 @@
             <distributed_foreground_insert>1</distributed_foreground_insert>
 
             <!-- The OTHER half of the guarantee-bearing pair. Session settings
-                 travel with the Distributed forward, and 26.3 ships
+                 travel with the Distributed forward, and 26.8 ships
                  async_insert = 1 — so without this pin the shared server
                  executes this arm's forwarded inserts down the ASYNC insert
                  path (verified live: the remote QueryFinish row carries

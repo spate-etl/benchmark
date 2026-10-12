@@ -59,7 +59,7 @@
          real CPU inside the envelope; query_views_log and query_thread_log
          are even driven by the hot path (a row per MV execution / per thread
          per forwarded insert). The list below is every <*_log> the shipped
-         26.3 config enables, removed, EXCEPT two:
+         26.8 config enables, removed, EXCEPT two:
 
          * query_log — the reviewer's window into the forwarded inserts
            (~3 rows/s: a QueryStart and a QueryFinish per insert, 8 consumers

@@ -30,7 +30,7 @@ short = "ClickHouse Kafka"
 # run rather than publishing a number labelled with a version that never ran.
 strategy = "command"
 command  = ["clickhouse", "local", "--query", "SELECT version()"]
-pinned   = "26.3.17.4"
+pinned   = "26.8.25.14"
 
 [build]
 context    = "../.."
