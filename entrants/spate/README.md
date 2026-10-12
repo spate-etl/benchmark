@@ -54,9 +54,8 @@ bench build spate
 ```
 
 The build context is the repository root: the arm is a cargo workspace member and
-needs the workspace manifest and lockfile. While the framework is a private git
-dependency the build also needs a credential, passed as a BuildKit secret so no
-token is ever baked into an image layer.
+needs the workspace manifest and lockfile. The framework crates come from
+crates.io.
 
 ## Run
 
@@ -79,7 +78,7 @@ the recorded toolchain wrong.
 ## Differences worth knowing
 
 - **This arm sends `insert_deduplication_token` and no other arm does.**
-  `etl-clickhouse`'s writer sets it, so the behaviour arrives with the framework
+  `spate-clickhouse`'s writer sets it, so the behaviour arrives with the framework
   under test rather than from anything in this directory — which is why it is easy
   to miss and why it is written down here. The target sets
   `non_replicated_deduplication_window = 1000` identically for every arm, so
