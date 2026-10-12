@@ -1158,6 +1158,44 @@ pub const SETTLE_MAX_S: u64 = 120;
 /// Milliseconds between polls while waiting.
 pub const SETTLE_POLL_MS: u64 = 250;
 
+/// Bytes the server has read off its HTTP and native-protocol connections
+/// since it started, from `system.events`.
+///
+/// Server-wide rather than per query: `query_log`'s `NetworkReceiveBytes`
+/// misses whatever part of an HTTP body arrived in the same socket read as the
+/// request headers, which are read before the query exists. How much it misses
+/// depends on the client's timing, so it cannot compare one arm with another.
+/// The interface counters see every byte, request lines and headers included.
+pub const RECEIVE_BYTES_SQL: &str = "SELECT sumIf(value, event IN \
+     ('InterfaceHTTPReceiveBytes', 'InterfaceNativeReceiveBytes')) \
+     FROM system.events FORMAT TSV";
+
+/// Reads [`RECEIVE_BYTES_SQL`]: a counter that only grows while the server
+/// runs, so two readings bracket what arrived between them.
+///
+/// # Errors
+///
+/// The server's refusal, or a response that is not one integer.
+pub fn receive_bytes(host: &str, port: u16, user: &str, password: &str) -> Result<u64, String> {
+    let body = crate::docker::try_clickhouse_sql(host, port, user, password, RECEIVE_BYTES_SQL)
+        .map_err(|e| format!("system.events receive bytes: {e}"))?;
+    body.trim()
+        .parse::<u64>()
+        .map_err(|e| format!("system.events receive bytes {:?}: {e}", body.trim()))
+}
+
+/// Bytes received between two [`receive_bytes`] readings.
+///
+/// `None` when either reading failed or the counter went backwards, which
+/// means the server restarted in between and the difference describes nothing.
+#[must_use]
+pub fn received_between(before: Option<u64>, after: Option<u64>) -> Option<u64> {
+    match (before, after) {
+        (Some(b), Some(a)) if a >= b => Some(a - b),
+        _ => None,
+    }
+}
+
 /// Waits until `table` has no active parts and no running merges, and returns
 /// the seconds waited.
 ///
@@ -1215,6 +1253,17 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
     fn summarised(body: &str) -> Result<ServerSideCost, ServerSideError> {
         let rows = parse_response(body)?;
         summarise(&rows, &["default.sensor_events_t"], window())
+    }
+
+    /// A failed reading or a counter that went backwards yields no figure,
+    /// never a zero or a wrapped difference.
+    #[test]
+    fn received_between_refuses_what_it_cannot_measure() {
+        assert_eq!(received_between(Some(100), Some(250)), Some(150));
+        assert_eq!(received_between(Some(100), Some(100)), Some(0));
+        assert_eq!(received_between(None, Some(250)), None);
+        assert_eq!(received_between(Some(100), None), None);
+        assert_eq!(received_between(Some(250), Some(100)), None);
     }
 
     #[test]

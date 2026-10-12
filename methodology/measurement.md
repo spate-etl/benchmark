@@ -17,6 +17,7 @@ Everything published comes from outside the system under test:
 | Memory | cgroup v2 peak **anonymous** memory, plus `memory.peak` and (for JVM arms) configured vs used heap |
 | Latency | `ingest_ts - send_ts` computed in ClickHouse, where `ingest_ts` is a `MATERIALIZED now64(6)` column. Sustained mode only |
 | Server-side cost | ClickHouse's own `ProfileEvents` CPU-per-row, via `system.query_log` |
+| Bytes received | ClickHouse's `InterfaceHTTPReceiveBytes` plus `InterfaceNativeReceiveBytes` from `system.events`, read before the arm starts and again once it is quiet. Drain mode only |
 | GC (JVM arms) | `-Xlog:gc*`, read with `docker cp` from the path the container's descriptor declares (`gc_log`) |
 
 The published lead figure, `rows_per_s_per_core`, is the ratio of the first two

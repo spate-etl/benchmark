@@ -1056,6 +1056,11 @@ struct Measurement {
     /// zero, which the server did answer, and is a different fact from a
     /// `part_log` that could not be read at all.
     merges: Option<serverside::MergeActivity>,
+    /// Bytes ClickHouse received while the arm ran, and the rows landed by the
+    /// time it went quiet.
+    ///
+    /// `None` is "not measured", for the same reason as `server`.
+    received: Option<Received>,
     /// What the arm's JVMs reported about their own collectors, if it has any.
     gc: Gc,
     /// The ClickHouse ingest ceiling this arm was held to, rows per second, or
@@ -1538,6 +1543,11 @@ fn measure(
                 report = report.metric(key, metric);
             }
         }
+        if let Some(received) = &d.received {
+            for (key, metric) in received_metrics(*received) {
+                report = report.metric(key, metric);
+            }
+        }
         // Merge work that ran against the same window. Separate from the cost
         // figures above because it is charged to nobody: `ch_cpu_us` excludes
         // it by construction, and it competes with the arm regardless.
@@ -1892,6 +1902,20 @@ fn run_arm(
         .data_plane()
         .map(|c| format!("spate-bench-sut-{}", c.name));
 
+    // Read just before the arm starts and again once it has gone quiet, so the
+    // difference is what the arm sent: insert bodies as they crossed the wire,
+    // compressed or not. The harness's own row-count polls fall inside too, at
+    // about 150 bytes each. Drain only: in sustained mode the span would take in
+    // start-up and the backlog after the window, which the rest of the record
+    // excludes.
+    let receive_bytes = || {
+        serverside::receive_bytes(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password)
+            .map_err(|why| eprintln!("  no received-bytes figure: {why}"))
+            .ok()
+    };
+    let drain = matches!(opts.mode, Mode::Drain);
+    let received_before = if drain { receive_bytes() } else { None };
+
     let mut containers = ArmContainers::start(&specs);
 
     // Open, hold and close the one measurement window. Which function does it is
@@ -2008,6 +2032,12 @@ fn run_arm(
             return Err(with_logs(&why, &logs));
         }
     };
+    let received_after = if drain { receive_bytes() } else { None };
+    let received =
+        serverside::received_between(received_before, received_after).map(|bytes| Received {
+            bytes,
+            rows: settled.rows,
+        });
 
     // The GC logs, read while the containers still exist. `sampler::stop_sut`
     // runs `docker rm -f`, and `docker cp` against a removed container has
@@ -2299,6 +2329,7 @@ fn run_arm(
         load,
         server,
         merges,
+        received,
         gc,
         ceiling_rows_per_s,
     })
@@ -2747,6 +2778,36 @@ fn merge_metrics(merges: serverside::MergeActivity) -> Vec<(String, Metric)> {
             Metric::minimize(duration_us, "us"),
         ),
     ]
+}
+
+/// Bytes ClickHouse received from the arm's start until it went quiet.
+#[derive(Clone, Copy, Debug)]
+struct Received {
+    bytes: u64,
+    /// Rows in the target when the arm went quiet.
+    rows: u64,
+}
+
+/// The received-bytes figures.
+///
+/// The per-row one is what the arm put on the wire per landed row: it moves with
+/// insert compression and wire format, which `ch_inserted_bytes`, counted after
+/// decompression, does not. It also counts insert retries, and rows the server
+/// received and then filtered, such as a materialized view dropping events.
+fn received_metrics(received: Received) -> Vec<(String, Metric)> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte and row counts stay far below f64's exact range"
+    )]
+    let (bytes, rows) = (received.bytes as f64, received.rows as f64);
+    let mut out = vec![("ch_network_receive_bytes".to_owned(), Metric::bytes(bytes))];
+    if rows > 0.0 {
+        out.push((
+            "ch_network_receive_bytes_per_row".to_owned(),
+            Metric::minimize(bytes / rows, "bytes"),
+        ));
+    }
+    out
 }
 
 /// What an arm's inserts cost ClickHouse, as record metrics.
@@ -4723,6 +4784,28 @@ mod tests {
         // per-row cost without asking the arm anything.
         assert!(by_key["ch_rows_per_insert"].higher_is_better);
         assert!((by_key["ch_rows_per_insert"].value - 262_328.0).abs() < 1.0);
+    }
+
+    /// The received bytes publish as a total and per landed row, and a
+    /// repetition that landed nothing publishes no per-row figure at all.
+    #[test]
+    fn received_bytes_publish_as_a_total_and_per_row() {
+        let by_key: BTreeMap<String, Metric> = received_metrics(Received {
+            bytes: 7_501_315,
+            rows: 29_400,
+        })
+        .into_iter()
+        .collect();
+        assert!((by_key["ch_network_receive_bytes"].value - 7_501_315.0).abs() < 1e-6);
+        let per_row = &by_key["ch_network_receive_bytes_per_row"];
+        assert!((per_row.value - 7_501_315.0 / 29_400.0).abs() < 1e-9);
+        assert!(!per_row.higher_is_better);
+
+        let empty = received_metrics(Received {
+            bytes: 512,
+            rows: 0,
+        });
+        assert_eq!(empty.len(), 1, "{empty:?}");
     }
 
     /// A counter the server never mentioned is absent from the record rather
