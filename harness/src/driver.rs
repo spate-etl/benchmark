@@ -1905,10 +1905,16 @@ fn run_arm(
     // Read just before the arm starts and again once it has gone quiet, so the
     // difference is what the arm sent: insert bodies as they crossed the wire,
     // compressed or not. The harness's own row-count polls fall inside too, at
-    // a few hundred bytes each.
-    let receive_bytes =
-        || serverside::receive_bytes(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password).ok();
-    let received_before = receive_bytes();
+    // about 150 bytes each. Drain only: in sustained mode the span would take in
+    // start-up and the backlog after the window, which the rest of the record
+    // excludes.
+    let receive_bytes = || {
+        serverside::receive_bytes(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password)
+            .map_err(|why| eprintln!("  no received-bytes figure: {why}"))
+            .ok()
+    };
+    let drain = matches!(opts.mode, Mode::Drain);
+    let received_before = if drain { receive_bytes() } else { None };
 
     let mut containers = ArmContainers::start(&specs);
 
@@ -2026,8 +2032,9 @@ fn run_arm(
             return Err(with_logs(&why, &logs));
         }
     };
+    let received_after = if drain { receive_bytes() } else { None };
     let received =
-        serverside::received_between(received_before, receive_bytes()).map(|bytes| Received {
+        serverside::received_between(received_before, received_after).map(|bytes| Received {
             bytes,
             rows: settled.rows,
         });
@@ -2773,30 +2780,20 @@ fn merge_metrics(merges: serverside::MergeActivity) -> Vec<(String, Metric)> {
     ]
 }
 
-/// What an arm's inserts cost ClickHouse, as record metrics.
-///
-/// Two per-row figures rather than one, because they have different
-/// denominators and answer different questions. `ch_cpu_us_per_row` divides by
-/// the rows the driver counted in the target table, so it is the one that may be
-/// added to the arm's own `cpu_us_per_row`; `ch_cpu_us_per_written_row` divides
-/// by what the server says it wrote, so it is the one that describes the insert
-/// format. They coincide for an arm that inserts each row exactly once,
-/// and diverge for one that duplicated.
-///
-/// Every counter the server did not report is omitted rather than defaulted.
-/// `ProfileEvents` omits any counter whose value is zero, so `crate::serverside`
-/// keeps absence representable precisely to stop a counter a container was
-/// denied arriving here as a measured zero.
 /// Bytes ClickHouse received from the arm's start until it went quiet.
 #[derive(Clone, Copy, Debug)]
 struct Received {
     bytes: u64,
-    /// Rows in the target when the arm went quiet: every row those bytes carried.
+    /// Rows in the target when the arm went quiet.
     rows: u64,
 }
 
-/// The received-bytes figures. The per-row one moves with the arm's insert
-/// compression, which `ch_inserted_bytes`, counted after decompression, does not.
+/// The received-bytes figures.
+///
+/// The per-row one is what the arm put on the wire per landed row: it moves with
+/// insert compression and wire format, which `ch_inserted_bytes`, counted after
+/// decompression, does not. It also counts insert retries, and rows the server
+/// received and then filtered, such as a materialized view dropping events.
 fn received_metrics(received: Received) -> Vec<(String, Metric)> {
     #[expect(
         clippy::cast_precision_loss,
@@ -2813,6 +2810,20 @@ fn received_metrics(received: Received) -> Vec<(String, Metric)> {
     out
 }
 
+/// What an arm's inserts cost ClickHouse, as record metrics.
+///
+/// Two per-row figures rather than one, because they have different
+/// denominators and answer different questions. `ch_cpu_us_per_row` divides by
+/// the rows the driver counted in the target table, so it is the one that may be
+/// added to the arm's own `cpu_us_per_row`; `ch_cpu_us_per_written_row` divides
+/// by what the server says it wrote, so it is the one that describes the insert
+/// format. They coincide for an arm that inserts each row exactly once,
+/// and diverge for one that duplicated.
+///
+/// Every counter the server did not report is omitted rather than defaulted.
+/// `ProfileEvents` omits any counter whose value is zero, so `crate::serverside`
+/// keeps absence representable precisely to stop a counter a container was
+/// denied arriving here as a measured zero.
 fn server_metrics(cost: &serverside::ServerSideCost, rows: f64) -> Vec<(String, Metric)> {
     let mut out = Vec::new();
     if let Ok(per_landed) = cost.cpu_us_per_landed_row(rows) {
@@ -4775,10 +4786,6 @@ mod tests {
         assert!((by_key["ch_rows_per_insert"].value - 262_328.0).abs() < 1.0);
     }
 
-    /// A counter the server never mentioned is absent from the record rather
-    /// than present as a zero. `ProfileEvents` omits any counter whose value is
-    /// zero, so "the server measured nothing" and "this build has no such
-    /// counter" are indistinguishable once a default has been substituted.
     /// The received bytes publish as a total and per landed row, and a
     /// repetition that landed nothing publishes no per-row figure at all.
     #[test]
@@ -4801,6 +4808,10 @@ mod tests {
         assert_eq!(empty.len(), 1, "{empty:?}");
     }
 
+    /// A counter the server never mentioned is absent from the record rather
+    /// than present as a zero. `ProfileEvents` omits any counter whose value is
+    /// zero, so "the server measured nothing" and "this build has no such
+    /// counter" are indistinguishable once a default has been substituted.
     #[test]
     fn a_counter_the_server_did_not_report_reaches_no_metric_at_all() {
         let mut cost = server_side();
