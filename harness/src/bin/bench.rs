@@ -87,7 +87,7 @@ bench — the Spate Benchmark driver
   bench prefill                  populate the topic once per corpus (do this first)
   bench ceiling [--measure [--write]] [--seconds N] [--threads N]
                 [--ingest-max N] [--only <format>]...
-                [--compression lz4|zstd|zstd:N]
+                [--compression none|lz4|zstd|zstd:N]
                                  prove the infrastructure is not the bottleneck.
                                  Without --measure it reports the committed
                                  ceilings and refuses if they cannot be gated
@@ -120,10 +120,12 @@ bench — the Spate Benchmark driver
                                  are measured and never how. Writing a narrowed
                                  pass is refused when it would leave the rest of
                                  the file describing a different envelope.
-                                 --compression sends the ingest bodies as
-                                 ClickHouse compressed frames with
-                                 decompress=1, to measure what the target
-                                 absorbs when it also decompresses. A
+                                 --compression re-encodes the Native pool as
+                                 small blocks, one ClickHouse compressed frame
+                                 each, sent with decompress=1, to measure what
+                                 the target absorbs when it also decompresses.
+                                 `none` sends the same small blocks raw, which
+                                 is the baseline to compare against. A
                                  diagnostic: it prints and never writes.
   bench run <selector>... [--reps N] [--dry-run] [--env <id>]
                           [--mode drain|sustained] [--rate N] [--window S]
@@ -480,9 +482,9 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
     let combinations = ceiling::select_combinations(&ceiling_args.only)?;
     if ceiling_args.compression.is_some() && combinations != [ceiling::Format::Native] {
         return Err(
-            "--compression measures Native only: pass `--only native`. The pass sends many \
-             small blocks per request, one frame each, and only Native stays one valid \
-             body when blocks are concatenated."
+            "--compression measures Native only: pass `--only native`. It is the format \
+             the compressed arms send, and the pass re-encodes it into many small blocks \
+             per request the way they do."
                 .to_owned(),
         );
     }
@@ -552,8 +554,9 @@ fn cmd_ceiling(root: &Path, args: &[String]) -> Result<(), String> {
 
     if let Some(codec) = ceiling_args.compression {
         println!(
-            "\n{}: measured with {} frames (diagnostic, not comparable to the committed \
-             raw-body ceilings as a gate)",
+            "\n{}: measured with {} bodies of small blocks (diagnostic: compare it with \
+             another --compression pass, not with the committed ceiling, which sends one \
+             large raw block per request)",
             env.spec.id,
             codec.name()
         );

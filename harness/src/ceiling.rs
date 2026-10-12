@@ -1496,12 +1496,13 @@ pub struct PassOptions {
     /// of a format this rig cannot emit, happens once and before a container
     /// starts.
     pub ingest: Vec<Format>,
-    /// The frame codec for the ingest bodies, or `None` to POST them raw.
+    /// `None` for the committed pass, which POSTs each pool block as one large
+    /// raw block. `Some` re-encodes the pool as small blocks the way an arm's
+    /// sink sends them, framed with the codec, or raw for `Codec::None`.
     ///
-    /// A compressed pass is a diagnostic: it measures what the target absorbs
-    /// when it also has to decompress, and its figures are never committed as
-    /// ceilings, because every committed ceiling is the raw-body figure the
-    /// gate is defined against.
+    /// That pass is a diagnostic: its passes are compared with each other, and
+    /// never committed as ceilings, because every committed ceiling is the
+    /// large raw-block figure the gate is defined against.
     pub compression: Option<crate::frames::Codec>,
     /// `YYYY-MM-DD` to stamp on the provenance.
     ///
@@ -2593,11 +2594,15 @@ fn measure_ingest(
             }
             block.body = body;
         }
+        let how = if codec == crate::frames::Codec::None {
+            "raw, without frames".to_owned()
+        } else {
+            format!("{} frames, one per block", codec.name())
+        };
         eprintln!(
-            "  {}: bodies sent as {} frames, one {}-batch block of about {} KiB each, so \
-             MB/s below is compressed bytes",
+            "  {}: bodies sent as {}-batch blocks of about {} KiB, {how}, so MB/s below is \
+             bytes on the wire",
             format.wire_format(),
-            codec.name(),
             batches_per_frame,
             crate::frames::FRAME_BYTES / 1024,
         );
@@ -2611,8 +2616,10 @@ fn measure_ingest(
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
     // every rung POSTs bytes that are not merely equal but the same.
-    let mut inserter =
-        crate::inserter::Inserter::start(ep, &sql, &pool, opts.compression.is_some())?;
+    let framed = opts
+        .compression
+        .is_some_and(|c| c != crate::frames::Codec::None);
+    let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool, framed)?;
 
     let mut sweep = Sweep::new(
         INGEST_CONCURRENCY_FROM,

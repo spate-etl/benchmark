@@ -9,8 +9,9 @@
 //! swapped. The server decompresses the frames into one continuous byte stream
 //! before parsing it, so a frame boundary need not fall on a row or a block.
 //!
-//! Written here rather than taken from a ClickHouse client crate so the ceiling
-//! rig shares no code with any arm's insert path.
+//! Written here rather than through a ClickHouse client crate's insert API, so
+//! the ceiling rig does not frame its bodies with the code an arm inserts
+//! through. It does compile the same codec crates the arm's client links.
 
 /// Target uncompressed bytes per frame.
 ///
@@ -27,6 +28,8 @@ const HEADER_BYTES: usize = 9;
 /// A frame codec the ceiling rig can send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
+    /// No compression: the body is sent as it is, without frames.
+    None,
     /// LZ4 block compression.
     Lz4,
     /// Zstandard at the given level.
@@ -34,20 +37,21 @@ pub enum Codec {
 }
 
 impl Codec {
-    /// Parses `lz4`, `zstd` (level 3) or `zstd:<1-22>`.
+    /// Parses `none`, `lz4`, `zstd` (level 3) or `zstd:<1-22>`.
     ///
     /// # Errors
     ///
     /// Any other spelling, or a zstd level outside 1..=22.
     pub fn parse(spec: &str) -> Result<Self, String> {
         match spec {
+            "none" => Ok(Self::None),
             "lz4" => Ok(Self::Lz4),
             "zstd" => Ok(Self::Zstd(3)),
             other => {
                 let level = other
                     .strip_prefix("zstd:")
                     .ok_or_else(|| {
-                        format!("unknown compression {other:?}: lz4, zstd or zstd:<1-22>")
+                        format!("unknown compression {other:?}: none, lz4, zstd or zstd:<1-22>")
                     })?
                     .parse::<i32>()
                     .map_err(|e| format!("compression {other:?}: {e}"))?;
@@ -66,6 +70,7 @@ impl Codec {
     #[must_use]
     pub fn name(self) -> String {
         match self {
+            Self::None => "none".to_owned(),
             Self::Lz4 => "lz4".to_owned(),
             Self::Zstd(level) => format!("zstd:{level}"),
         }
@@ -73,6 +78,7 @@ impl Codec {
 
     fn method(self) -> u8 {
         match self {
+            Self::None => unreachable!("an uncompressed body has no frames"),
             Self::Lz4 => METHOD_LZ4,
             Self::Zstd(_) => METHOD_ZSTD,
         }
@@ -80,6 +86,7 @@ impl Codec {
 
     fn compress(self, input: &[u8]) -> Result<Vec<u8>, String> {
         match self {
+            Self::None => Ok(input.to_vec()),
             Self::Lz4 => Ok(lz4_flex::block::compress(input)),
             Self::Zstd(level) => {
                 zstd::bulk::compress(input, level).map_err(|e| format!("zstd compress: {e}"))
@@ -89,12 +96,15 @@ impl Codec {
 }
 
 /// Encodes `body` as consecutive frames of at most `frame_bytes` uncompressed
-/// bytes each.
+/// bytes each, or returns it unchanged for [`Codec::None`].
 ///
 /// # Errors
 ///
 /// The codec's own failure, or a frame too large for the header's `u32` sizes.
 pub fn encode(body: &[u8], codec: Codec, frame_bytes: usize) -> Result<Vec<u8>, String> {
+    if codec == Codec::None {
+        return Ok(body.to_vec());
+    }
     let mut out = Vec::with_capacity(body.len());
     for chunk in body.chunks(frame_bytes.max(1)) {
         let payload = codec.compress(chunk)?;
@@ -161,10 +171,12 @@ mod tests {
             assert!(stream.len() < body.len(), "{}", codec.name());
             assert_eq!(decode(&stream), body, "{}", codec.name());
         }
+        assert_eq!(encode(&body, Codec::None, FRAME_BYTES).unwrap(), body);
     }
 
     #[test]
     fn parses_the_sink_spellings() {
+        assert_eq!(Codec::parse("none"), Ok(Codec::None));
         assert_eq!(Codec::parse("lz4"), Ok(Codec::Lz4));
         assert_eq!(Codec::parse("zstd"), Ok(Codec::Zstd(3)));
         assert_eq!(Codec::parse("zstd:1"), Ok(Codec::Zstd(1)));
