@@ -24,6 +24,7 @@ was in force.
 | `inflight` | **4** | Concurrent INSERTs per shard, so 128 across the arm. Where the curve flattens; 8 and 16 measure the same rate and hold more rows in flight. |
 | `linger_ms` | **500** `rowbinary`, **2000** `native` | Batch timer, and a hard p99 floor in sustained mode. The larger `native` batch needs longer to fill before the timer would seal it early. |
 | `max_rows` | **262144** `rowbinary`, **1048576** `native` | Rows per INSERT. Above the cap the linger timer seals the batch instead, so a larger one would declare a number that never takes effect. Read the batch a run actually sealed from `ch_rows_per_insert`. |
+| `compression` | **lz4**; **zstd:3** `native-zstd`, **zstd:1** `native-zstd1` | Codec for each block inside ClickHouse's checksummed frame. `lz4` is the framework default. The sink compresses on the `io_threads` runtime and ClickHouse decompresses on arrival. On this single-host rig a smaller body saves no transfer time, so the zstd variants measure the CPU cost on both sides. |
 
 Fixed by the contract rather than chosen: `commit_interval` is **5 s**, matched to
 Flink's `AT_LEAST_ONCE` checkpoint interval so both arms pay for the same
@@ -37,12 +38,11 @@ no record reports them:
 
 | Setting | Value | Why it matters |
 |---|---|---|
-| `io_threads` | 2 | That runtime owns every sink writer and the LZ4 compression of every insert body. It is material and no descriptor can set it. |
+| `io_threads` | 2 | That runtime owns every sink writer and the compression of every insert body. It is material and no descriptor can set it. |
 | `chunk.target_bytes` | 64 KiB (framework default) | Under `native` this is the ClickHouse **block** size, so at ~57 bytes per row a block is about 1,150 rows and one 261,323-row INSERT is roughly 230 concatenated blocks. |
-| `compression` | `lz4` (framework default) | This arm compresses each block inside ClickHouse's checksummed frame. |
 | `max_inflight_bytes` | derived | Scales with `shards × inflight × max_rows`, so widening egress cannot backpressure on a budget *we* chose. Sound here only because rows bind long before bytes do. |
 
-The last two are why the committed **Native ingest ceilings are an upper bound**:
+`chunk.target_bytes` and `compression` are why the committed **Native ingest ceilings are an upper bound**:
 the ceiling rig POSTs one large uncompressed block per request where this arm
 seals many smaller compressed ones, and the ceilings file records that on every
 Native figure.
@@ -64,8 +64,8 @@ bench run spate --reps 3
 ```
 
 One container, the full 32 CPU / 96 GiB data-plane envelope, no control plane.
-`FORMAT` selects `native` or `rowbinary`; the five knobs above arrive as
-`THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS` and `MAX_ROWS`.
+`FORMAT` selects `native` or `rowbinary`; the six knobs above arrive as
+`THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS`, `MAX_ROWS` and `COMPRESSION`.
 
 ## Versions
 

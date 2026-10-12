@@ -85,9 +85,14 @@ SHARDS         = "{{knob:shards}}"
 INFLIGHT       = "{{knob:inflight}}"
 LINGER_MS      = "{{knob:linger_ms}}"
 MAX_ROWS       = "{{knob:max_rows}}"
+COMPRESSION    = "{{knob:compression}}"
 
-# One axis: the wire format. Both are published because they are not the same
-# amount of server-side work, and the difference belongs to the reader.
+# Two axes. The wire format: both are published because they are not the same
+# amount of server-side work, and the difference belongs to the reader. The
+# insert body's compression: `lz4` is the framework default, and the `zstd`
+# variants measure what the sink spends compressing and what ClickHouse spends
+# decompressing. On this single-host rig the sink reaches ClickHouse over a
+# local bridge, so a smaller body saves no transfer time here.
 #
 # Not declared here and not reachable by the driver: `IO_THREADS` (pinned at 2)
 # and `BUDGET_MIB` (always derived). Both are read by `main.rs` and appear in no
@@ -102,7 +107,7 @@ env      = { FORMAT = "native" }
 # `linger_ms` exceeds the time a shard takes to fill `max_rows`, so a batch
 # seals on rows. Below that the linger seals it first and caps the batch
 # regardless of `max_rows`.
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576 }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4" }
 reports  = { wire_format = "native" }
 
 # The arm to read against Flink, which writes the same wire format: ClickHouse's
@@ -119,5 +124,25 @@ id       = "rowbinary"
 label    = "Spate · RowBinary"
 approach = "realistic"
 env      = { FORMAT = "rowbinary" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144 }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144, compression = "lz4" }
 reports  = { wire_format = "rowbinary_nt" }
+
+# The Native variant with the insert body compressed by zstd at level 3, the
+# level `compression: zstd` selects. Everything else matches `native`, so the
+# pair isolates the codec.
+[[variants]]
+id       = "native-zstd"
+label    = "Spate · Native · zstd"
+approach = "realistic"
+env      = { FORMAT = "native" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:3" }
+reports  = { wire_format = "native" }
+
+# zstd at level 1, its cheapest level.
+[[variants]]
+id       = "native-zstd1"
+label    = "Spate · Native · zstd:1"
+approach = "realistic"
+env      = { FORMAT = "native" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:1" }
+reports  = { wire_format = "native" }
