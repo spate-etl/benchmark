@@ -37,7 +37,7 @@
             <!-- One consumer per partition (32), matched to the 32-CPU cgroup
                  exactly as spate threads=32 and flink parallelism=32 are. The
                  CREATE-time cap on this value is max(detected cores, 16) at
-                 this version (StorageKafkaUtils.cpp, v26.3.17.4-lts) and a
+                 this version (StorageKafkaUtils.cpp, v26.8 LTS) and a
                  violation THROWS at CREATE — loud, in initdb, never a silent
                  clamp — so 32 clears it exactly on this 32-core cgroup.
                  20_assert.sh checks the value the collection carries, and the
@@ -48,7 +48,7 @@
             <!-- MESSAGES per flushed block, not rows: 16384 messages are
                  ~1.2M surviving rows per forwarded insert. Unset, the engine
                  uses max_insert_block_size / num_consumers = 131,072 MESSAGES
-                 per consumer (StorageKafka.cpp, v26.3.17.4-lts) — never
+                 per consumer (StorageKafka.cpp, v26.8 LTS) — never
                  reached at this corpus's rates, so under the default the
                  flush timer always binds and block size stops being a knob
                  at all. -->
@@ -82,7 +82,7 @@
         <!-- Prefetch byte cap per consumer queue, raised 64 MiB -> 256 MiB:
              ClickHouse itself targets queued.min.messages =
              max(block_msgs, 100000) messages of prefetch
-             (KafkaConfigLoader.cpp, v26.3.17.4-lts), and at ~5 KiB per
+             (KafkaConfigLoader.cpp, v26.8 LTS), and at ~5 KiB per
              message the shipped 64 MiB cap cuts that off below ONE
              16384-msg block — a consumer that cannot buffer the next block
              while the current one flushes is paced by the broker

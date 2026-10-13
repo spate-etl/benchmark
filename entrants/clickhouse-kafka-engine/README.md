@@ -45,8 +45,8 @@ SQL is exactly what runs, and what the driver set is exactly what
 
 | Knob | Value | Engine default | What it controls |
 |---|---|---|---|
-| `num_consumers` | **32** | 1 | `kafka_num_consumers`: one consumer per **partition** (32). Fewer leaves the slowest consumer owning two partitions and pacing the drain. Matched to the 32-CPU envelope exactly as Spate `threads = 32` and Flink `parallelism = 32` are. The CREATE-time cap on this value is `max(detected cores, 16)` and a violation throws at CREATE (`StorageKafkaUtils.cpp`, v26.3.17.4), so 32 clears it exactly on this 32-core cgroup; the post-start check below guards a future cap change. |
-| `block_msgs` | **16384** | 131,072 | `kafka_max_block_size`, in **messages**, not rows: 16384 messages ≈ 1.2M surviving rows per forwarded INSERT. Unset, the engine derives `max_insert_block_size / num_consumers` = 131,072 messages per consumer (`StorageKafka.cpp`, v26.3.17.4) — never reached at this corpus's rates, so under the default the flush timer always binds and block size stops being a knob. Sweep candidates: 8192 / 16384 / 32768. |
+| `num_consumers` | **32** | 1 | `kafka_num_consumers`: one consumer per **partition** (32). Fewer leaves the slowest consumer owning two partitions and pacing the drain. Matched to the 32-CPU envelope exactly as Spate `threads = 32` and Flink `parallelism = 32` are. The CREATE-time cap on this value is `max(detected cores, 16)` and a violation throws at CREATE (`StorageKafkaUtils.cpp`, v26.8 LTS), so 32 clears it exactly on this 32-core cgroup; the post-start check below guards a future cap change. |
+| `block_msgs` | **16384** | 131,072 | `kafka_max_block_size`, in **messages**, not rows: 16384 messages ≈ 1.2M surviving rows per forwarded INSERT. Unset, the engine derives `max_insert_block_size / num_consumers` = 131,072 messages per consumer (`StorageKafka.cpp`, v26.8 LTS) — never reached at this corpus's rates, so under the default the flush timer always binds and block size stops being a knob. Sweep candidates: 8192 / 16384 / 32768. |
 | `flush_ms` | **5000** | 7500 | `kafka_flush_interval_ms` — **the commit cadence**: offsets commit once per flushed block. The engine's own default (7500, from `stream_flush_interval_ms`) would be a *laxer* durability interval than every other arm's 5 s, so 5000 is matched, not tuned. |
 | `poll_timeout_ms` | **500** | 500 | `kafka_poll_timeout_ms`, the stream thread's poll bound. Declared as a knob (at its default) so the `flush_ms > poll_timeout_ms` constraint in `entrant.toml` is checkable against stated values rather than an image default no record reports. |
 
@@ -57,7 +57,7 @@ SQL is exactly what runs, and what the driver set is exactly what
 | `kafka_thread_per_consumer` | **1** | THE trap ([#35153](https://github.com/ClickHouse/ClickHouse/issues/35153)): the shipped default 0 squashes all consumers into ONE flush thread — 8 consumers measure like 1. Not a knob: no correct configuration has another value. |
 | `kafka_skip_broken_messages` | **0** | One skipped message silently drops 100 rows; the loss gate then voids the arm. |
 | `distributed_foreground_insert` | **1** | The guarantee-bearing setting. Default 0 spools the MV's insert to local disk and acks early, so offsets would commit before the shared server had the rows. The former name `insert_distributed_sync` remains an alias. |
-| `async_insert` | **0** | Session settings travel with the Distributed forward, and 26.3 defaults this ON — unpinned, the shared server executes this arm's forwarded inserts down the async path (verified live), the harness refuses to attribute them (`AsyncInsertQuery` fingerprint), and the record would ship with no server-side metrics. 0 is what Spate's and Flink's clients set per insert. |
+| `async_insert` | **0** | Session settings travel with the Distributed forward, and 26.8 defaults this ON — unpinned, the shared server executes this arm's forwarded inserts down the async path (verified live), the harness refuses to attribute them (`AsyncInsertQuery` fingerprint), and the record would ship with no server-side metrics. 0 is what Spate's and Flink's clients set per insert. |
 | `kafka_commit_every_batch` | 0 (shipped) | One offset commit per flushed block, not per librdkafka batch — this is what makes `flush_ms` the durability cadence. |
 | `materialized_views_ignore_errors` | 0 (pinned) | 1 would turn a refused remote insert into a dropped block plus a log line; the loss gate must see stall-and-replay, never skip. |
 | `background_message_broker_schedule_pool_size` | 16 (shipped, recorded) | The pool the streaming jobs run in; with `thread_per_consumer = 1` the arm needs ≥ 8. Recorded so a default change cannot move it silently. |
@@ -113,7 +113,7 @@ docker exec spate-bench-ch-kafka clickhouse-client --query \
   "SELECT count() FROM system.kafka_consumers WHERE table = 'sensor_batches_queue'"
 ```
 
-Must print **8**. At v26.3.17.4 the CREATE-time cap (`max(detected cores,
+Must print **8**. At v26.8 LTS the CREATE-time cap (`max(detected cores,
 16)`) cannot clamp 8 silently — a violation throws during initdb and the
 container never starts — so this check exists to catch a *future* version
 moving that behaviour, and a count under 8 still invalidates the run.
@@ -126,7 +126,7 @@ reviewer goes through `docker exec` as above.
 
 | Component | Coordinate / image | Version |
 |---|---|---|
-| ClickHouse server | `clickhouse/clickhouse-server:26.3` (digest `sha256:85c43481…ea49`) | 26.3.17.4 |
+| ClickHouse server | `clickhouse/clickhouse-server:26.8.25.14` (digest `sha256:dd81097e…73b9`) | 26.8.25.14 |
 | librdkafka | bundled in the server build (listed in `system.licenses`) | pinned by the server tag's contrib submodule; not surfaced at runtime |
 
 Same major as the shared storage server (`environments/*.toml`): one
@@ -149,7 +149,7 @@ and it is the price of the setting that makes the guarantee real.
   consumers. Fixed at 1 above.
 - **Consumer-count cap under cgroups** ([#35926](https://github.com/ClickHouse/ClickHouse/pull/35926),
   [#40670](https://github.com/ClickHouse/ClickHouse/pull/40670)): the
-  CREATE-time cap is `max(detected cores, 16)` at v26.3.17.4 and a violation
+  CREATE-time cap is `max(detected cores, 16)` at v26.8 LTS and a violation
   **throws at CREATE** — a loud initdb failure, not a silent clamp — so this
   arm's 8 consumers fit on 6 detected cores with no override
   (`kafka_disable_num_consumers_limit` exists as the escape hatch and is

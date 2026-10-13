@@ -67,9 +67,9 @@ expect "format_avro_schema_registry_url carries \$REGISTRY_URL" \
 
 # from_env carried the driver's per-run identity and the knobs into the named
 # collection the Kafka table reads. Existence is checked via
-# system.named_collections; the VALUES are not — on 26.3 that table masks
+# system.named_collections; the VALUES are not — on 26.8 that table masks
 # every value as [HIDDEN] unless the user holds SHOW NAMED COLLECTIONS
-# SECRETS (verified on 26.3.17.4), and granting a secrets privilege to read
+# SECRETS (verified on 26.8.25.14), and granting a secrets privilege to read
 # back a topic name is the wrong trade. The values are asserted against the
 # server's own preprocessed config instead: it is the artifact from_env
 # substitution writes and the one the server loaded the collection from.

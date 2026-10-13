@@ -43,7 +43,7 @@
 //!
 //! # Running it
 //!
-//! These tests need a Docker daemon and pull `clickhouse/clickhouse-server:26.3`,
+//! These tests need a Docker daemon and pull `clickhouse/clickhouse-server:26.8`,
 //! so they are `#[ignore]`d and `cargo test` does not run them. To run them:
 //!
 //! ```text
@@ -72,7 +72,7 @@ use spate_benchmark_harness::{docker, http};
 /// Pinned to a version rather than `latest`, for the reason the whole harness
 /// pins images: a claim about what a server accepted is worth nothing if nobody
 /// can say which server.
-const IMAGE: &str = "clickhouse/clickhouse-server:26.3";
+const IMAGE: &str = "clickhouse/clickhouse-server:26.8";
 
 /// The password the container is started with, matching `infra::start_clickhouse`
 /// so the two rigs do not differ in a way somebody has to remember.
