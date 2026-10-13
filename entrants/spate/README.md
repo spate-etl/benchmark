@@ -25,6 +25,7 @@ was in force.
 | `linger_ms` | **500** `rowbinary`, **2000** `native` | Batch timer, and a hard p99 floor in sustained mode. The larger `native` batch needs longer to fill before the timer would seal it early. |
 | `max_rows` | **262144** `rowbinary`, **1048576** `native` | Rows per INSERT. Above the cap the linger timer seals the batch instead, so a larger one would declare a number that never takes effect. Read the batch a run actually sealed from `ch_rows_per_insert`. |
 | `compression` | **lz4**; **zstd:3** `native-zstd`, **zstd:1** `native-zstd1` | Codec for each block inside ClickHouse's checksummed frame. `lz4` is the framework default. The sink compresses on the `io_threads` runtime and ClickHouse decompresses on arrival. On this single-host rig a smaller body saves no transfer time, so the zstd variants measure the CPU cost on both sides. |
+| `io_threads` | **2** | Workers in the I/O runtime. On this framework version that runtime runs every shard worker, every insert write and the compression of every insert body. On this rig it bounds the arm: with only this knob changed, 8 workers raised `native` from 21.1M to 33.1M rows/s and `native-zstd` from 8.0M to 31.0M rows/s, while at 2 under `lz4` both workers ran at a full core each ([spate#1133](https://github.com/spate-etl/spate/issues/1133)). The value stays at the framework default until a framework release that compresses on the pipeline threads has been measured at 2 and 8. |
 
 Fixed by the contract rather than chosen: `commit_interval` is **5 s**, matched to
 Flink's `AT_LEAST_ONCE` checkpoint interval so both arms pay for the same
@@ -33,13 +34,12 @@ async inserts would move batching into the server and make the comparison one of
 ClickHouse settings rather than of frameworks. `metrics.exporter` is **none**;
 nothing this arm reports about itself is used for any published number.
 
-Three values are the framework's and are **not reachable from any descriptor**, so
+Two values are the framework's and are **not reachable from any descriptor**, so
 no record reports them:
 
 | Setting | Value | Why it matters |
 |---|---|---|
-| `io_threads` | 2 | That runtime owns every sink writer and the compression of every insert body. It is material and no descriptor can set it. |
-| `chunk.target_bytes` | 64 KiB (framework default) | Under `native` this is the ClickHouse **block** size, so at ~57 bytes per row a block is about 1,150 rows and one 261,323-row INSERT is roughly 230 concatenated blocks. |
+| `chunk.target_bytes` | 64 KiB (framework default) | Under `native` this is the ClickHouse **block** size, and the encoder seals each block at about 42 KB and 640 rows ([spate#1139](https://github.com/spate-etl/spate/issues/1139)). One 1,048,576-row INSERT is therefore about 1,640 concatenated blocks. |
 | `max_inflight_bytes` | derived | Scales with `shards × inflight × max_rows`, so widening egress cannot backpressure on a budget *we* chose. Sound here only because rows bind long before bytes do. |
 
 `chunk.target_bytes` and `compression` are why the committed **Native ingest
@@ -66,8 +66,9 @@ bench run spate --reps 3
 ```
 
 One container, the full 32 CPU / 96 GiB data-plane envelope, no control plane.
-`FORMAT` selects `native` or `rowbinary`; the six knobs above arrive as
-`THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS`, `MAX_ROWS` and `COMPRESSION`.
+`FORMAT` selects `native` or `rowbinary`; the seven knobs above arrive as
+`THREADS`, `SHARDS`, `INFLIGHT`, `LINGER_MS`, `MAX_ROWS`, `COMPRESSION` and
+`IO_THREADS`.
 
 ## Versions
 
