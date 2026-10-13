@@ -77,7 +77,7 @@ affects = ["server-side"]
 # where the site shows it. The site renders this table and not the README.
 [[deviations]]
 what    = "io_threads is held at the framework default of 2. On this rig and this framework version, 8 I/O workers raised native from 21.1M to 33.1M rows/s and native-zstd from 8.0M to 31.0M rows/s (spate#1133). The published rate is avoidable."
-why     = "spate#1137 lets a sink compress each chunk on the pipeline threads, and the ClickHouse sink in this framework version compresses on the I/O runtime. Both values are re-measured on the first release whose ClickHouse sink compresses on the pipeline threads, and the faster one is declared."
+why     = "spate#1137 lets a sink compress each chunk on the pipeline threads, and the ClickHouse sink in this framework version compresses on the I/O runtime. io_threads is swept at 2, 4, 8 and 16 on the first release whose ClickHouse sink compresses on the pipeline threads, and the fastest is declared."
 affects = ["throughput"]
 
 [env]
