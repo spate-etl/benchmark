@@ -73,6 +73,13 @@ what    = "The framework's writer sets insert_deduplication_token on every seale
 why     = "The token is part of the framework's shipped at-least-once delivery path (rule 1: the system's own API, as any user would run it), but it changes what the arm asks of the shared target and favours the vendor's arm, so it is declared rather than left in a SQL comment. See workload/clickhouse/ddl.sql."
 affects = ["server-side"]
 
+# Rule 2 asks for a measurably suboptimal default to be stated as avoidable
+# where the site shows it. The site renders this table and not the README.
+[[deviations]]
+what    = "io_threads is held at the framework default of 2. On this rig and this framework version, 8 I/O workers raised native from 21.1M to 33.1M rows/s and native-zstd from 8.0M to 31.0M rows/s (spate#1133). The published rate is avoidable."
+why     = "A framework change that moves insert compression off the I/O runtime is merged and not yet released (spate#1137). Both values are re-measured on the release that ships it, and the faster one is declared."
+affects = ["throughput"]
+
 [env]
 BOOTSTRAP      = "{{broker_internal}}"
 REGISTRY_URL   = "{{registry_internal}}"
