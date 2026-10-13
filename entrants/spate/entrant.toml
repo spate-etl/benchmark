@@ -73,6 +73,13 @@ what    = "The framework's writer sets insert_deduplication_token on every seale
 why     = "The token is part of the framework's shipped at-least-once delivery path (rule 1: the system's own API, as any user would run it), but it changes what the arm asks of the shared target and favours the vendor's arm, so it is declared rather than left in a SQL comment. See workload/clickhouse/ddl.sql."
 affects = ["server-side"]
 
+# Rule 2 asks for a measurably suboptimal default to be stated as avoidable
+# where the site shows it. The site renders this table and not the README.
+[[deviations]]
+what    = "io_threads is held at the framework default of 2. On this rig and this framework version, 8 I/O workers raised native from 21.1M to 33.1M rows/s and native-zstd from 8.0M to 31.0M rows/s (spate#1133). The published rate is avoidable."
+why     = "spate#1137 lets a sink compress each chunk on the pipeline threads, and the ClickHouse sink in this framework version compresses on the I/O runtime. io_threads is swept at 2, 4, 8 and 16 on the first release whose ClickHouse sink compresses on the pipeline threads, and the fastest is declared."
+affects = ["throughput"]
+
 [env]
 BOOTSTRAP      = "{{broker_internal}}"
 REGISTRY_URL   = "{{registry_internal}}"
@@ -86,6 +93,7 @@ INFLIGHT       = "{{knob:inflight}}"
 LINGER_MS      = "{{knob:linger_ms}}"
 MAX_ROWS       = "{{knob:max_rows}}"
 COMPRESSION    = "{{knob:compression}}"
+IO_THREADS     = "{{knob:io_threads}}"
 
 # Two axes. The wire format: both are published because they are not the same
 # amount of server-side work, and the difference belongs to the reader. The
@@ -94,9 +102,8 @@ COMPRESSION    = "{{knob:compression}}"
 # decompressing. On this single-host rig the sink reaches ClickHouse over a
 # local bridge, so a smaller body saves no transfer time here.
 #
-# Not declared here and not reachable by the driver: `IO_THREADS` (pinned at 2)
-# and `BUDGET_MIB` (always derived). Both are read by `main.rs` and appear in no
-# descriptor, so no record reports them.
+# Not declared here and not reachable by the driver: `BUDGET_MIB` (always
+# derived). `main.rs` reads it and no descriptor sets it, so no record reports it.
 
 [[variants]]
 id       = "native"
@@ -107,7 +114,7 @@ env      = { FORMAT = "native" }
 # `linger_ms` exceeds the time a shard takes to fill `max_rows`, so a batch
 # seals on rows. Below that the linger seals it first and caps the batch
 # regardless of `max_rows`.
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
 # The arm to read against Flink, which writes the same wire format: ClickHouse's
@@ -124,7 +131,7 @@ id       = "rowbinary"
 label    = "Spate · RowBinary"
 approach = "realistic"
 env      = { FORMAT = "rowbinary" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144, compression = "lz4" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "rowbinary_nt" }
 
 # The Native variant with the insert body compressed by zstd at level 3, the
@@ -135,7 +142,7 @@ id       = "native-zstd"
 label    = "Spate · Native · zstd"
 approach = "realistic"
 env      = { FORMAT = "native" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:3" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:3", io_threads = 2 }
 reports  = { wire_format = "native" }
 
 # zstd at level 1, the cheapest level the sink accepts.
@@ -144,5 +151,5 @@ id       = "native-zstd1"
 label    = "Spate · Native · zstd:1"
 approach = "realistic"
 env      = { FORMAT = "native" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:1" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:1", io_threads = 2 }
 reports  = { wire_format = "native" }
