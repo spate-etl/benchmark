@@ -2367,8 +2367,7 @@ dependencies = [
 [[package]]
 name = "spate-avro"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffeea24eb80bcdeed4ba92d8b61844a05aa9117f27ad1d81818de7bdd3e253fc"
+source = "git+https://github.com/spate-etl/spate?rev=799d3640#799d36400044080767c821e2c14c858bfb5d10d2"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -2410,16 +2409,17 @@ dependencies = [
 [[package]]
 name = "spate-clickhouse"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d7adf15e62d289a7f74023e4970230ddc386d2a09ffea72e9ddcfc7c420d1d"
+source = "git+https://github.com/spate-etl/spate?rev=799d3640#799d36400044080767c821e2c14c858bfb5d10d2"
 dependencies = [
  "bytes",
  "bytesize",
+ "cityhash-rs",
  "clickhouse",
  "foldhash",
  "humantime-serde",
  "hyper-rustls",
  "hyper-util",
+ "lz4_flex",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -2430,13 +2430,13 @@ dependencies = [
  "twox-hash",
  "url",
  "webpki-roots",
+ "zstd",
 ]
 
 [[package]]
 name = "spate-clickhouse-derive"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15d4d4c02751df9d264e6514cc2338ff1e5635a353cfb6123c0ad15fb98e7db3"
+source = "git+https://github.com/spate-etl/spate?rev=799d3640#799d36400044080767c821e2c14c858bfb5d10d2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2447,8 +2447,7 @@ dependencies = [
 [[package]]
 name = "spate-core"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2921d723f367cf21ecd7a6065a8186d97d2c08e70a2837ae3717ea28afed6803"
+source = "git+https://github.com/spate-etl/spate?rev=799d3640#799d36400044080767c821e2c14c858bfb5d10d2"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2474,8 +2473,7 @@ dependencies = [
 [[package]]
 name = "spate-kafka"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786736dc2598e23868f71afc6ae33154ef34a04385a77be56708d0a06f6a8257"
+source = "git+https://github.com/spate-etl/spate?rev=799d3640#799d36400044080767c821e2c14c858bfb5d10d2"
 dependencies = [
  "bytes",
  "bytesize",
