@@ -97,6 +97,29 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64, min_pause_ms:
     .expect("pipeline config")
 }
 
+/// Sets one cluster property on the broker through its admin API, the same
+/// `upsert` body `rpk cluster config set` sends, and logs the status line.
+/// Redpanda's admin API is plain HTTP on the bench network.
+fn set_broker_property(key: &str, value: &str) {
+    let body = format!("{{\"upsert\":{{\"{key}\":{value}}},\"remove\":[]}}");
+    let request = format!(
+        "PUT /v1/cluster_config HTTP/1.1\r\nHost: spate-bench-redpanda:9644\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    match std::net::TcpStream::connect("spate-bench-redpanda:9644") {
+        Ok(mut s) => {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+            let _ = std::io::Write::write_all(&mut s, request.as_bytes());
+            let mut response = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut response);
+            let status = response.lines().next().unwrap_or("no response");
+            eprintln!("broker {key}={value}: {status}");
+        }
+        Err(e) => eprintln!("broker {key}={value}: connect failed: {e}"),
+    }
+}
+
 /// Polls the admin server's `/metrics` every five seconds and prints the
 /// backpressure and queue series to stderr, so the run log carries them. The
 /// published figures still come from the driver's sampler and ClickHouse.
@@ -264,6 +287,12 @@ fn run(format: Format) {
     let min_pause_ms = env_u64("MIN_PAUSE_MS", 500);
     println!("min_pause={min_pause_ms}ms");
     metrics_tap();
+
+    // `FETCH_READ_CONCURRENCY` sets the broker's `fetch_max_read_concurrency`
+    // before the pipeline fetches, so every variant runs under its own value.
+    if let Ok(v) = std::env::var("FETCH_READ_CONCURRENCY") {
+        set_broker_property("fetch_max_read_concurrency", &v);
+    }
 
     let pipeline = Pipeline::from_config(pipeline_config(
         threads,

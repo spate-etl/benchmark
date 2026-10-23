@@ -110,30 +110,39 @@ id       = "native"
 label    = "Spate · Native"
 approach = "realistic"
 default  = true
-env      = { FORMAT = "native" }
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "1" }
 # `linger_ms` exceeds the time a shard takes to fill `max_rows`, so a batch
 # seals on rows. Below that the linger seals it first and caps the batch
 # regardless of `max_rows`.
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
-# Fetch-size probe, not for publication: the same arm with librdkafka's
-# per-partition fetch cap raised to 4 MiB and the per-response cap to 128 MiB.
+# Broker probe, not for publication: the Native arm with the broker's
+# fetch_max_read_concurrency raised from 1 to 4 for the run.
+[[variants]]
+id       = "native-frc4"
+label    = "Spate · Native · broker read concurrency 4"
+approach = "realistic"
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "4" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+# Fetch-size probe, not for publication: 4 MiB per partition at the default
+# broker read concurrency.
 [[variants]]
 id       = "fetch4m"
 label    = "Spate · Native · fetch 4MiB"
 approach = "realistic"
-env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728" }
+env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728", FETCH_READ_CONCURRENCY = "1" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
-# Fetch-size probe, not for publication: 16 MiB per partition and 512 MiB per
-# response. The client's prefetch queue is capped at 64 MiB, so this one may
-# hit that cap; the probe reports it either way.
+# Broker probe, not for publication: 4 MiB per partition with the broker's
+# fetch_max_read_concurrency at 4.
 [[variants]]
-id       = "fetch16m"
-label    = "Spate · Native · fetch 16MiB"
+id       = "fetch4m-frc4"
+label    = "Spate · Native · fetch 4MiB · broker read concurrency 4"
 approach = "realistic"
-env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "16777216", FETCH_MAX_BYTES = "536870912" }
+env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728", FETCH_READ_CONCURRENCY = "4" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
