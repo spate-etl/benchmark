@@ -156,6 +156,16 @@ fn kafka_source() -> spate_kafka::KafkaSource {
         "auto.offset.reset".to_owned(),
         env_str("OFFSET_RESET", "earliest"),
     )]);
+    // Fetch-size probe: `MAX_PARTITION_FETCH_BYTES` and `FETCH_MAX_BYTES` pass
+    // straight through to librdkafka. Unset leaves the client's defaults.
+    for (env, prop) in [
+        ("MAX_PARTITION_FETCH_BYTES", "max.partition.fetch.bytes"),
+        ("FETCH_MAX_BYTES", "fetch.max.bytes"),
+    ] {
+        if let Ok(v) = std::env::var(env) {
+            cfg.rdkafka.insert(prop.to_owned(), v);
+        }
+    }
     spate_kafka::KafkaSource::new(cfg)
 }
 

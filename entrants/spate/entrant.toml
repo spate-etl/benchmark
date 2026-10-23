@@ -116,3 +116,24 @@ env      = { FORMAT = "native" }
 # regardless of `max_rows`.
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
+
+# Fetch-size probe, not for publication: the same arm with librdkafka's
+# per-partition fetch cap raised to 4 MiB and the per-response cap to 128 MiB.
+[[variants]]
+id       = "fetch4m"
+label    = "Spate · Native · fetch 4MiB"
+approach = "realistic"
+env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+# Fetch-size probe, not for publication: 16 MiB per partition and 512 MiB per
+# response. The client's prefetch queue is capped at 64 MiB, so this one may
+# hit that cap; the probe reports it either way.
+[[variants]]
+id       = "fetch16m"
+label    = "Spate · Native · fetch 16MiB"
+approach = "realistic"
+env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "16777216", FETCH_MAX_BYTES = "536870912" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
