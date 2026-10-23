@@ -103,8 +103,11 @@ payload() {
   fi
 
   if [ "$MODE" = ceiling-bootstrap ]; then
-    run_step ceiling-measure "$bench" ceiling --measure --write --env "$ENV_ID"
-    aws s3 cp "environments/ceilings/$ENV_ID.json" "$S3_RUN/ceilings/$ENV_ID.json"
+    # Fetch-stream probe, not a ceiling record: the same consume measure at
+    # one, four and eight threads, printed only (no --write).
+    for t in 1 4 8; do
+      run_step "ceiling-measure-t$t" "$bench" ceiling --measure --threads "$t" --env "$ENV_ID"
+    done
   else
     # The gate check first, separately: exit 3 is REFUSED, and a refusal
     # message in the log beats discovering it per-arm mid-sweep.
