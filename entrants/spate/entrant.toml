@@ -116,39 +116,3 @@ env      = { FORMAT = "native" }
 # regardless of `max_rows`.
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
-
-# The arm to read against Flink, which writes the same wire format: ClickHouse's
-# official Flink connector can only write RowBinaryWithNamesAndTypes because the
-# Java client has no Native writer (clickhouse-java#2509). The framework's
-# `rowbinary` setting sends RowBinaryWithNamesAndTypes, with the column names and
-# types the sink fetched from the server as the header.
-#
-# Diagnosis variant: identical to `native` except `backpressure.min_pause` is
-# 5 ms instead of 500 ms. Not for publication.
-[[variants]]
-id       = "native-minpause5"
-label    = "Spate · Native · min_pause 5ms"
-approach = "realistic"
-env      = { FORMAT = "native", MIN_PAUSE_MS = "5" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
-reports  = { wire_format = "native" }
-
-# The Native variant with the insert body compressed by zstd at level 3, the
-# level `compression: zstd` selects. Everything else matches `native`, so the
-# pair isolates the codec.
-[[variants]]
-id       = "native-zstd"
-label    = "Spate · Native · zstd"
-approach = "realistic"
-env      = { FORMAT = "native" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:3", io_threads = 2 }
-reports  = { wire_format = "native" }
-
-# zstd at level 1, the cheapest level the sink accepts.
-[[variants]]
-id       = "native-zstd1"
-label    = "Spate · Native · zstd:1"
-approach = "realistic"
-env      = { FORMAT = "native" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "zstd:1", io_threads = 2 }
-reports  = { wire_format = "native" }

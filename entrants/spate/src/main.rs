@@ -101,12 +101,18 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64, min_pause_ms:
 /// backpressure and queue series to stderr, so the run log carries them. The
 /// published figures still come from the driver's sampler and ClickHouse.
 fn metrics_tap() {
-    const NAMES: [&str; 5] = [
+    // Prefixes, not whole names: the Kafka series carry per-broker and
+    // per-partition labels, and the fetch path is what this run measures.
+    const PREFIXES: [&str; 9] = [
         "spate_backpressure_pause_events_total",
         "spate_backpressure_paused_seconds_total",
         "spate_queue_full_events_total",
         "spate_queue_depth",
         "spate_sink_inflight_batches",
+        "spate_kafka_",
+        "spate_partition_",
+        "spate_source_poll_duration_seconds_",
+        "spate_sink_permit_wait_duration_seconds_",
     ];
     std::thread::spawn(move || {
         loop {
@@ -121,7 +127,7 @@ fn metrics_tap() {
             let mut body = String::new();
             let _ = std::io::Read::read_to_string(&mut s, &mut body);
             for line in body.lines() {
-                if NAMES.iter().any(|n| line.starts_with(n)) {
+                if PREFIXES.iter().any(|n| line.starts_with(n)) {
                     eprintln!("metrics {line}");
                 }
             }
