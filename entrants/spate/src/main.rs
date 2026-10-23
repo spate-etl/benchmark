@@ -84,16 +84,49 @@ fn main() {
 /// Framework sections. The connector bodies are empty here and built separately
 /// below: `PipelineConfig` owns the framework knobs, and each connector parses
 /// its own `ComponentConfig`.
-fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineConfig {
+fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64, min_pause_ms: u64) -> PipelineConfig {
     PipelineConfig::from_str(&format!(
         "pipeline: {{ name: comparison, threads: {threads}, io_threads: {io_threads} }}\n\
          checkpoint: {{ interval: 5s, max_pending_batches: 8192 }}\n\
-         backpressure: {{ max_inflight_bytes: {budget_mib}MiB }}\n\
-         metrics: {{ exporter: none }}\n\
+         backpressure: {{ max_inflight_bytes: {budget_mib}MiB, min_pause: {min_pause_ms}ms }}\n\
+         metrics: {{ exporter: prometheus }}\n\
+         admin: {{ listen: 127.0.0.1:9090 }}\n\
          source: {{ kafka: {{}} }}\n\
          sink: {{ clickhouse: {{}} }}\n"
     ))
     .expect("pipeline config")
+}
+
+/// Polls the admin server's `/metrics` every five seconds and prints the
+/// backpressure and queue series to stderr, so the run log carries them. The
+/// published figures still come from the driver's sampler and ClickHouse.
+fn metrics_tap() {
+    const NAMES: [&str; 5] = [
+        "spate_backpressure_pause_events_total",
+        "spate_backpressure_paused_seconds_total",
+        "spate_queue_full_events_total",
+        "spate_queue_depth",
+        "spate_sink_inflight_batches",
+    ];
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:9090") else {
+                continue;
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            if std::io::Write::write_all(&mut s, b"GET /metrics HTTP/1.0\r\n\r\n").is_err() {
+                continue;
+            }
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut body);
+            for line in body.lines() {
+                if NAMES.iter().any(|n| line.starts_with(n)) {
+                    eprintln!("metrics {line}");
+                }
+            }
+        }
+    });
 }
 
 fn kafka_source() -> spate_kafka::KafkaSource {
@@ -210,8 +243,19 @@ fn run(format: Format) {
     };
     println!("egress={:?} budget={budget_mib}MiB", Egress::from_env());
 
-    let pipeline =
-        Pipeline::from_config(pipeline_config(threads, io_threads, budget_mib)).expect("pipeline");
+    // `MIN_PAUSE_MS` sets `backpressure.min_pause`. The default is the
+    // framework's 500 ms; the diagnosis variants override it.
+    let min_pause_ms = env_u64("MIN_PAUSE_MS", 500);
+    println!("min_pause={min_pause_ms}ms");
+    metrics_tap();
+
+    let pipeline = Pipeline::from_config(pipeline_config(
+        threads,
+        io_threads,
+        budget_mib,
+        min_pause_ms,
+    ))
+    .expect("pipeline");
 
     let avro = AvroDeserializerBuilder::from_settings(
         &AvroSettings {

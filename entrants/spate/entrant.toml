@@ -123,16 +123,15 @@ reports  = { wire_format = "native" }
 # `rowbinary` setting sends RowBinaryWithNamesAndTypes, with the column names and
 # types the sink fetched from the server as the header.
 #
-# Its batching differs from the Native variant's, so the pair separates "the
-# framework is faster" from "we chose a faster wire format" only once both
-# carry the same batch settings.
+# Diagnosis variant: identical to `native` except `backpressure.min_pause` is
+# 5 ms instead of 500 ms. Not for publication.
 [[variants]]
-id       = "rowbinary"
-label    = "Spate · RowBinary"
+id       = "native-minpause5"
+label    = "Spate · Native · min_pause 5ms"
 approach = "realistic"
-env      = { FORMAT = "rowbinary" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 500, max_rows = 262144, compression = "lz4", io_threads = 2 }
-reports  = { wire_format = "rowbinary_nt" }
+env      = { FORMAT = "native", MIN_PAUSE_MS = "5" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
 
 # The Native variant with the insert body compressed by zstd at level 3, the
 # level `compression: zstd` selects. Everything else matches `native`, so the
