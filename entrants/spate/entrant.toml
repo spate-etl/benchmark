@@ -117,8 +117,18 @@ env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "1" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
-# Broker probe, not for publication: the Native arm with the broker's
-# fetch_max_read_concurrency raised from 1 to 4 for the run.
+# Broker sweep, not for publication: the Native arm with the broker's
+# fetch_max_read_concurrency at 2.
+[[variants]]
+id       = "native-frc2"
+label    = "Spate · Native · broker read concurrency 2"
+approach = "realistic"
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "2" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+# Broker sweep, not for publication: the Native arm with the broker's
+# fetch_max_read_concurrency at 4.
 [[variants]]
 id       = "native-frc4"
 label    = "Spate · Native · broker read concurrency 4"
@@ -127,22 +137,22 @@ env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "4" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
-# Fetch-size probe, not for publication: 4 MiB per partition at the default
-# broker read concurrency.
+# Broker sweep, not for publication: the Native arm with the broker's
+# fetch_max_read_concurrency at 8.
 [[variants]]
-id       = "fetch4m"
-label    = "Spate · Native · fetch 4MiB"
+id       = "native-frc8"
+label    = "Spate · Native · broker read concurrency 8"
 approach = "realistic"
-env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728", FETCH_READ_CONCURRENCY = "1" }
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "8" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
-# Broker probe, not for publication: 4 MiB per partition with the broker's
-# fetch_max_read_concurrency at 4.
+# Broker sweep, not for publication: the Native arm with the broker's
+# fetch_max_read_concurrency at 16.
 [[variants]]
-id       = "fetch4m-frc4"
-label    = "Spate · Native · fetch 4MiB · broker read concurrency 4"
+id       = "native-frc16"
+label    = "Spate · Native · broker read concurrency 16"
 approach = "realistic"
-env      = { FORMAT = "native", MAX_PARTITION_FETCH_BYTES = "4194304", FETCH_MAX_BYTES = "134217728", FETCH_READ_CONCURRENCY = "4" }
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "16" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
