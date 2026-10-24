@@ -412,7 +412,9 @@ fn start_broker(
     // Cluster properties are set and then read back, as the cgroup caps are:
     // a value the broker did not take fails the run instead of being measured.
     for (key, value) in &b.cluster {
-        docker::docker(&["exec", BROKER, "rpk", "cluster", "config", "set", key, value]);
+        docker::docker(&[
+            "exec", BROKER, "rpk", "cluster", "config", "set", key, value,
+        ]);
         let got = docker::docker(&["exec", BROKER, "rpk", "cluster", "config", "get", key]);
         if got.trim() != value {
             return Err(format!(

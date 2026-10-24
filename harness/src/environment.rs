@@ -441,7 +441,11 @@ mod tests {
         let mut env =
             Environment::load(&dir, "c8gd-metal-24xl-ec2-docker").expect("committed profile");
         assert_eq!(
-            env.spec.infra.broker.cluster.get("fetch_max_read_concurrency"),
+            env.spec
+                .infra
+                .broker
+                .cluster
+                .get("fetch_max_read_concurrency"),
             Some(&"4".to_owned())
         );
         let with = env.infra_digest();
