@@ -13,6 +13,7 @@
 //! third, while every recorded number stayed silent about which had been in
 //! force. One source, applied and then read back from the running containers.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -211,6 +212,10 @@ pub struct Broker {
     pub cpus: String,
     pub memory: String,
     pub registry: String,
+    /// Redpanda cluster properties, set with `rpk` once the broker is up and
+    /// read back before any arm runs. Empty leaves the broker at its defaults.
+    #[serde(default)]
+    pub cluster: BTreeMap<String, String>,
 }
 
 /// The ingestion target.
@@ -345,19 +350,22 @@ impl Environment {
     #[must_use]
     pub fn infra_digest(&self) -> String {
         let i = &self.spec.infra;
-        short_digest(
-            format!(
-                "{}|{}|{}|{}|{}|{}|{}",
-                i.broker.kind.as_str(),
-                i.broker.cpus,
-                i.broker.memory,
-                i.clickhouse.cpus,
-                i.clickhouse.memory,
-                i.partitions,
-                i.storage.kind.as_str()
-            )
-            .as_bytes(),
-        )
+        let mut digest = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            i.broker.kind.as_str(),
+            i.broker.cpus,
+            i.broker.memory,
+            i.clickhouse.cpus,
+            i.clickhouse.memory,
+            i.partitions,
+            i.storage.kind.as_str()
+        );
+        // Cluster properties change what a ceiling measures, so a profile that
+        // sets any moves the digest. An empty map leaves it as it was.
+        for (key, value) in &i.broker.cluster {
+            digest.push_str(&format!("|{key}={value}"));
+        }
+        short_digest(digest.as_bytes())
     }
 
     /// Whether results from here may be published.
@@ -424,6 +432,27 @@ fn short_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The committed profile sets a broker cluster property, so its digest must
+    /// differ from the same profile without it: a ceiling measured before the
+    /// property was set must not gate runs made after.
+    #[test]
+    fn a_cluster_property_moves_the_digest() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../environments");
+        let mut env =
+            Environment::load(&dir, "c8gd-metal-24xl-ec2-docker").expect("committed profile");
+        assert_eq!(
+            env.spec
+                .infra
+                .broker
+                .cluster
+                .get("fetch_max_read_concurrency"),
+            Some(&"4".to_owned())
+        );
+        let with = env.infra_digest();
+        env.spec.infra.broker.cluster.clear();
+        assert_ne!(with, env.infra_digest());
+    }
+
     #[test]
     fn the_digest_is_stable_and_short() {
         let a = short_digest(b"hello");
@@ -473,6 +502,7 @@ mod tests {
                 cpus: "3".to_owned(),
                 memory: "8g".to_owned(),
                 registry: "redpanda-builtin".to_owned(),
+                cluster: BTreeMap::new(),
             },
             clickhouse: ClickHouse {
                 image: "clickhouse/clickhouse-server:26.3".to_owned(),

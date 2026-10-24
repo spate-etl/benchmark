@@ -57,6 +57,10 @@ image    = "redpandadata/redpanda:v26.1.13"
 cpus     = "3"
 memory   = "8g"
 registry = "redpanda-builtin"
+# Consume read concurrency per shard. The default of 1 reads one partition at a
+# time, which caps a fetch at the sum of its partition reads. 4 measured about
+# 13% above the default on the native arm, and 8 and 16 added nothing past it.
+cluster  = { fetch_max_read_concurrency = "4" }
 
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.3.33.24@sha256:810861a2e2d0188744f5f23b2d3ec9ff95812bcb9ddbb8fed13a377a7f305893"
