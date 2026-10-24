@@ -20,8 +20,11 @@ fn environments_dir() -> PathBuf {
 }
 
 /// The digest every record under `results/c8gd-metal-24xl-ec2-docker/` carries
-/// and every ceiling in that environment's file was measured under.
-const PUBLISHED_DIGEST: &str = "6c8fc2dcbfeb";
+/// and every ceiling in that environment's file was measured under. It moved
+/// from `6c8fc2dcbfeb` when the profile began setting the broker's
+/// `fetch_max_read_concurrency` to 4. Ceilings measured under the old digest no
+/// longer gate runs, and they need re-measuring under this one.
+const PUBLISHED_DIGEST: &str = "b9eb95d14ca9";
 const PUBLISHED_ENV: &str = "c8gd-metal-24xl-ec2-docker";
 
 #[test]
