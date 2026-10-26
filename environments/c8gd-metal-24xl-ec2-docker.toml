@@ -63,7 +63,7 @@ registry = "redpanda-builtin"
 cluster  = { fetch_max_read_concurrency = "4" }
 
 [infra.clickhouse]
-image  = "clickhouse/clickhouse-server:26.3.33.24@sha256:810861a2e2d0188744f5f23b2d3ec9ff95812bcb9ddbb8fed13a377a7f305893"
+image  = "clickhouse/clickhouse-server:26.8.25.14@sha256:dd81097e2c38827a438287d8ae5d4dc8afafbdd0e61e83376fdd7ed4580673b9"
 cpus   = "32"
 memory = "32g"
 
