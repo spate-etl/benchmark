@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Host-side diagnostics for a tuning run. Nothing here feeds a published figure.
+"""Host-side diagnostics for a tuning run.
 
 Runs on the box beside `bench run --trigger tuning` and writes one directory of
-evidence for locating whatever bounds an arm's drain:
+evidence for locating whatever bounds an arm's drain. Its ClickHouse polls add
+to the server-wide network counters the harness records as
+`ch_network_receive_bytes`, so run-bench.sh starts it only for a tuning run,
+whose records are never published.
 
   events.jsonl     container starts and stops, so each repetition's window can be
                    cut out of every other stream by timestamp.
   cgroup.jsonl     every bench container's cgroup v2 counters, each second: CPU,
                    throttling, pressure, memory and per-device I/O.
   threads.jsonl    per-thread CPU and run-queue wait from /proc/<tid>/schedstat,
-                   grouped by thread name, each second. Redpanda names a reactor
-                   per shard and librdkafka a thread per broker connection, so a
-                   single saturated thread shows here while its cgroup does not.
+                   grouped by thread name, each second. Redpanda runs one reactor
+                   thread per shard (shard 0 on the main thread, `redpanda`) and
+                   librdkafka a thread per broker connection, so a single
+                   saturated thread shows here while its cgroup does not.
   host.jsonl       per-CPU /proc/stat, softirqs, NVMe diskstats, interface
                    counters and host pressure, each second. Bridge networking is
                    softirq work charged to no container.
@@ -20,11 +24,12 @@ evidence for locating whatever bounds an arm's drain:
                    seconds, so per-shard reactor, I/O queue, batch cache and
                    fetch series need no name guessed in advance.
   admin.jsonl      Redpanda's partition-to-shard placement and fetch
-                   configuration, read when the broker starts and shortly after
+                   configuration, read when the collector first sees a broker
+                   (on the box, the one prefill left running) and shortly after
                    each arm starts. Placement comes from the shard label on the
-                   per-partition metrics: the admin API's `core` field reads 0
-                   for every partition on a broker whose metrics spread them
-                   over all shards.
+                   per-partition metrics: `replicas[].core` from
+                   /v1/partitions/kafka/<topic> reads 0 for every partition on a
+                   broker whose metrics spread them over all shards.
   logs/            every arm container's stdout and stderr, streamed with
                    timestamps. The harness discards them when a repetition
                    succeeds.
@@ -58,7 +63,7 @@ CH_AUTH = "Basic " + base64.b64encode(b"default:bench").decode()
 TOPIC = "comparison-sensor-batches"
 
 CH_METRICS = (
-    "Query", "InsertQuery", "HTTPConnection", "TCPConnection",
+    "Query", "QueryNonInternal", "HTTPConnection", "TCPConnection",
     "BackgroundMergesAndMutationsPoolTask", "PartsActive", "DelayedInserts",
 )
 CH_EVENTS = (
@@ -123,7 +128,10 @@ def pressure(text):
 
 def docker(*args, timeout=10):
     r = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
-    return r.stdout.strip() if r.returncode == 0 else None
+    if r.returncode != 0:
+        print(f"diag: docker {args[0]} exited {r.returncode}: {r.stderr.strip()[:300]}", file=sys.stderr, flush=True)
+        return None
+    return r.stdout.strip()
 
 
 def cgroup_dir(cid):
@@ -134,8 +142,19 @@ def cgroup_dir(cid):
 
 
 def http_get(url, timeout=4.0):
+    """GET `url`, giving up once `timeout` seconds have passed in total.
+
+    urllib's timeout bounds each socket operation, so a server that trickles a
+    body would otherwise hold the call open indefinitely.
+    """
+    deadline = time.monotonic() + timeout
+    chunks = []
     with urllib.request.urlopen(url, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+        while chunk := r.read(65536):
+            chunks.append(chunk)
+            if time.monotonic() > deadline or STOP.is_set():
+                raise TimeoutError(f"{url}: body not complete within {timeout}s")
+    return b"".join(chunks).decode("utf-8", "replace")
 
 
 def every(seconds, fn):
@@ -148,7 +167,9 @@ def every(seconds, fn):
                 fn()
             except Exception as e:  # noqa: BLE001 - a diagnostic stream must outlive one bad read
                 print(f"diag: {fn.__name__}: {e!r}", file=sys.stderr, flush=True)
-            next_t += seconds
+            # A tick that overran its slot reschedules from now, so a stall is
+            # not followed by a burst of the ticks it missed.
+            next_t = max(next_t + seconds, time.monotonic())
             STOP.wait(max(0.0, next_t - time.monotonic()))
 
     t = threading.Thread(target=loop, name=fn.__name__, daemon=True)
@@ -161,6 +182,15 @@ def every(seconds, fn):
 EVENTS = None
 ADMIN = None
 LOG_PROCS = []
+TIMERS = []
+
+
+def later(delay, fn, *args):
+    """Run `fn` after `delay` seconds on a daemon timer that shutdown cancels."""
+    t = threading.Timer(delay, fn, args)
+    t.daemon = True
+    TIMERS.append(t)
+    t.start()
 
 
 def admin_snapshot(reason):
@@ -207,7 +237,18 @@ def watch():
         known = dict(CONTAINERS)
     for name, cid in seen.items():
         if name in known and known[name]["id"] == cid:
+            # A failed inspect or a cgroup not yet created is retried on the
+            # next poll rather than left empty for the container's lifetime.
+            if known[name]["ip"] is None or known[name]["cg"] is None:
+                ip = docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name)
+                with LOCK:
+                    if name in CONTAINERS:
+                        CONTAINERS[name]["ip"] = (ip or "").split()[0] if ip else None
+                        CONTAINERS[name]["cg"] = cgroup_dir(cid)
             continue
+        if name in known:
+            # Removed and recreated under the same name between two polls.
+            EVENTS.write({"t": now_ms(), "event": "stop", "name": name, "id": known[name]["id"]})
         ip = docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name)
         info = {"id": cid, "cg": cgroup_dir(cid), "ip": (ip or "").split()[0] if ip else None}
         with LOCK:
@@ -215,7 +256,7 @@ def watch():
         t = now_ms()
         EVENTS.write({"t": t, "event": "start", "name": name, "id": cid, "cg": info["cg"], "ip": info["ip"]})
         if name == BROKER:
-            threading.Timer(5, admin_snapshot, ("broker_start",)).start()
+            later(5, admin_snapshot, "broker_seen")
         elif name not in INFRA and "sampler" not in name:
             path = os.path.join(OUT, "logs", f"{name}.{t}.log")
             fh = open(path, "w")
@@ -225,7 +266,7 @@ def watch():
             ))
             # The arm sets the broker's read concurrency as it starts, so the
             # read-back waits for that to have happened.
-            threading.Timer(15, admin_snapshot, (f"arm_start:{name}",)).start()
+            later(15, admin_snapshot, f"arm_start:{name}")
 
     for name in known:
         if name not in seen:
@@ -382,7 +423,7 @@ def sample_clickhouse():
     out = {"t": t}
     try:
         out["rows"] = int(ch_query("SELECT count() FROM default.sensor_events").strip())
-    except Exception as e:  # noqa: BLE001 - the table is absent between repetitions
+    except Exception as e:  # noqa: BLE001 - a failed count is recorded, the sample still written
         out["rows_error"] = repr(e)[:200]
     names = ", ".join(f"'{m}'" for m in CH_METRICS)
     events = ", ".join(f"'{m}'" for m in CH_EVENTS)
@@ -390,7 +431,9 @@ def sample_clickhouse():
         body = ch_query(
             f"SELECT 'm', metric, toInt64(value) FROM system.metrics WHERE metric IN ({names}) "
             f"UNION ALL SELECT 'e', event, toInt64(value) FROM system.events WHERE event IN ({events}) "
-            "FORMAT TSV"
+            # Without it a counter still at zero has no row, which reads the
+            # same as one that was never collected.
+            "SETTINGS system_events_show_zero_values = 1 FORMAT TSV"
         )
         out["metrics"], out["events"] = {}, {}
         for line in body.splitlines():
@@ -451,7 +494,6 @@ def main():
         "lsblk": subprocess.run(["lsblk", "-rno", "NAME,MAJ:MIN,MOUNTPOINT"], capture_output=True, text=True).stdout,
     })
 
-    watch()
     threads = [
         every(1.0, watch),
         every(1.0, sample_cgroups),
@@ -461,6 +503,8 @@ def main():
         every(5.0, scrape_redpanda),
     ]
     STOP.wait()
+    for t in TIMERS:
+        t.cancel()
     for t in threads:
         t.join(timeout=5)
     for p in LOG_PROCS:

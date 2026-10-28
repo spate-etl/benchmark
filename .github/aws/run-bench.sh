@@ -43,9 +43,11 @@ run_step() { # name cmd...
 # Host-side diagnostics for the arm runs (.github/aws/diag.py). Its output
 # ships as logs/diag.tar.gz. diag_ship is safe to call twice: the payload ships
 # after the run step, and the outer shell ships again only if the payload died
-# before that.
+# before that. Tuning runs only: the collector's ClickHouse polls reach a
+# figure the harness records.
 DIAG=/tmp/diag
 diag_start() {
+  [ "$TRIGGER" = tuning ] || return 0
   mkdir -p "$DIAG"
   # Every descriptor redirected: a background child holding the payload's
   # stdout would keep the `tee` below open after the payload exits.
@@ -59,6 +61,8 @@ diag_ship() {
   rm -f "$DIAG/collector.pid"
   kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  # The archive must not be cut while the collector still writes.
+  kill -KILL "$pid" 2>/dev/null || true
   # A `--trigger tuning` run writes its records under tuning/, which the
   # results upload does not read.
   if [ -d "$REPO/tuning" ]; then cp -r "$REPO/tuning" "$DIAG/tuning"; fi
@@ -138,7 +142,8 @@ payload() {
     diag_start
     run_step run "$bench" run "${sel[@]}" --reps "$REPS" \
       --env "$ENV_ID" --trigger "$TRIGGER"
-    diag_ship
+    # A diagnostics failure must not cost the run its results upload.
+    diag_ship || echo "diag ship failed"
 
     # Upload only the APPENDED lines of each results file. `bench run` only
     # ever appends — no code path truncates a results file — so everything past
