@@ -24,6 +24,11 @@ set -euo pipefail
 # here in a second, not a minute into the payload where rustup's env needs it.
 : "${HOME:?}"
 
+# candidate/broker-diag only: every run records as a tuning run, whatever
+# trigger was dispatched. The launcher offers no tuning trigger, and these runs
+# exist to feed the diagnostics collector, which runs only for tuning.
+export TRIGGER=tuning
+
 export PATH="$PATH:/snap/bin"
 
 # Exported because the payload runs in a child shell under `timeout`.
@@ -40,7 +45,60 @@ run_step() { # name cmd...
   echo "=== step: $name ok (${SECONDS}s total, $((SECONDS - t0))s step) ==="
 }
 
+# Host-side diagnostics for the arm runs (.github/aws/diag.py). Its output
+# ships as logs/diag.tar.gz. diag_ship is safe to call twice: the payload ships
+# after the run step, and the outer shell ships again only if the payload died
+# before that. Tuning runs only: the collector's ClickHouse polls reach a
+# figure the harness records.
+DIAG=/tmp/diag
+# One PUT per object. `aws s3 cp` switches to a multipart upload above 8 MB,
+# and on this bucket's KMS key that needs kms:Decrypt, which the instance role
+# does not hold. A single PutObject needs only kms:GenerateDataKey.
+diag_put() { # local-file key-under-the-run-prefix
+  local b=${S3_RUN#s3://}
+  aws s3api put-object --bucket "${b%%/*}" --key "${b#*/}/$2" --body "$1" >/dev/null
+}
+# Proves diag_put works for a file over the multipart threshold before the box
+# spends its time on the build and the run.
+diag_check_upload() {
+  [ "$TRIGGER" = tuning ] || return 0
+  head -c 16777216 /dev/urandom > /tmp/upload-check.bin
+  diag_put /tmp/upload-check.bin logs/upload-check.bin
+  echo "diag: a 16 MiB single-PUT upload succeeded"
+}
+diag_start() {
+  [ "$TRIGGER" = tuning ] || return 0
+  mkdir -p "$DIAG"
+  # Every descriptor redirected: a background child holding the payload's
+  # stdout would keep the `tee` below open after the payload exits.
+  python3 "$REPO/.github/aws/diag.py" "$DIAG" </dev/null >>"$DIAG/collector.err" 2>&1 &
+  echo $! > "$DIAG/collector.pid"
+}
+diag_ship() {
+  [ -f "$DIAG/collector.pid" ] || return 0
+  local pid
+  pid=$(cat "$DIAG/collector.pid")
+  rm -f "$DIAG/collector.pid"
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  # The archive must not be cut while the collector still writes.
+  kill -KILL "$pid" 2>/dev/null || true
+  # A `--trigger tuning` run writes its records under tuning/, which the
+  # results upload does not read. They go up on their own first, so a failed
+  # archive upload cannot take them with it.
+  if [ -d "$REPO/tuning" ]; then
+    cp -r "$REPO/tuning" "$DIAG/tuning"
+    (cd "$REPO" && find tuning -type f -name '*.jsonl') | while read -r f; do
+      diag_put "$REPO/$f" "logs/$f" || echo "diag upload of $f refused"
+    done
+  fi
+  wc -l "$DIAG"/*.jsonl || true
+  tar -C "$(dirname "$DIAG")" -czf /tmp/diag.tar.gz "$(basename "$DIAG")"
+  diag_put /tmp/diag.tar.gz logs/diag.tar.gz || echo "diag upload refused"
+}
+
 payload() {
+  run_step diag-check-upload diag_check_upload
   # Docker CE from Docker's own apt repo — the Ubuntu archive's docker.io can
   # lag on cgroup and buildx behaviour the harness depends on.
   run_step install-docker bash -c '
@@ -109,8 +167,20 @@ payload() {
     # The gate check first, separately: exit 3 is REFUSED, and a refusal
     # message in the log beats discovering it per-arm mid-sweep.
     run_step ceiling-gate "$bench" ceiling --env "$ENV_ID"
+    # candidate/broker-diag only: the same sweep runs first with the collector
+    # off, so its cost on this box and corpus is measured. Records of the two
+    # passes differ by `invocation_id`; the first is the collector-off pass.
+    if [ "$TRIGGER" = tuning ]; then
+      echo "diag: collector-off pass starts at $(date +%s%3N)"
+      run_step run-collector-off "$bench" run "${sel[@]}" --reps "$REPS" \
+        --env "$ENV_ID" --trigger "$TRIGGER"
+      echo "diag: collector-on pass starts at $(date +%s%3N)"
+    fi
+    diag_start
     run_step run "$bench" run "${sel[@]}" --reps "$REPS" \
       --env "$ENV_ID" --trigger "$TRIGGER"
+    # A diagnostics failure must not cost the run its results upload.
+    diag_ship || echo "diag ship failed"
 
     # Upload only the APPENDED lines of each results file. `bench run` only
     # ever appends — no code path truncates a results file — so everything past
@@ -143,7 +213,8 @@ payload() {
 }
 
 overall_rc=0
-export -f payload run_step
+export DIAG
+export -f payload run_step diag_put diag_check_upload diag_start diag_ship
 # `bash -c` starts a fresh shell that does NOT inherit this script's `set -euo
 # pipefail`, and shell options are not carried across the process boundary by
 # `export -f`. Re-arm them inside the child before calling payload, so a failed
@@ -154,6 +225,7 @@ export -f payload run_step
 timeout --signal=TERM --kill-after=5m "$(( (TTL_HOURS - 2) * 3600 ))s" \
   bash -c 'set -euo pipefail; payload' 2>&1 | tee -a "$LOG" || overall_rc=$?
 
+diag_ship || true
 aws s3 cp "$LOG" "$S3_RUN/logs/bench-run.log" || true
 
 if [ "$overall_rc" -eq 0 ]; then
