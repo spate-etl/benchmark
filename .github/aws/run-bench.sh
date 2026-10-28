@@ -167,6 +167,15 @@ payload() {
     # The gate check first, separately: exit 3 is REFUSED, and a refusal
     # message in the log beats discovering it per-arm mid-sweep.
     run_step ceiling-gate "$bench" ceiling --env "$ENV_ID"
+    # candidate/broker-diag only: the same sweep runs first with the collector
+    # off, so its cost on this box and corpus is measured. Records of the two
+    # passes differ by `invocation_id`; the first is the collector-off pass.
+    if [ "$TRIGGER" = tuning ]; then
+      echo "diag: collector-off pass starts at $(date +%s%3N)"
+      run_step run-collector-off "$bench" run "${sel[@]}" --reps "$REPS" \
+        --env "$ENV_ID" --trigger "$TRIGGER"
+      echo "diag: collector-on pass starts at $(date +%s%3N)"
+    fi
     diag_start
     run_step run "$bench" run "${sel[@]}" --reps "$REPS" \
       --env "$ENV_ID" --trigger "$TRIGGER"
