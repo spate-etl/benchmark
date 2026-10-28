@@ -118,32 +118,12 @@ knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows
 reports  = { wire_format = "native" }
 
 # Broker sweep, not for publication: the Native arm with the broker's
-# fetch_max_read_concurrency at 2.
-[[variants]]
-id       = "native-frc2"
-label    = "Spate · Native · broker read concurrency 2"
-approach = "realistic"
-env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "2" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
-reports  = { wire_format = "native" }
-
-# Broker sweep, not for publication: the Native arm with the broker's
 # fetch_max_read_concurrency at 4.
 [[variants]]
 id       = "native-frc4"
 label    = "Spate · Native · broker read concurrency 4"
 approach = "realistic"
 env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "4" }
-knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
-reports  = { wire_format = "native" }
-
-# Broker sweep, not for publication: the Native arm with the broker's
-# fetch_max_read_concurrency at 8.
-[[variants]]
-id       = "native-frc8"
-label    = "Spate · Native · broker read concurrency 8"
-approach = "realistic"
-env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "8" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 

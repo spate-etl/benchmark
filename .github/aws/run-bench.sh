@@ -40,6 +40,32 @@ run_step() { # name cmd...
   echo "=== step: $name ok (${SECONDS}s total, $((SECONDS - t0))s step) ==="
 }
 
+# Host-side diagnostics for the arm runs (.github/aws/diag.py). Its output
+# ships as logs/diag.tar.gz. diag_ship is safe to call twice: the payload ships
+# after the run step, and the outer shell ships again only if the payload died
+# before that.
+DIAG=/tmp/diag
+diag_start() {
+  mkdir -p "$DIAG"
+  # Every descriptor redirected: a background child holding the payload's
+  # stdout would keep the `tee` below open after the payload exits.
+  python3 "$REPO/.github/aws/diag.py" "$DIAG" </dev/null >>"$DIAG/collector.err" 2>&1 &
+  echo $! > "$DIAG/collector.pid"
+}
+diag_ship() {
+  [ -f "$DIAG/collector.pid" ] || return 0
+  local pid
+  pid=$(cat "$DIAG/collector.pid")
+  rm -f "$DIAG/collector.pid"
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  # A `--trigger tuning` run writes its records under tuning/, which the
+  # results upload does not read.
+  if [ -d "$REPO/tuning" ]; then cp -r "$REPO/tuning" "$DIAG/tuning"; fi
+  tar -C "$(dirname "$DIAG")" -czf /tmp/diag.tar.gz "$(basename "$DIAG")"
+  aws s3 cp /tmp/diag.tar.gz "$S3_RUN/logs/diag.tar.gz" || echo "diag upload refused"
+}
+
 payload() {
   # Docker CE from Docker's own apt repo — the Ubuntu archive's docker.io can
   # lag on cgroup and buildx behaviour the harness depends on.
@@ -109,8 +135,10 @@ payload() {
     # The gate check first, separately: exit 3 is REFUSED, and a refusal
     # message in the log beats discovering it per-arm mid-sweep.
     run_step ceiling-gate "$bench" ceiling --env "$ENV_ID"
+    diag_start
     run_step run "$bench" run "${sel[@]}" --reps "$REPS" \
       --env "$ENV_ID" --trigger "$TRIGGER"
+    diag_ship
 
     # Upload only the APPENDED lines of each results file. `bench run` only
     # ever appends — no code path truncates a results file — so everything past
@@ -143,7 +171,8 @@ payload() {
 }
 
 overall_rc=0
-export -f payload run_step
+export DIAG
+export -f payload run_step diag_start diag_ship
 # `bash -c` starts a fresh shell that does NOT inherit this script's `set -euo
 # pipefail`, and shell options are not carried across the process boundary by
 # `export -f`. Re-arm them inside the child before calling payload, so a failed
@@ -154,6 +183,7 @@ export -f payload run_step
 timeout --signal=TERM --kill-after=5m "$(( (TTL_HOURS - 2) * 3600 ))s" \
   bash -c 'set -euo pipefail; payload' 2>&1 | tee -a "$LOG" || overall_rc=$?
 
+diag_ship || true
 aws s3 cp "$LOG" "$S3_RUN/logs/bench-run.log" || true
 
 if [ "$overall_rc" -eq 0 ]; then
