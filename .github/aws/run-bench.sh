@@ -24,6 +24,11 @@ set -euo pipefail
 # here in a second, not a minute into the payload where rustup's env needs it.
 : "${HOME:?}"
 
+# candidate/broker-diag only: every run records as a tuning run, whatever
+# trigger was dispatched. The launcher offers no tuning trigger, and these runs
+# exist to feed the diagnostics collector, which runs only for tuning.
+export TRIGGER=tuning
+
 export PATH="$PATH:/snap/bin"
 
 # Exported because the payload runs in a child shell under `timeout`.
