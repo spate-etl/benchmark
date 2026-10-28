@@ -84,7 +84,12 @@ fn main() {
 /// Framework sections. The connector bodies are empty here and built separately
 /// below: `PipelineConfig` owns the framework knobs, and each connector parses
 /// its own `ComponentConfig`.
-fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64, min_pause_ms: u64) -> PipelineConfig {
+fn pipeline_config(
+    threads: u64,
+    io_threads: u64,
+    budget_mib: u64,
+    min_pause_ms: u64,
+) -> PipelineConfig {
     PipelineConfig::from_str(&format!(
         "pipeline: {{ name: comparison, threads: {threads}, io_threads: {io_threads} }}\n\
          checkpoint: {{ interval: 5s, max_pending_batches: 8192 }}\n\
