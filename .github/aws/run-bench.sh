@@ -51,6 +51,21 @@ run_step() { # name cmd...
 # before that. Tuning runs only: the collector's ClickHouse polls reach a
 # figure the harness records.
 DIAG=/tmp/diag
+# One PUT per object. `aws s3 cp` switches to a multipart upload above 8 MB,
+# and on this bucket's KMS key that needs kms:Decrypt, which the instance role
+# does not hold. A single PutObject needs only kms:GenerateDataKey.
+diag_put() { # local-file key-under-the-run-prefix
+  local b=${S3_RUN#s3://}
+  aws s3api put-object --bucket "${b%%/*}" --key "${b#*/}/$2" --body "$1" >/dev/null
+}
+# Proves diag_put works for a file over the multipart threshold before the box
+# spends its time on the build and the run.
+diag_check_upload() {
+  [ "$TRIGGER" = tuning ] || return 0
+  head -c 16777216 /dev/urandom > /tmp/upload-check.bin
+  diag_put /tmp/upload-check.bin logs/upload-check.bin
+  echo "diag: a 16 MiB single-PUT upload succeeded"
+}
 diag_start() {
   [ "$TRIGGER" = tuning ] || return 0
   mkdir -p "$DIAG"
@@ -69,13 +84,21 @@ diag_ship() {
   # The archive must not be cut while the collector still writes.
   kill -KILL "$pid" 2>/dev/null || true
   # A `--trigger tuning` run writes its records under tuning/, which the
-  # results upload does not read.
-  if [ -d "$REPO/tuning" ]; then cp -r "$REPO/tuning" "$DIAG/tuning"; fi
+  # results upload does not read. They go up on their own first, so a failed
+  # archive upload cannot take them with it.
+  if [ -d "$REPO/tuning" ]; then
+    cp -r "$REPO/tuning" "$DIAG/tuning"
+    (cd "$REPO" && find tuning -type f -name '*.jsonl') | while read -r f; do
+      diag_put "$REPO/$f" "logs/$f" || echo "diag upload of $f refused"
+    done
+  fi
+  wc -l "$DIAG"/*.jsonl || true
   tar -C "$(dirname "$DIAG")" -czf /tmp/diag.tar.gz "$(basename "$DIAG")"
-  aws s3 cp /tmp/diag.tar.gz "$S3_RUN/logs/diag.tar.gz" || echo "diag upload refused"
+  diag_put /tmp/diag.tar.gz logs/diag.tar.gz || echo "diag upload refused"
 }
 
 payload() {
+  run_step diag-check-upload diag_check_upload
   # Docker CE from Docker's own apt repo — the Ubuntu archive's docker.io can
   # lag on cgroup and buildx behaviour the harness depends on.
   run_step install-docker bash -c '
@@ -182,7 +205,7 @@ payload() {
 
 overall_rc=0
 export DIAG
-export -f payload run_step diag_start diag_ship
+export -f payload run_step diag_put diag_check_upload diag_start diag_ship
 # `bash -c` starts a fresh shell that does NOT inherit this script's `set -euo
 # pipefail`, and shell options are not carried across the process boundary by
 # `export -f`. Re-arm them inside the child before calling payload, so a failed
