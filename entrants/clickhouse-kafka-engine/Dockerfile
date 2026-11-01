@@ -17,12 +17,12 @@
 # custom code anywhere in this arm.
 #
 # The base is the SAME major as the shared storage server
-# (environments/*.toml runs clickhouse/clickhouse-server:26.3): one ClickHouse
+# (environments/*.toml runs clickhouse/clickhouse-server:26.8): one ClickHouse
 # version in the provenance, and the consumer is not tuned on a newer codebase
 # than its own storage tier. Digest-pinned so a re-pushed tag cannot silently
 # move what a published number ran on; [version].pinned in entrant.toml
 # additionally asserts the version string the image reports.
-FROM clickhouse/clickhouse-server:26.3@sha256:85c434814ac8905e5648027ce926f74ab067edd6aadbccb6c0c165cd3571ea49
+FROM clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
 
 # config.d and users.d are merged over the shipped config by ClickHouse's own
 # preprocessor; initdb runs once against a fresh data directory, which every

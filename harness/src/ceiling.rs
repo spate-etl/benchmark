@@ -281,7 +281,7 @@
 //! and the null pattern — and a measurement whose rows the oracle rejects is
 //! refused rather than recorded. Before that,
 //! `harness/tests/native_encoder_matches_clickhouse.rs` runs the same chain
-//! against a fresh `clickhouse/clickhouse-server:26.3` under the committed
+//! against a fresh `clickhouse/clickhouse-server:26.8.36.3` under the committed
 //! DDL, with RowBinary as a control so a failure there indicts the test rig
 //! rather than the encoder. That test needs a Docker daemon and is
 //! `#[ignore]`d; it is the pre-merge proof that a format may be claimed at
