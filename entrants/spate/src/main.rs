@@ -120,19 +120,9 @@ fn set_broker_property(key: &str, value: &str) {
 }
 
 /// Tuning branch only: polls the admin server's `/metrics` every five seconds
-/// and prints the backpressure, queue, poll and permit series to stderr, so the
-/// collector's arm log carries them.
+/// and prints every `spate_*` series to stderr, so the collector's arm log
+/// carries them. Histogram buckets are skipped; `_sum` and `_count` remain.
 fn metrics_tap() {
-    const PREFIXES: [&str; 8] = [
-        "spate_backpressure_pause_events_total",
-        "spate_backpressure_paused_seconds_total",
-        "spate_queue_full_events_total",
-        "spate_queue_depth",
-        "spate_sink_inflight_batches",
-        "spate_source_poll_duration_seconds_",
-        "spate_sink_permit_wait_duration_seconds_",
-        "spate_sink_",
-    ];
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(5));
@@ -146,7 +136,7 @@ fn metrics_tap() {
             let mut body = String::new();
             let _ = std::io::Read::read_to_string(&mut s, &mut body);
             for line in body.lines() {
-                if PREFIXES.iter().any(|n| line.starts_with(n)) {
+                if line.starts_with("spate_") && !line.contains("_bucket{") {
                     eprintln!("metrics {line}");
                 }
             }
