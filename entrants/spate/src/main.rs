@@ -89,7 +89,8 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
         "pipeline: {{ name: comparison, threads: {threads}, io_threads: {io_threads} }}\n\
          checkpoint: {{ interval: 5s, max_pending_batches: 8192 }}\n\
          backpressure: {{ max_inflight_bytes: {budget_mib}MiB }}\n\
-         metrics: {{ exporter: none }}\n\
+         metrics: {{ exporter: prometheus }}\n\
+         admin: {{ listen: 127.0.0.1:9090 }}\n\
          source: {{ kafka: {{}} }}\n\
          sink: {{ clickhouse: {{}} }}\n"
     ))
@@ -116,6 +117,41 @@ fn set_broker_property(key: &str, value: &str) {
         }
         Err(e) => eprintln!("broker {key}={value}: connect failed: {e}"),
     }
+}
+
+/// Tuning branch only: polls the admin server's `/metrics` every five seconds
+/// and prints the backpressure, queue, poll and permit series to stderr, so the
+/// collector's arm log carries them.
+fn metrics_tap() {
+    const PREFIXES: [&str; 8] = [
+        "spate_backpressure_pause_events_total",
+        "spate_backpressure_paused_seconds_total",
+        "spate_queue_full_events_total",
+        "spate_queue_depth",
+        "spate_sink_inflight_batches",
+        "spate_source_poll_duration_seconds_",
+        "spate_sink_permit_wait_duration_seconds_",
+        "spate_sink_",
+    ];
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:9090") else {
+                continue;
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            if std::io::Write::write_all(&mut s, b"GET /metrics HTTP/1.0\r\n\r\n").is_err() {
+                continue;
+            }
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut body);
+            for line in body.lines() {
+                if PREFIXES.iter().any(|n| line.starts_with(n)) {
+                    eprintln!("metrics {line}");
+                }
+            }
+        }
+    });
 }
 
 fn kafka_source() -> spate_kafka::KafkaSource {
@@ -232,6 +268,7 @@ fn run(format: Format) {
     };
     println!("egress={:?} budget={budget_mib}MiB", Egress::from_env());
 
+    metrics_tap();
     if let Ok(v) = std::env::var("FETCH_READ_CONCURRENCY") {
         set_broker_property("fetch_max_read_concurrency", &v);
     }

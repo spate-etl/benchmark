@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# bootstrap/ch268-48c only, not for merge: a scripted tuning session for spate
-# 0.4.0 on ClickHouse 26.8. It measures the Spate native arm at broker read
-# concurrency 4 and 16 with ClickHouse at 48 cores, the same arm at 4 with
-# ClickHouse at 32, then the Native and RowBinary ingest ceilings at 32, 48 and
-# 64 ClickHouse cores. It uploads everything and returns, so the box terminates
-# as soon as the work is done.
+# bootstrap/ch268-pool only, not for merge: a scripted tuning session for spate
+# 0.4.0 on ClickHouse 26.8 at 48 cores. For background_pool_size 16, 24 and 32
+# it measures the Spate native arm (two reps and the A/A control, with the
+# arm's metrics tapped) and the Native and RowBinary ingest ceilings. It uploads
+# everything and returns, so the box terminates as soon as the work is done.
 #
 # Nothing this box does may be published. The ladder edits
 # environments/$ENV_ID.toml, which moves env_digest and infra_digest, so every
@@ -157,7 +156,7 @@ ship() {
   [ -f "$RUNGS" ] && cp "$RUNGS" "$DIAG/rungs.jsonl"
   [ -f "$LOG" ] && cp "$LOG" "$DIAG/ladder.log"
   cp "$PROFILE" "$DIAG/$ENV_ID.toml"
-  cp /tmp/ceil-ch*.json "$DIAG/" 2>/dev/null || true
+  cp /tmp/ceil-*.json "$DIAG/" 2>/dev/null || true
   if [ -d "$REPO/tuning" ]; then
     (cd "$REPO" && find tuning -type f -name '*.jsonl') | while read -r f; do
       put "$REPO/$f" "logs/$f"
@@ -169,6 +168,27 @@ ship() {
 }
 trap ship EXIT
 
+
+chq() { docker exec spate-bench-clickhouse clickhouse-client --password bench -q "$1"; }
+
+# The pool grows at runtime and cannot shrink without a restart, so the values
+# ascend. The file lives in the running container, so every step re-checks it.
+set_pool() { # threads
+  docker exec spate-bench-clickhouse bash -c \
+    "printf '<clickhouse><background_pool_size>%s</background_pool_size></clickhouse>\n' $1 \
+     > /etc/clickhouse-server/config.d/zz-bench-pool.xml"
+  chq "SYSTEM RELOAD CONFIG"
+  sleep 5
+  check_pool "$1"
+}
+check_pool() { # expected threads
+  local got size
+  got=$(chq "SELECT value FROM system.server_settings WHERE name = 'background_pool_size'")
+  size=$(chq "SELECT value FROM system.metrics WHERE metric = 'BackgroundMergesAndMutationsPoolSize'")
+  note "background_pool_size expected $1, setting $got, pool size metric $size"
+  [ "$got" = "$1" ]
+}
+
 note "host: $(nproc) cpus, $(free -g | awk '/^Mem:/{print $2}') GiB"
 note "profile: $(grep -E '^(image|cpus|cluster)' "$PROFILE" | tr '\n' ' ')"
 
@@ -178,29 +198,21 @@ note "building the spate arm"
 note "prefilling the run-mode corpus"
 "$BENCH" prefill --env "$ENV_ID" >>"$LOG" 2>&1
 
-# Arm cells. Each variant sets the broker's read concurrency itself before it
-# fetches, so the two run interleaved under one invocation.
-note "arm cells, ClickHouse 48"
-diag_start ch48
-"$BENCH" run spate:native-frc4 spate:native-frc16 --reps 2 \
-  --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "ch48 arm run failed"
-diag_stop
+for pool in 16 24 32; do
+  set_pool "$pool" || note "pool $pool was not applied"
 
-note "arm cells, ClickHouse 32"
-set_ch 32
-diag_start ch32
-"$BENCH" run spate:native-frc4 --reps 2 \
-  --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "ch32 arm run failed"
-diag_stop
+  note "arm cells, pool $pool"
+  diag_start "pool$pool"
+  "$BENCH" run spate:native --reps 2 \
+    --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "pool $pool arm run failed"
+  diag_stop
+  check_pool "$pool" || note "pool $pool lost during the arm run"
 
-# Ingest ladder. Each rung starts from no ceilings file: a narrowed pass may not
-# be written beside entries from another envelope, and every rung is one.
-for c in 32 48 64; do
-  set_ch "$c"
   rm -f "$CEIL"
-  measure clickhouse "$(grep -E '^partitions' "$PROFILE" | tr -dc 0-9)" 3 "$c" \
+  measure "pool$pool" "$(grep -E '^partitions' "$PROFILE" | tr -dc 0-9)" 3 48 \
     --only rowbinary --only native
-  [ -f "$CEIL" ] && cp "$CEIL" "/tmp/ceil-ch$c.json"
+  [ -f "$CEIL" ] && cp "$CEIL" "/tmp/ceil-pool$pool.json"
+  check_pool "$pool" || note "pool $pool lost during the ceiling pass"
 done
 
 note "rungs measured:"

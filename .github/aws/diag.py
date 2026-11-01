@@ -67,7 +67,7 @@ CH_METRICS = (
     "BackgroundMergesAndMutationsPoolTask", "PartsActive", "DelayedInserts",
 )
 CH_EVENTS = (
-    "InsertedRows", "InsertedBytes", "InsertQuery", "DelayedInserts",
+    "InsertedRows", "InsertedBytes", "InsertQuery", "DelayedInserts", "DelayedInsertsMilliseconds",
     "RejectedInserts", "InsertQueryTimeMicroseconds", "NetworkReceiveBytes",
     "NetworkReceiveElapsedMicroseconds", "OSCPUWaitMicroseconds",
 )
