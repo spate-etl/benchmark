@@ -389,6 +389,22 @@ pub struct Samples {
 }
 
 impl Samples {
+    /// The rows taken inside `[from_ms, to_ms]`, so a second container's series
+    /// can be read over the arm's own window.
+    #[must_use]
+    pub fn within(&self, from_ms: u64, to_ms: u64) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            rows: self
+                .rows
+                .iter()
+                .filter(|s| (from_ms..=to_ms).contains(&s.t_ms))
+                .copied()
+                .collect(),
+            wall_s: self.wall_s,
+        }
+    }
+
     /// Summarise the series into the cost figures the comparison publishes.
     ///
     /// Only [readable](Sample::readable) rows are summarised. A row carrying a
@@ -871,6 +887,20 @@ pub fn sample_arm(names: &[String], interval_s: f64) -> Vec<Sampler> {
         .collect()
 }
 
+/// Start sampling the shared ClickHouse container over an arm's window.
+///
+/// Start it after the arm's samplers and stop it after them, so the arm's own
+/// window is never delayed by it, and read it through [`Samples::within`] the
+/// arm's window.
+#[must_use]
+pub fn sample_server(container: &str, interval_s: f64) -> Sampler {
+    Sampler::start_named(
+        container,
+        interval_s,
+        &format!("{SAMPLER_CONTAINER}-clickhouse"),
+    )
+}
+
 /// Stop and remove a framework arm, returning its last log lines for diagnosis.
 pub fn stop_sut(name: &str) -> String {
     let logs = crate::docker::container_logs(name, 40);
@@ -944,6 +974,22 @@ mod tests {
         assert_eq!(s.shmem, 8_192);
         assert_eq!(s.slab, 399_080);
         assert_eq!(s.sock, 0);
+    }
+
+    /// Clipping keeps the rows at both edges of the window and drops the ones
+    /// outside it, so the cost is the window's.
+    #[test]
+    fn a_series_clipped_to_a_window_summarises_over_that_window() {
+        let s = series(&[
+            "500,0,0,0,0,0,1,1,1,0,0,0,0,0",
+            "1000,1000000,0,0,0,0,1,1,1,0,0,0,0,0",
+            "3000,5000000,0,0,0,0,1,1,1,0,0,0,0,0",
+            "4000,9000000,0,0,0,0,1,1,1,0,0,0,0,0",
+        ]);
+        let cost = s.within(1000, 3000).summarise().expect("two rows remain");
+        assert_eq!(cost.samples, 2);
+        assert!((cost.window_s - 2.0).abs() < 1e-12, "{}", cost.window_s);
+        assert!((cost.cores_used - 2.0).abs() < 1e-12, "{}", cost.cores_used);
     }
 
     #[test]

@@ -47,12 +47,13 @@
 //!
 //! # What is deliberately unchanged
 //!
-//! The request is byte-for-byte the shape [`crate::ceiling`]'s host-side
-//! inserter sent: SQL in the query string, the block raw in the body, no
-//! compression, `Connection: close`, one connection per POST. A diagnostic pass
-//! with `--compression` is the one exception: it sends `async_insert=0` on every
-//! POST, as every arm does, and unless its codec is `none` its bodies are
-//! compressed frames sent with `decompress=1`. Persistent
+//! The request is the shape [`crate::ceiling`]'s host-side inserter sent: SQL
+//! in the query string, the block raw in the body, no compression,
+//! `Connection: close`, one connection per POST. Every POST also carries
+//! `async_insert=0`, as every arm's insert does, so it takes the synchronous
+//! path. A diagnostic pass with `--compression` other than `none` is the one
+//! exception to the body: its bodies are compressed frames sent with
+//! `decompress=1`. Persistent
 //! connections were measured beside it and came out inside the noise (3.4–3.8
 //! GB/s against 3.3–4.2), so keeping the old shape costs nothing and buys the
 //! one thing worth having — the only variable that changed between the figure

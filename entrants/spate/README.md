@@ -101,9 +101,10 @@ the recorded toolchain wrong.
   in our encoder: client CPU per row is near enough equal, while ClickHouse's own
   cost differs by more than 3×. Presenting Native against Flink would be claiming
   credit for a gap in the Java client.
-- **`rowbinary` sits closest to the headroom limit.** Above 70% of the
-  measured ingest ceiling a number describes ClickHouse rather than the framework,
-  and the harness records such a run as `infra_bound` rather than publishing it.
+- **`rowbinary` sits closest to the headroom limit.** When ClickHouse is
+  saturated over the window a number describes ClickHouse rather than the
+  framework, and the harness records such a run as `infra_bound` rather than
+  publishing it.
   Pinning that variant to a slower configuration to duck the gate would be tuning
   around the gate, so it is left where the search put it and the gate is allowed
   to fire.

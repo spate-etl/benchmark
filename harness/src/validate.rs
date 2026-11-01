@@ -407,6 +407,7 @@ mod tests {
             ceiling_msgs_per_s: 305_554,
             ceiling_bytes_per_s: 256_700_000,
             ceiling_rows_per_s: 3_100_000,
+            clickhouse_gate: None,
         }
     }
 
