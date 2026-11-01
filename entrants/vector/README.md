@@ -136,7 +136,7 @@ measured.
 |---|---|---|
 | `commit_interval_ms` | 5000 | The durability cadence every arm pays (Spate's offset commits, Flink's `AT_LEAST_ONCE` checkpoints). Vector's shipped default, set explicitly so it is a statement rather than an inheritance. |
 | `acknowledgements.enabled` | `true` | The load-bearing line: connects a ClickHouse ack back to the source's offset commit. Without it the 5 s interval commits offsets for rows the sink may still lose. |
-| `query_settings.async_insert_settings.enabled` | `false` | ClickHouse 26.3 defaults `async_insert` on, under which the server acks before writing — an ack the acknowledgement chain would then trust. Matched to every other arm. |
+| `query_settings.async_insert_settings.enabled` | `false` | ClickHouse 26.8 defaults `async_insert` on, under which the server acks before writing — an ack the acknowledgement chain would then trust. Matched to every other arm. |
 | `buffer.when_full` | `block` | Backpressure, not loss: `drop_newest` breaks at-least-once while flattering throughput. |
 | `skip_unknown_fields` | `false` | An unknown field means the transform emitted a column the table lacks — a bug to fail on, not absorb. |
 | `drop_on_error` | `true` | A decided stance on the poison path. Vector's default forwards the *original, un-flattened* event on a VRL runtime error, which `skip_unknown_fields = false` turns into a rejected INSERT carrying 262144 good rows (or a wedge behind `when_full: block`). Dropping costs exactly the errored message's rows, which the loss gate counts and publishes. Unreachable on the deterministic corpus. |

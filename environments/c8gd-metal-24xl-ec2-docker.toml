@@ -62,8 +62,13 @@ registry = "redpanda-builtin"
 # 13% above the default on the native arm, and 8 and 16 added nothing past it.
 cluster  = { fetch_max_read_concurrency = "4" }
 
+# Stock server defaults. On 26.8 these include `materialize_statistics_on_insert`
+# with `auto_statistics_types = 'basic, uniq_v2'`, so every insert into the
+# target table builds column statistics: about 13-23% more server CPU per row
+# than 26.3 in a side-by-side Docker measurement. Every arm pays it, and the
+# ceilings are measured with it.
 [infra.clickhouse]
-image  = "clickhouse/clickhouse-server:26.3.33.24@sha256:810861a2e2d0188744f5f23b2d3ec9ff95812bcb9ddbb8fed13a377a7f305893"
+image  = "clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7"
 cpus   = "32"
 memory = "32g"
 

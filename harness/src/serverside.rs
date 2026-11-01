@@ -76,7 +76,7 @@
 //!    error: an arm writing 25k-row batches creates far more parts than one
 //!    writing 262k-row batches, and the difference in merge cost lands nowhere
 //!    in this number. Published records must say so.
-//! 3. **Asynchronous inserts are not attributable.** ClickHouse 26.3 ships
+//! 3. **Asynchronous inserts are not attributable.** ClickHouse 26.8 ships
 //!    `async_insert = 1` as the compiled default (`changed = 0` on the live
 //!    reference server). Under it the client's query returns once the data is
 //!    buffered, so the query's own `ProfileEvents` carry the parse cost and not
@@ -419,7 +419,7 @@ impl fmt::Display for ServerSideError {
                  path ({wrote_nothing} finished having written no rows). An async insert's \
                  ProfileEvents cover parsing and buffering only — the write is charged to \
                  a background flush with no query_log row — so the sum would under-report \
-                 this arm against one whose client sets async_insert=0. ClickHouse 26.3 \
+                 this arm against one whose client sets async_insert=0. ClickHouse 26.8 \
                  defaults it ON: pin async_insert=0 in the arm's client settings"
             ),
         }
@@ -1456,7 +1456,7 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
         assert!((cost.cpu_us - expected).abs() < 1e-9, "{}", cost.cpu_us);
     }
 
-    /// ClickHouse 26.3 defaults `async_insert` on. An insert that takes that path
+    /// ClickHouse 26.8 defaults `async_insert` on. An insert that takes that path
     /// reports the cost of parsing and buffering, never the cost of the write,
     /// and the shortfall depends on which client library an arm happens to use —
     /// so it would distort the comparison and not merely the absolute figure.
