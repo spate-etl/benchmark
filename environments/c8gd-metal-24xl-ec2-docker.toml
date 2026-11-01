@@ -69,7 +69,7 @@ cluster  = { fetch_max_read_concurrency = "4" }
 # ceilings are measured with it.
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7"
-cpus   = "32"
+cpus   = "48"
 memory = "32g"
 
 # `kind` is in `infra_digest`; the paths are not. A path that is not its own

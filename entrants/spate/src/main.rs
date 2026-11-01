@@ -96,6 +96,28 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
     .expect("pipeline config")
 }
 
+/// Tuning branch only: sets one broker cluster property through Redpanda's
+/// admin API, the body `rpk cluster config set` sends, and logs the status line.
+fn set_broker_property(key: &str, value: &str) {
+    let body = format!("{{\"upsert\":{{\"{key}\":{value}}},\"remove\":[]}}");
+    let request = format!(
+        "PUT /v1/cluster_config HTTP/1.1\r\nHost: spate-bench-redpanda:9644\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    match std::net::TcpStream::connect("spate-bench-redpanda:9644") {
+        Ok(mut s) => {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+            let _ = std::io::Write::write_all(&mut s, request.as_bytes());
+            let mut response = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut response);
+            let status = response.lines().next().unwrap_or("no response");
+            eprintln!("broker {key}={value}: {status}");
+        }
+        Err(e) => eprintln!("broker {key}={value}: connect failed: {e}"),
+    }
+}
+
 fn kafka_source() -> spate_kafka::KafkaSource {
     let mut cfg = spate_kafka::KafkaSourceConfig::new(
         env_str("BOOTSTRAP", "spate-bench-redpanda:29092"),
@@ -210,6 +232,9 @@ fn run(format: Format) {
     };
     println!("egress={:?} budget={budget_mib}MiB", Egress::from_env());
 
+    if let Ok(v) = std::env::var("FETCH_READ_CONCURRENCY") {
+        set_broker_property("fetch_max_read_concurrency", &v);
+    }
     let pipeline =
         Pipeline::from_config(pipeline_config(threads, io_threads, budget_mib)).expect("pipeline");
 

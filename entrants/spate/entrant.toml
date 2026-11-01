@@ -119,6 +119,23 @@ reports  = { wire_format = "native" }
 # Its batching differs from the Native variant's, so the pair separates "the
 # framework is faster" from "we chose a faster wire format" only once both
 # carry the same batch settings.
+# Tuning branch only: the native arm under each broker read concurrency.
+[[variants]]
+id       = "native-frc4"
+label    = "Spate · Native · broker read concurrency 4"
+approach = "realistic"
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "4" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+[[variants]]
+id       = "native-frc16"
+label    = "Spate · Native · broker read concurrency 16"
+approach = "realistic"
+env      = { FORMAT = "native", FETCH_READ_CONCURRENCY = "16" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
 [[variants]]
 id       = "rowbinary"
 label    = "Spate · RowBinary"

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# The tuning box's payload: bring the infrastructure up, walk the ladder that
-# sizes the profile — partitions, then the broker cap, then ClickHouse — and
-# hold the box open for the session that spends what the ladder found.
+# bootstrap/ch268-48c only, not for merge: a scripted tuning session for spate
+# 0.4.0 on ClickHouse 26.8. It measures the Spate native arm at broker read
+# concurrency 4 and 16 with ClickHouse at 48 cores, the same arm at 4 with
+# ClickHouse at 32, then the Native and RowBinary ingest ceilings at 32, 48 and
+# 64 ClickHouse cores. It uploads everything and returns, so the box terminates
+# as soon as the work is done.
 #
 # Nothing this box does may be published. The ladder edits
 # environments/$ENV_ID.toml, which moves env_digest and infra_digest, so every
@@ -123,120 +126,83 @@ reprefill() { # partitions
   "$BENCH" prefill --env "$ENV_ID" --batches "$PREFILL_BATCHES" >>"$LOG" 2>&1
 }
 
-walk_ladder() {
-  local p b c best_p best_b
-
-  # Phase 1 — partitions, at a broker cap generous enough not to bind. Each
-  # rung re-prefills: a topic's partition count is fixed at creation.
-  set_broker 8
-  for p in 8 16 24 32; do
-    reprefill "$p" || { note "prefill at p=$p failed; see $LOG"; return 1; }
-    measure partitions "$p" 8 16 --only rowbinary
-  done
-
-  # The largest partition count within 3% of the best consume rate: partitions
-  # bound every arm's consume parallelism, so where the ceiling is flat the
-  # widest topic wins.
-  best_p=$(jq -s '[.[] | select(.phase=="partitions" and .ok)] as $r
-    | ($r | map(.consume_msgs_per_s) | max) as $top
-    | [$r[] | select(.consume_msgs_per_s >= $top * 0.97)]
-    | sort_by(-.partitions)[0].partitions' "$RUNGS")
-  if [ -z "$best_p" ] || [ "$best_p" = null ]; then best_p=8; fi
-  note "phase 1 settles on p=$best_p"
-
-  # Phase 2 — broker rungs ascend from the smallest cap over a fresh data
-  # directory, because a shard-count decrease refuses to boot. One re-prefill
-  # buys all four rungs.
-  wipe_broker || return 1
-  set_key infra.broker cpus 3
-  reprefill "$best_p" || { note "prefill at p=$best_p failed; see $LOG"; return 1; }
-  for b in 3 4 6 8; do
-    set_broker "$b"
-    measure broker "$best_p" "$b" 16 --only rowbinary
-  done
-
-  # The smallest cap within 3% of the best consume rate: the cap is not the
-  # constraint there, so a smaller broker buys the envelope a core for free.
-  best_b=$(jq -s '[.[] | select(.phase=="broker" and .ok)] as $r
-    | ($r | map(.consume_msgs_per_s) | max) as $top
-    | [$r[] | select(.consume_msgs_per_s >= $top * 0.97)]
-    | sort_by(.broker_cpus)[0].broker_cpus' "$RUNGS")
-  if [ -z "$best_b" ] || [ "$best_b" = null ]; then best_b=3; fi
-  note "phase 2 settles on b=$best_b"
-
-  # Phase 3 — ClickHouse up, with the broker left at 8: shrinking it here
-  # would be a shard decrease, and its cap is not what these rungs measure.
-  for c in 16 24 32 48 64; do
-    set_ch "$c"
-    measure clickhouse "$best_p" 8 "$c" --only rowbinary --only native
-  done
+# Every upload is a single PutObject: `aws s3 cp` goes multipart above 8 MB, and
+# on this bucket's KMS key that needs kms:Decrypt, which the instance role lacks.
+put() { # local-file key-under-the-run-prefix
+  local b=${S3_RUN#s3://}
+  aws s3api put-object --bucket "${b%%/*}" --key "${b#*/}/$2" --body "$1" >/dev/null \
+    || note "upload of $2 refused"
 }
 
-note "host: $(nproc) cpus, $(free -g | awk '/^Mem:/{print $2}') GiB, up $(awk '{print $1}' /proc/uptime)s"
-lsblk -o NAME,SIZE,MODEL,MOUNTPOINT | sed 's/^/    /'
-for target in / /mnt/bench-clickhouse /mnt/bench-broker /var/lib/docker; do
-  printf '    %-24s %s\n' "$target" "$(findmnt -no SOURCE --target "$target" 2>/dev/null || echo '(no mount)')"
+DIAG=/tmp/diag
+diag_start() { # label
+  mkdir -p "$DIAG/$1"
+  python3 "$REPO/.github/aws/diag.py" "$DIAG/$1" </dev/null >>"$DIAG/$1/collector.err" 2>&1 &
+  echo $! > "$DIAG/collector.pid"
+}
+diag_stop() {
+  [ -f "$DIAG/collector.pid" ] || return 0
+  local pid
+  pid=$(cat "$DIAG/collector.pid")
+  rm -f "$DIAG/collector.pid"
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
+# Ships whatever exists, on success or failure: the box's filesystem dies with it.
+ship() {
+  diag_stop
+  [ -d "$REPO/tuning" ] && cp -r "$REPO/tuning" "$DIAG/tuning"
+  [ -f "$RUNGS" ] && cp "$RUNGS" "$DIAG/rungs.jsonl"
+  [ -f "$LOG" ] && cp "$LOG" "$DIAG/ladder.log"
+  cp "$PROFILE" "$DIAG/$ENV_ID.toml"
+  cp /tmp/ceil-ch*.json "$DIAG/" 2>/dev/null || true
+  if [ -d "$REPO/tuning" ]; then
+    (cd "$REPO" && find tuning -type f -name '*.jsonl') | while read -r f; do
+      put "$REPO/$f" "logs/$f"
+    done
+  fi
+  [ -f "$RUNGS" ] && put "$RUNGS" logs/rungs.jsonl
+  tar -C /tmp -czf /tmp/diag.tar.gz diag
+  put /tmp/diag.tar.gz logs/diag.tar.gz
+}
+trap ship EXIT
+
+note "host: $(nproc) cpus, $(free -g | awk '/^Mem:/{print $2}') GiB"
+note "profile: $(grep -E '^(image|cpus|cluster)' "$PROFILE" | tr '\n' ' ')"
+
+note "building the spate arm"
+"$BENCH" build spate >>"$LOG" 2>&1
+
+note "prefilling the run-mode corpus"
+"$BENCH" prefill --env "$ENV_ID" >>"$LOG" 2>&1
+
+# Arm cells. Each variant sets the broker's read concurrency itself before it
+# fetches, so the two run interleaved under one invocation.
+note "arm cells, ClickHouse 48"
+diag_start ch48
+"$BENCH" run spate:native-frc4 spate:native-frc16 --reps 2 \
+  --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "ch48 arm run failed"
+diag_stop
+
+note "arm cells, ClickHouse 32"
+set_ch 32
+diag_start ch32
+"$BENCH" run spate:native-frc4 --reps 2 \
+  --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "ch32 arm run failed"
+diag_stop
+
+# Ingest ladder. Each rung starts from no ceilings file: a narrowed pass may not
+# be written beside entries from another envelope, and every rung is one.
+for c in 32 48 64; do
+  set_ch "$c"
+  rm -f "$CEIL"
+  measure clickhouse "$(grep -E '^partitions' "$PROFILE" | tr -dc 0-9)" 3 "$c" \
+    --only rowbinary --only native
+  [ -f "$CEIL" ] && cp "$CEIL" "/tmp/ceil-ch$c.json"
 done
 
-# Brings the infrastructure up and refuses if the declared storage layout is
-# not the one this host has, before any of the box time below is spent.
-note "bringing infrastructure up"
-"$BENCH" prefill --env "$ENV_ID" --batches 1
-
-# A clean gate means the committed ceilings describe this profile already, so
-# the ladder has nothing to size and the box is a held session from the start.
-if "$BENCH" ceiling --env "$ENV_ID" >/dev/null 2>&1; then
-  note "committed ceilings gate clean against this profile; holding without the ladder"
-else
-  note "walking the ladder"
-  walk_ladder || note "ladder aborted; the box stays up for diagnosis"
-fi
-
-# Under logs/ because that is the one prefix the instance role can write
-# besides the run markers. Guarded: an upload refusal must not kill a held
-# session whose evidence is also in the payload log above.
-if [ -f "$RUNGS" ]; then
-  note "rungs measured:"
-  cat "$RUNGS"
-  aws s3 cp "$RUNGS" "$S3_RUN/logs/rungs.jsonl" || note "rungs upload refused"
-fi
-if [ -f "$LOG" ]; then aws s3 cp "$LOG" "$S3_RUN/logs/ladder.log" || note "ladder.log upload refused"; fi
-aws s3 cp "$PROFILE" "$S3_RUN/logs/$ENV_ID.toml" || note "profile upload refused"
-if [ -f "$CEIL" ]; then aws s3 cp "$CEIL" "$S3_RUN/logs/$ENV_ID.ceilings.json" || note "ceilings upload refused"; fi
-
-cat <<'EOF'
-
-=== the box is now held open for a tuning session ===
-
-The ladder has run; its rungs are in /tmp/rungs.jsonl and in $S3_RUN/logs/.
-The session's remaining work: set the profile from the rungs, build the
-entrants, and measure arms with --trigger tuning for the 50% headroom check.
-
-  sudo -i; cd /opt/bench
-  bench=target/release/bench
-
-To move a cap, edit environments/<env>.toml, `docker rm -f` the container it
-re-caps, and re-run `$bench ceiling --measure --write --env <env>`. Changing
-the partition count needs the topic dropped — the delete is asynchronous, so
-poll depth to zero before prefilling again.
-
-EOF
-
-# Hold, then end the payload cleanly a quarter-hour inside its own timeout.
-#
-# Not `sleep infinity`: run-bench.sh runs the payload under `timeout`, and being
-# killed by it is a non-zero exit, which makes the user-data trap write
-# _FAILED.json and the collector report a box failure. A tuning box reaching the
-# end of its budget is the expected outcome, not a fault, so it exits zero and
-# the run is claimed as the tuning run it is.
-#
-# The session does not extend the box's life. Save anything worth keeping to
-# $S3_RUN before the deadline below.
-budget=$(( (TTL_HOURS - 2) * 3600 - 900 ))
-deadline=$(( SECONDS + budget ))
-note "holding for $(( budget / 60 ))m; the box terminates itself after that"
-while [ "$SECONDS" -lt "$deadline" ]; do
-  note "held, $(( (deadline - SECONDS) / 60 ))m of session budget left"
-  sleep 600
-done
-note "session budget spent"
+note "rungs measured:"
+cat "$RUNGS" || true
+note "session done; the payload returns and the box terminates"
