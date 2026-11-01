@@ -38,6 +38,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "250f629c0161ad8107cf89319e990051fae62832fd343083bea452d93e2205fd"
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -385,30 +391,29 @@ dependencies = [
 
 [[package]]
 name = "clickhouse"
-version = "0.15.1"
+version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8063696febb0a10a6fb9df1460c52c509188f1d19da2157694ab3ca0feffc74"
+checksum = "d6ad2112cf4ad543ceed12e48b779e82e8f3a8172374cac98d59e59feda35c69"
 dependencies = [
  "bnum",
  "bstr",
  "bytes",
- "cityhash-rs",
  "clickhouse-macros",
  "clickhouse-types",
  "futures-channel",
  "futures-util",
+ "half",
+ "hashbrown 0.17.1",
  "http-body-util",
  "hyper",
  "hyper-util",
- "lz4_flex 0.11.6",
- "polonius-the-crab",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
  "url",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -425,9 +430,9 @@ dependencies = [
 
 [[package]]
 name = "clickhouse-types"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a5efddc880ce9e2573bd867413d9056fa2bea0206af88dec21e72178b9dc74"
+checksum = "d7ddab58fabf3bdde7b6fa401f72b9abc7566ff015264c89aaaa71cf1d173d06"
 dependencies = [
  "bytes",
  "thiserror",
@@ -826,6 +831,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "heck"
@@ -850,17 +860,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "higher-kinded-types"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e690f8474c6c5d8ff99656fcbc195a215acc3949481a8b0b3351c838972dc776"
-dependencies = [
- "macro_rules_attribute",
- "never-say-never",
- "paste",
-]
 
 [[package]]
 name = "http"
@@ -1332,12 +1331,6 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
-
-[[package]]
-name = "lz4_flex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
@@ -1347,22 +1340,6 @@ name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
-
-[[package]]
-name = "macro_rules_attribute"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65049d7923698040cd0b1ddcced9b0eb14dd22c5f86ae59c3740eab64a676520"
-dependencies = [
- "macro_rules_attribute-proc_macro",
- "paste",
-]
-
-[[package]]
-name = "macro_rules_attribute-proc_macro"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "matchers"
@@ -1462,12 +1439,6 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "never-say-never"
-version = "6.6.666"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf5a574dadd7941adeaa71823ecba5e28331b8313fb2e1c6a5c7e5981ea53ad6"
 
 [[package]]
 name = "nom"
@@ -1606,12 +1577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1628,16 +1593,6 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
-
-[[package]]
-name = "polonius-the-crab"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec242d7eccbb2fd8b3b5b6e3cf89f94a91a800f469005b44d154359609f8af72"
-dependencies = [
- "higher-kinded-types",
- "never-say-never",
-]
 
 [[package]]
 name = "portable-atomic"
@@ -1934,6 +1889,7 @@ dependencies = [
  "libz-sys",
  "num_enum",
  "pkg-config",
+ "zstd-sys",
 ]
 
 [[package]]
@@ -2384,9 +2340,9 @@ dependencies = [
 
 [[package]]
 name = "spate-avro"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffeea24eb80bcdeed4ba92d8b61844a05aa9117f27ad1d81818de7bdd3e253fc"
+checksum = "7bcd6e5ac6ca58e199032391472e125f7a3411554def86acf5fb71babdda208c"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -2414,7 +2370,7 @@ dependencies = [
  "arrow-schema",
  "bytes",
  "cityhash-rs",
- "lz4_flex 0.14.0",
+ "lz4_flex",
  "rdkafka",
  "serde",
  "serde_json",
@@ -2422,22 +2378,23 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
- "zstd 0.14.2",
+ "zstd",
 ]
 
 [[package]]
 name = "spate-clickhouse"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d7adf15e62d289a7f74023e4970230ddc386d2a09ffea72e9ddcfc7c420d1d"
+checksum = "95f0b3babc90d9e2cb2e35f95785e8843936cb956a50c707be081a53473a92ce"
 dependencies = [
  "bytes",
  "bytesize",
+ "cityhash-rs",
  "clickhouse",
- "foldhash",
  "humantime-serde",
  "hyper-rustls",
  "hyper-util",
+ "lz4_flex",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -2448,13 +2405,14 @@ dependencies = [
  "twox-hash",
  "url",
  "webpki-roots",
+ "zstd",
 ]
 
 [[package]]
 name = "spate-clickhouse-derive"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15d4d4c02751df9d264e6514cc2338ff1e5635a353cfb6123c0ad15fb98e7db3"
+checksum = "853f8468c19554c95a8649f36209d75198af20180736d4cadf4780e94d614485"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2464,14 +2422,15 @@ dependencies = [
 
 [[package]]
 name = "spate-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2921d723f367cf21ecd7a6065a8186d97d2c08e70a2837ae3717ea28afed6803"
+checksum = "842ffcd914babc096daf7ad4d97db035cfa58ee55d706609b7cc566690b6e176"
 dependencies = [
  "bytes",
  "bytesize",
  "core_affinity",
  "crossbeam-channel",
+ "foldhash",
  "http-body-util",
  "humantime-serde",
  "hyper",
@@ -2491,9 +2450,9 @@ dependencies = [
 
 [[package]]
 name = "spate-kafka"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786736dc2598e23868f71afc6ae33154ef34a04385a77be56708d0a06f6a8257"
+checksum = "1566c92eb7b5609c318d36d3005d7a1e9595defe17f1e7d074307e60d2c15520"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2502,8 +2461,10 @@ dependencies = [
  "serde",
  "serde_json",
  "spate-core",
+ "thiserror",
  "tokio",
  "tracing",
+ "zstd-sys",
 ]
 
 [[package]]
@@ -2871,9 +2832,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "twox-hash"
-version = "2.1.3"
+version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"
@@ -3061,9 +3022,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -3442,29 +3403,11 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057cfd910cfac363a0ada849592624b4c9ff2e10bef504c3433810d78ed96f93"
-dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
