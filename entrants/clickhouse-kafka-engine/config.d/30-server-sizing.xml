@@ -62,8 +62,8 @@
          26.8 config enables, removed, EXCEPT two:
 
          * query_log — the reviewer's window into the forwarded inserts
-           (~3 rows/s: a QueryStart and a QueryFinish per insert, 8 consumers
-           on a 5 s flush). This benchmark's credibility rests on a reviewer
+           (a QueryStart and a QueryFinish per forwarded insert, 32
+           consumers on a 5 s flush). This benchmark's credibility rests on a reviewer
            being able to look.
          * crash_log — written only on a fatal signal, so it costs nothing in
            a healthy run and is the artifact everyone wants when a run dies. -->

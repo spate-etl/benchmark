@@ -22,7 +22,7 @@
 # than its own storage tier. Digest-pinned so a re-pushed tag cannot silently
 # move what a published number ran on; [version].pinned in entrant.toml
 # additionally asserts the version string the image reports.
-FROM clickhouse/clickhouse-server:26.8.25.14@sha256:dd81097e2c38827a438287d8ae5d4dc8afafbdd0e61e83376fdd7ed4580673b9
+FROM clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
 
 # config.d and users.d are merged over the shipped config by ClickHouse's own
 # preprocessor; initdb runs once against a fresh data directory, which every
