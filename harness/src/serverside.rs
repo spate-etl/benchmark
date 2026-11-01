@@ -197,7 +197,7 @@ use crate::sampler::Samples;
 /// text form cannot contain a comma or a tab and [`parse_profile_events`] can
 /// split on both without a quoting rule. Widening this list to a counter whose
 /// value is a string would silently break that.
-const COUNTERS: [&str; 9] = [
+const COUNTERS: [&str; 10] = [
     "UserTimeMicroseconds",
     "SystemTimeMicroseconds",
     "RealTimeMicroseconds",
@@ -207,6 +207,7 @@ const COUNTERS: [&str; 9] = [
     "InsertedBytes",
     "AsyncInsertQuery",
     "AsyncInsertRows",
+    "DelayedInsertsMilliseconds",
 ];
 
 /// Fully qualifies a table the way `system.query_log` writes it.
@@ -499,6 +500,9 @@ pub struct ProfileCounters {
     pub async_insert_query: Option<u64>,
     /// `AsyncInsertRows` — rows this insert handed to the async buffer.
     pub async_insert_rows: Option<u64>,
+    /// `DelayedInsertsMilliseconds` — time the server held this insert back
+    /// because the target had too many active parts.
+    pub delayed_inserts_ms: Option<u64>,
 }
 
 impl ProfileCounters {
@@ -581,6 +585,13 @@ pub struct ServerSideCost {
     /// Completed inserts that reported no CPU counters at all. Carried rather
     /// than dropped, so a record can say its figure rests on a subset.
     pub queries_without_cpu: usize,
+    /// `query_duration_ms`, summed over the completed inserts.
+    pub insert_duration_ms: u64,
+    /// `DelayedInsertsMilliseconds`, summed over the completed inserts.
+    ///
+    /// A sum and never `None`: `ProfileEvents` omits a counter an insert never
+    /// incremented, so an insert without the entry was not delayed.
+    pub delayed_inserts_ms: u64,
 }
 
 impl ServerSideCost {
@@ -628,6 +639,18 @@ impl ServerSideCost {
             });
         }
         Ok(self.cpu_us / rows)
+    }
+
+    /// The share of the completed inserts' time the server spent holding them
+    /// back, or `None` when they took no measurable time at all.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "millisecond sums stay far below f64's exact range"
+    )]
+    pub fn delayed_insert_share(&self) -> Option<f64> {
+        (self.insert_duration_ms > 0)
+            .then(|| self.delayed_inserts_ms as f64 / self.insert_duration_ms as f64)
     }
 
     /// Mean rows per completed insert — the arm's effective batch size, as the
@@ -820,6 +843,7 @@ pub fn parse_profile_events(field: &str) -> Result<ProfileCounters, ServerSideEr
             "InsertedBytes" => out.inserted_bytes = Some(value),
             "AsyncInsertQuery" => out.async_insert_query = Some(value),
             "AsyncInsertRows" => out.async_insert_rows = Some(value),
+            "DelayedInsertsMilliseconds" => out.delayed_inserts_ms = Some(value),
             _ => {}
         }
     }
@@ -965,6 +989,8 @@ pub fn summarise(
         os_cpu_virtual_us: micros(total(|e| e.os_cpu_virtual_us)),
         os_cpu_wait_us: micros(total(|e| e.os_cpu_wait_us)),
         queries_without_cpu,
+        insert_duration_ms: finished.iter().map(|r| r.duration_ms).sum(),
+        delayed_inserts_ms: total(|e| e.delayed_inserts_ms).unwrap_or(0),
     })
 }
 
@@ -1345,6 +1371,26 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
         assert_eq!(rows[0].events.system_us, Some(3_911));
         assert_eq!(rows[0].events.inserted_bytes, Some(16_938_179));
         assert_eq!(rows[0].events.async_insert_query, None);
+    }
+
+    /// The delayed share divides the server's hold-back time by the inserts'
+    /// own duration, and an insert with no `DelayedInsertsMilliseconds` entry
+    /// counts as not delayed rather than as unknown.
+    #[test]
+    fn the_delayed_share_is_hold_back_time_over_insert_time() {
+        let none = summarised(REAL_INSERTS).expect("three real inserts summarise");
+        assert_eq!(none.insert_duration_ms, 437 + 427 + 435);
+        assert_eq!(none.delayed_inserts_ms, 0);
+        assert_eq!(none.delayed_insert_share(), Some(0.0));
+
+        let body = "\
+QueryFinish\t1000\t400\t{'UserTimeMicroseconds':10,'DelayedInsertsMilliseconds':100}
+QueryFinish\t1000\t600\t{'UserTimeMicroseconds':10}
+";
+        let cost = summarised(body).expect("two inserts summarise");
+        assert_eq!(cost.delayed_inserts_ms, 100);
+        let share = cost.delayed_insert_share().expect("the inserts took time");
+        assert!((share - 0.1).abs() < 1e-12, "{share}");
     }
 
     /// The counter choice, on the numbers that forced it. `RealTimeMicroseconds`

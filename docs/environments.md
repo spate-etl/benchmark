@@ -71,10 +71,14 @@ rather than warning.
 
 ## The headroom rule
 
-Before any arm is published, a ceiling pass measures what the shared consume path
-can absorb. **An arm exceeding 70% of that ceiling is infra-bound and cannot be
-published as a system comparison** — above it we are measuring the broker and
-ClickHouse, not the system.
+Before any arm is published, a ceiling pass measures what the broker and
+ClickHouse can absorb. **An arm exceeding 70% of the broker's consume ceiling, or
+run while ClickHouse was saturated, is infra-bound and cannot be published as a
+system comparison** — past either we are measuring the infrastructure, not the
+system. ClickHouse's saturation is read from its own cgroup and query log over
+the arm's window, with the ingest ceiling as the fallback when those counters
+are missing; [the resource envelope](../methodology/envelope.md) states the
+tests.
 
 Such a run is recorded with a failed status rather than discarded, so "we ran it
 and it blew the limit" stays distinguishable from "we never ran it".

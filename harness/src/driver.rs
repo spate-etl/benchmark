@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::ceiling::{self, Ceiling};
 use crate::corpus;
 use crate::entrant::{Container, Role, Variant};
-use crate::environment::{Environment, HEADROOM_LIMIT};
+use crate::environment::Environment;
 use crate::infra::{self, Endpoints};
 use crate::jvm;
 use crate::report::{Flag, Infra, Kind, Metric, Report, RunMeta, Status, Sut, Trigger};
@@ -1033,7 +1033,7 @@ struct Measurement {
     /// Seconds the target needed to have no active parts and no running merges
     /// after this repetition's truncate, before the window opened.
     settle_s: f64,
-    /// `Ok`, or `InfraBound` when the arm outran a proven ceiling.
+    /// `Ok`, or `InfraBound` when the shared infrastructure bound the arm.
     status: Status,
     /// What the record's `note` should say about how it was measured.
     note: String,
@@ -1066,6 +1066,10 @@ struct Measurement {
     /// The ClickHouse ingest ceiling this arm was held to, rows per second, or
     /// `0` when none applies to its insert format.
     ceiling_rows_per_s: u64,
+    /// What the shared ClickHouse did over the window.
+    server_load: ceiling::ServerLoad,
+    /// The rule that decided whether ClickHouse bound the arm.
+    clickhouse_gate: crate::report::ClickHouseGate,
 }
 
 /// What an arm's JVMs reported about their own collectors.
@@ -1398,6 +1402,7 @@ fn measure(
     let mut infra_for_record = infra.clone();
     if let Ok(d) = &outcome {
         infra_for_record.ceiling_rows_per_s = d.ceiling_rows_per_s;
+        infra_for_record.clickhouse_gate = Some(d.clickhouse_gate);
     }
 
     let mut report = Report::new(
@@ -1555,6 +1560,11 @@ fn measure(
             for (key, metric) in merge_metrics(*merges) {
                 report = report.metric(key, metric);
             }
+        }
+        // What the shared ClickHouse did over the window, the figures the
+        // saturation gate read. Absent when unmeasured, never zero.
+        for (key, metric) in server_load_metrics(&d.server_load) {
+            report = report.metric(key, metric);
         }
         // How long the target took to go quiet before this window opened.
         // Minimised: it is merge work the previous repetition left, and a rising
@@ -1920,10 +1930,11 @@ fn run_arm(
 
     // Open, hold and close the one measurement window. Which function does it is
     // the whole of the difference between the two modes.
-    let (costs, held) = match opts.mode {
+    let (costs, server_samples, held) = match opts.mode {
         Mode::Drain => hold_drain_window(
             &names,
             data_plane_name.as_ref(),
+            &ep.ch_container,
             &mut containers,
             &rows_now,
             expected_rows,
@@ -2176,10 +2187,34 @@ fn run_arm(
     let rows_f = rows as f64;
     let rows_per_s = cost.rows_per_s(rows_f);
 
-    // The headroom rule, enforced rather than checked by hand, and enforced
-    // against BOTH ceilings `methodology/` names rather than only the broker's.
-    // Above the limit we are measuring the shared infrastructure and not the
-    // system, so the record is marked `Status::InfraBound` — and it keeps its
+    // What those inserts cost ClickHouse, from ClickHouse's own accounting.
+    //
+    // Here, after `quiesce` and before the correctness gate, and both halves of
+    // that are load-bearing. After the quiesce, so every insert the arm issued
+    // has finished and is in `system.query_log` to be attributed. Before the
+    // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
+    // they are excluded by `query_kind = 'Insert'`, but running the read first
+    // keeps the figure independent of how strict the gate happens to be.
+    let (server, merges) = measure_server_side(ep, arm, &costs, &mut note);
+
+    // What the shared ClickHouse did over the arm's own window: its cgroup,
+    // clipped to the arm's sampler span, and the delay it put on the arm's
+    // attributed inserts.
+    let server_cgroup = sampler_window_ms(&costs)
+        .and_then(|(from_ms, to_ms)| server_samples.within(from_ms, to_ms).summarise());
+    let server_load = ceiling::ServerLoad::new(
+        server_cgroup.as_ref(),
+        env.spec.infra.clickhouse.cpus.parse().unwrap_or(0.0),
+        server
+            .as_ref()
+            .and_then(serverside::ServerSideCost::delayed_insert_share),
+    );
+
+    // The headroom rule, enforced rather than checked by hand. The broker is
+    // held to its consume ceiling, and ClickHouse to its measured saturation
+    // over the window, with its ingest ceiling deciding only when the counters
+    // are missing. Past either we are measuring the shared infrastructure and
+    // not the system, so the record is marked `Status::InfraBound` — and it keeps its
     // full metric set, because `InfraBound::carries_metrics()` is true. Emitting
     // nothing would make "we ran this arm and it blew the headroom limit"
     // indistinguishable from "we never ran it", and the first of those is a
@@ -2218,18 +2253,26 @@ fn run_arm(
             .as_ref()
             .is_some_and(|ch| !ch.arm_sql.trim().is_empty()),
     });
-    eprintln!("  headroom: {}", headroom.summary());
-    note.push_str(&format!("; headroom {}", headroom.summary()));
-    if headroom.infra_bound() {
+    let verdict = headroom.verdict(&server_load);
+    let gate = format!(
+        "headroom {}; clickhouse gate {}: {}",
+        headroom.summary(),
+        verdict.rule.name(),
+        server_load.summary()
+    );
+    eprintln!("  {gate}");
+    note.push_str(&format!("; {gate}"));
+    if verdict.infra_bound() {
         status = Status::InfraBound;
         // Said on the terminal for the operator watching, and in the note for
-        // everyone after: a share above the limit only reads as a demotion to
-        // someone who remembers the rule, and `status` only to someone who
-        // knows the schema, while the note is what the site renders beside the
-        // number and what one line of JSONL shows.
-        eprintln!("  {}", infra_bound_notice());
-        note.push_str(&format!("; {}", infra_bound_notice()));
+        // everyone after: a demotion only reads as one to someone who
+        // remembers the rule, and `status` only to someone who knows the
+        // schema, while the note is what the site renders beside the number
+        // and what one line of JSONL shows.
+        eprintln!("  {}", infra_bound_notice(&verdict));
+        note.push_str(&format!("; {}", infra_bound_notice(&verdict)));
     }
+    flags.extend(verdict.fired.iter().copied());
     // "Not gated" must never read as "cleared the gate". A ceiling the
     // methodology names that could not be checked at all — because none was
     // measured, or because the one that was does not describe this corpus, or
@@ -2245,16 +2288,6 @@ fn run_arm(
     // name it carries — is two derivations of one choice, and that is how
     // they come to disagree.
     let ceiling_rows_per_s = headroom.applied_ingest_rows_per_s().unwrap_or(0);
-
-    // What those inserts cost ClickHouse, from ClickHouse's own accounting.
-    //
-    // Here, after `quiesce` and before the correctness gate, and both halves of
-    // that are load-bearing. After the quiesce, so every insert the arm issued
-    // has finished and is in `system.query_log` to be attributed. Before the
-    // gate, whose `uniqExact` scans charge CPU-seconds apiece to the same log —
-    // they are excluded by `query_kind = 'Insert'`, but running the read first
-    // keeps the figure independent of how strict the gate happens to be.
-    let (server, merges) = measure_server_side(ep, arm, &costs, &mut note);
 
     // Correctness gates. An arm that loses rows is faster for the wrong reason,
     // and one that computes different values did different work.
@@ -2332,8 +2365,15 @@ fn run_arm(
         received,
         gc,
         ceiling_rows_per_s,
+        server_load,
+        clickhouse_gate: verdict.rule,
     })
 }
+
+/// What holding the window produced: the arm's sampler series, the shared
+/// ClickHouse container's series over the same span, and what the mode itself
+/// held.
+type HeldWindow = (Vec<(String, sampler::Samples)>, sampler::Samples, Held);
 
 /// What holding the window produced, beyond the sampler series itself.
 enum Held {
@@ -2356,13 +2396,15 @@ enum Held {
 fn hold_drain_window(
     names: &[String],
     data_plane_name: Option<&String>,
+    server_container: &str,
     containers: &mut ArmContainers,
     rows_now: &dyn Fn() -> Option<u64>,
     expected_rows: u64,
     batches: u64,
-) -> Result<(Vec<(String, crate::sampler::Samples)>, Held), String> {
+) -> Result<HeldWindow, String> {
     let deadline_s = drain_max_s(batches);
     let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
+    let server = sampler::sample_server(server_container, sampler::INTERVAL_S);
     let started = Instant::now();
     let mut rows = 0u64;
     let mut probe_failures = 0u32;
@@ -2410,7 +2452,8 @@ fn hold_drain_window(
         }
     }
 
-    Ok((stop_samplers(samplers, names), Held::Drain { rows }))
+    let costs = stop_samplers(samplers, names);
+    Ok((costs, server.stop(), Held::Drain { rows }))
 }
 
 /// Starts a live producer, waits for the arm to warm up, then holds the window
@@ -2453,7 +2496,7 @@ fn hold_sustained_window(
     schema_id: u32,
     offered_msgs_per_s: u64,
     window_s: u64,
-) -> Result<(Vec<(String, crate::sampler::Samples)>, Held), String> {
+) -> Result<HeldWindow, String> {
     let topic = sustained_topic(&opts.topic);
     let partitions = env.spec.infra.partitions;
     let threads = producer_threads(offered_msgs_per_s);
@@ -2522,6 +2565,7 @@ fn hold_sustained_window(
     // this is the one place in the harness where a window has to be *sized*, and
     // `SUSTAINED_WINDOW_S` records why the size is what it is.
     let samplers = sampler::sample_arm(names, sampler::INTERVAL_S);
+    let server = sampler::sample_server(&ep.ch_container, sampler::INTERVAL_S);
     let opened = Instant::now();
     let mut probe_failures = 0u32;
     while opened.elapsed() < Duration::from_secs(window_s) {
@@ -2551,6 +2595,7 @@ fn hold_sustained_window(
     // Close the window BEFORE stopping the producer: the offered rate has to
     // have been offered for the whole of the interval the samplers covered.
     let costs = stop_samplers(samplers, names);
+    let server = server.stop();
     let report = load.stop();
 
     if report.failed > 0 {
@@ -2587,7 +2632,7 @@ fn hold_sustained_window(
         ));
     }
 
-    Ok((costs, Held::Sustained { report, threads }))
+    Ok((costs, server, Held::Sustained { report, threads }))
 }
 
 /// Stops every sampler and pairs its series with the container it watched.
@@ -3387,12 +3432,33 @@ fn with_logs(reason: &str, logs: &str) -> String {
 /// One spelling for the terminal and the note, so the line an operator reads
 /// during a sweep and the line a reader finds in `results/` months later cannot
 /// disagree about why the number was demoted.
-fn infra_bound_notice() -> String {
+fn infra_bound_notice(verdict: &ceiling::Verdict) -> String {
     format!(
-        "INFRA-BOUND: above {:.0}% of a measured ceiling, so this number describes \
-         the shared infrastructure rather than the system",
-        HEADROOM_LIMIT * 100.0
+        "INFRA-BOUND: {}, so this number describes the shared infrastructure rather \
+         than the system",
+        verdict.reasons().join("; ")
     )
+}
+
+/// The figures the ClickHouse saturation gate read, as record metrics.
+fn server_load_metrics(load: &ceiling::ServerLoad) -> Vec<(String, Metric)> {
+    let mut out = Vec::new();
+    if let Some(cores) = load.cores_used {
+        out.push(("ch_cores_used".to_owned(), Metric::minimize(cores, "cores")));
+    }
+    if let Some(share) = load.throttled_share {
+        out.push((
+            "ch_throttled_share".to_owned(),
+            Metric::minimize(share, "ratio"),
+        ));
+    }
+    if let Some(share) = load.delayed_insert_share {
+        out.push((
+            "ch_delayed_insert_share".to_owned(),
+            Metric::minimize(share, "ratio"),
+        ));
+    }
+    out
 }
 
 /// The part of a refusal that belongs in a record's `note`.
@@ -3807,6 +3873,7 @@ fn assert_arm_caps(name: &str, declared: &Container, meta: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::HEADROOM_LIMIT;
 
     /// The floor is the difference between two measurements of the same thing,
     /// so it cannot depend on which of them is called the control.
@@ -4197,14 +4264,13 @@ mod tests {
         assert!((share / wrong - per_event / per_message).abs() < 1e-9);
     }
 
-    /// `methodology/` says an arm above 70% of **either** ceiling is
-    /// infra-bound, and the driver reads that as one predicate over every share.
+    /// With no ClickHouse counters for the window, an arm above 70% of either
+    /// ceiling is infra-bound.
     ///
     /// The case that matters is the one below: an arm with plenty of broker
     /// headroom sitting at 90% of what ClickHouse absorbed for its insert
-    /// format. Reading only the consume ceiling — which is what the driver did
-    /// before `ceiling::Ceiling` existed — publishes it as a system comparison
-    /// when the number describes the target.
+    /// format. Reading only the consume ceiling publishes it as a system
+    /// comparison when the number describes the target.
     #[test]
     fn an_arm_bound_by_clickhouse_is_infra_bound_even_with_broker_headroom() {
         let gate = gate(Some(1_000_000), vec![ingest("rowbinary", 4_000_000)]);
@@ -4413,18 +4479,38 @@ mod tests {
     /// is what the site renders beside the number.
     #[test]
     fn the_infra_bound_notice_names_the_limit_it_broke() {
-        let notice = infra_bound_notice();
-        assert!(notice.starts_with("INFRA-BOUND:"), "{notice}");
-        assert!(
-            notice.contains(&format!("{:.0}%", HEADROOM_LIMIT * 100.0)),
-            "the notice must quote the limit it is enforcing: {notice}"
-        );
-        assert!(
-            notice.contains("shared infrastructure"),
-            "the notice must say what the number describes instead: {notice}"
-        );
-        // Survives `note_for`'s truncation, so a refusal carrying it keeps it.
-        assert!(notice.chars().count() < NOTE_MAX_CHARS, "{notice}");
+        let headroom =
+            gate(Some(1_000_000), vec![ingest("native", 4_000_000)]).headroom(ceiling::Achieved {
+                msgs_per_s: 100_000.0,
+                rows_per_s: 3_600_000.0,
+                wire_format: "native",
+                server_side_transform: false,
+            });
+        let throttled = ceiling::ServerLoad {
+            cores_used: Some(31.0),
+            cpu_share: Some(0.65),
+            throttled_share: Some(0.13),
+            delayed_insert_share: Some(0.0),
+        };
+        for (load, limit) in [
+            (throttled, ceiling::THROTTLED_SHARE_LIMIT),
+            (ceiling::ServerLoad::default(), HEADROOM_LIMIT),
+        ] {
+            let verdict = headroom.verdict(&load);
+            assert!(verdict.infra_bound(), "{verdict:?}");
+            let notice = infra_bound_notice(&verdict);
+            assert!(notice.starts_with("INFRA-BOUND:"), "{notice}");
+            assert!(
+                notice.contains(&format!("{:.0}%", limit * 100.0)),
+                "the notice must quote the limit it is enforcing: {notice}"
+            );
+            assert!(
+                notice.contains("shared infrastructure"),
+                "the notice must say what the number describes instead: {notice}"
+            );
+            // Survives `note_for`'s truncation, so a refusal carrying it keeps it.
+            assert!(notice.chars().count() < NOTE_MAX_CHARS, "{notice}");
+        }
     }
 
     #[test]
@@ -4747,6 +4833,8 @@ mod tests {
             os_cpu_virtual_us: Some(514_215.0),
             os_cpu_wait_us: Some(786_278.0),
             queries_without_cpu: 0,
+            insert_duration_ms: 1_299,
+            delayed_inserts_ms: 0,
         }
     }
 

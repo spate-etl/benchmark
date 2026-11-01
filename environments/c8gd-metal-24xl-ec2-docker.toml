@@ -82,8 +82,9 @@ clickhouse_data = "/mnt/bench-clickhouse"
 broker_data     = "/mnt/bench-broker"
 
 # Written by `bench ceiling --measure --write --env c8gd-metal-24xl-ec2-docker`
-# on the box. An arm above 70% of the measured ceiling is infra-bound and cannot
-# be published.
+# on the box. An arm above 70% of the consume ceiling is infra-bound. ClickHouse
+# is held to its measured saturation over each arm's window, and its ingest
+# ceiling decides only when those counters are missing (methodology/envelope.md).
 [ceiling]
 file = "ceilings/c8gd-metal-24xl-ec2-docker.json"
 
