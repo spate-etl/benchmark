@@ -117,18 +117,19 @@ allocation and use is visible rather than implied.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(3 CPUs, 8 GiB) and ClickHouse (32 CPUs, 32 GiB) in the committed environment
+(3 CPUs, 8 GiB) and ClickHouse (48 CPUs, 32 GiB) in the committed environment
 profile.
 
 Those numbers are the output of a measured ladder rather than a guess. The
 consume ceiling is flat from 8 to 32 partitions and from a 3-core broker cap to
 an 8-core one (the broker never uses 2 full cores while serving it), so the
-broker keeps the smallest cap that does not constrain it. ClickHouse ingest
-stops scaling at about 28 cores — RowBinary reaches 6.0M rows/s at a throttled
-16-core cap, 11.0M at 32, and the same 11.0M at 48 and 64 with the extra cores
-idle — so it gets 32, the smallest cap at that plateau. Every core past the
-plateau buys background merges rather than ceiling, which is contention inside
-the measurement, not headroom. The host bounds the total: 3 + 32 + 32 leaves 29
+broker keeps the smallest cap that does not constrain it. ClickHouse gets 48
+cores because 32 is the binding cap at the arms' rates on the synchronous insert
+path: the Spate native arm at about 35M rows/s holds a 32-core server at about 31
+cores, throttled 3.8–4.6 s per second, and leaves a 48-core server unthrottled at
+about 32 cores. The arm's rate is the same under both caps, so the extra cores
+remove CPU contention from the server during the window and add no throughput.
+The host bounds the total: 3 + 48 + 32 leaves 13
 of 96 cores for the driver, the sampler and the operating system.
 
 One consequence of a 32-partition topic worth stating normatively: a consumer
