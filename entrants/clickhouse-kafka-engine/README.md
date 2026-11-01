@@ -60,7 +60,7 @@ SQL is exactly what runs, and what the driver set is exactly what
 | `async_insert` | **0** | Session settings travel with the Distributed forward, and 26.8 defaults this ON — unpinned, the shared server executes this arm's forwarded inserts down the async path (verified live), the harness refuses to attribute them (`AsyncInsertQuery` fingerprint), and the record would ship with no server-side metrics. 0 is what Spate's and Flink's clients set per insert. |
 | `kafka_commit_every_batch` | 0 (shipped) | One offset commit per flushed block, not per librdkafka batch — this is what makes `flush_ms` the durability cadence. |
 | `materialized_views_ignore_errors` | 0 (pinned) | 1 would turn a refused remote insert into a dropped block plus a log line; the loss gate must see stall-and-replay, never skip. |
-| `background_message_broker_schedule_pool_size` | 16 (shipped, recorded) | The pool the streaming jobs run in; with `thread_per_consumer = 1` the arm needs ≥ 8. Recorded so a default change cannot move it silently. |
+| `background_message_broker_schedule_pool_size` | **64** (shipped 16) | The pool the streaming jobs run in; with `thread_per_consumer = 1` each of the 32 consumers holds one thread for the life of the table, so the shipped 16 would run half of them. Set in `config.d/30-server-sizing.xml`. |
 | `queued_max_messages_kbytes` | 262144 | librdkafka prefetch byte cap, 64 MiB → 256 MiB per consumer queue: ClickHouse itself targets `queued.min.messages = max(block_msgs, 100000)` messages of prefetch, and the shipped 64 MiB cap cuts that off below one 16384-msg × ~5 KiB block. |
 
 Server sizing for a node that stores nothing (shrunk caches, 2-thread merge
@@ -113,10 +113,10 @@ docker exec spate-bench-ch-kafka clickhouse-client --query \
   "SELECT count() FROM system.kafka_consumers WHERE table = 'sensor_batches_queue'"
 ```
 
-Must print **8**. At v26.8 LTS the CREATE-time cap (`max(detected cores,
-16)`) cannot clamp 8 silently — a violation throws during initdb and the
+Must print **32**. At v26.8 LTS the CREATE-time cap (`max(detected cores,
+16)`) cannot clamp 32 silently — a violation throws during initdb and the
 container never starts — so this check exists to catch a *future* version
-moving that behaviour, and a count under 8 still invalidates the run.
+moving that behaviour, and a count under 32 still invalidates the run.
 
 The SQL endpoint refuses remote clients: with no `CLICKHOUSE_PASSWORD`
 set, the official entrypoint restricts the `default` user to localhost, so a
@@ -126,7 +126,7 @@ reviewer goes through `docker exec` as above.
 
 | Component | Coordinate / image | Version |
 |---|---|---|
-| ClickHouse server | `clickhouse/clickhouse-server:26.8.25.14` (digest `sha256:dd81097e…73b9`) | 26.8.25.14 |
+| ClickHouse server | `clickhouse/clickhouse-server:26.8.36.3` (digest `sha256:d426d2f6…a7a7`) | 26.8.36.3 |
 | librdkafka | bundled in the server build (listed in `system.licenses`) | pinned by the server tag's contrib submodule; not surfaced at runtime |
 
 Same major as the shared storage server (`environments/*.toml`): one
@@ -138,7 +138,7 @@ version string the image reports, so a base bump refuses the run.
 
 Each consumer's loop is strictly serial: poll → decode → ARRAY JOIN →
 **synchronous** remote insert → commit, with no in-flight pipelining — the
-remote-ack stall per block is dead time, and the arm is 8 such serial loops
+remote-ack stall per block is dead time, and the arm is 32 such serial loops
 on 32 CPUs. If the number is X and not 2X, this is the first place to look,
 and it is the price of the setting that makes the guarantee real.
 
@@ -151,10 +151,10 @@ and it is the price of the setting that makes the guarantee real.
   [#40670](https://github.com/ClickHouse/ClickHouse/pull/40670)): the
   CREATE-time cap is `max(detected cores, 16)` at v26.8 LTS and a violation
   **throws at CREATE** — a loud initdb failure, not a silent clamp — so this
-  arm's 8 consumers fit on 6 detected cores with no override
+  arm's 32 consumers fit its 32-core cgroup with no override
   (`kafka_disable_num_consumers_limit` exists as the escape hatch and is
-  deliberately NOT set: nothing here needs it). Verified against the built
-  image: `system.kafka_consumers` reports 8.
+  deliberately NOT set: nothing here needs it). The post-start check above
+  reads the count back.
 - **AvroConfluent `array<record>`** decodes as `Array(Tuple(...))` and the
   nested fields are addressed `e.seq`, `e.name`, … after `ARRAY JOIN` — the
   decode path is not a flat-struct fast case, by workload design.

@@ -72,7 +72,7 @@ use spate_benchmark_harness::{docker, http};
 /// Pinned to a version rather than `latest`, for the reason the whole harness
 /// pins images: a claim about what a server accepted is worth nothing if nobody
 /// can say which server.
-const IMAGE: &str = "clickhouse/clickhouse-server:26.8";
+const IMAGE: &str = "clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7";
 
 /// The password the container is started with, matching `infra::start_clickhouse`
 /// so the two rigs do not differ in a way somebody has to remember.

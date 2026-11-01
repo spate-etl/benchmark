@@ -95,9 +95,15 @@ serving writes and reads at once and a generator competing for cores, which is
 the whole argument drain exists for. Latency is single-mode by construction.
 
 Softer provenance — a ClickHouse patch release, a compiler version, a broker
-version — is recorded on every record and rendered as a footnote. Refusing to
-compare across a ClickHouse patch would make the suite unusable; refusing across a
-protocol change is the entire point.
+version — is recorded on every record. Refusing to compare across a ClickHouse
+patch would make the suite unusable; refusing across a protocol change is the
+entire point.
+
+A ClickHouse feature release can change server defaults that move what an insert
+costs the server, so a move across feature releases is published as a full sweep
+of every active arm, under an `infra_digest` that no record from the previous
+server carries. Records from the two servers then never share a comparability
+group.
 
 ### The source system
 
