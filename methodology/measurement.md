@@ -35,9 +35,10 @@ arm-dependent: 25,000-row batches make far more parts than 262,144-row ones, and
 that cost lands nowhere in this figure. The exclusion is from that figure only.
 Merges run on the same cores and the same disk as the measurement, so they reach
 throughput while being charged to nobody. Two things bound them. Every
-repetition waits for the target to report no active parts and no running merges
-before its window opens, so a repetition pays for its own merges rather than for
-its predecessor's; and `ch_rows_merged`, `ch_merge_duration_us` and
+repetition waits for the target to report no parts in any state and no running
+merges before its window opens, and the target table deletes a merged-away part
+within seconds, so a repetition pays for its own merges and their cleanup rather
+than for its predecessor's; and `ch_rows_merged`, `ch_merge_duration_us` and
 `ch_settle_us` are on every record, so the merge work a window ran against is
 visible rather than inferred. **A GC number exists only for JVM arms**
 — and only for a container whose descriptor declares `gc_log`; a JVM container
