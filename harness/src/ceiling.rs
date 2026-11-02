@@ -340,6 +340,11 @@ pub const HEADROOM_LIMIT: f64 = 0.70;
 pub const THROTTLED_SHARE_LIMIT: f64 = 0.01;
 
 /// The share of ClickHouse's cap used at or above which it bound the arm.
+///
+/// The ingest sweep reads the same line: a rung at or above it measured the
+/// server at its cap, so a sweep whose best rung got there has found the
+/// server's ceiling even if that rung still beat the one below it. More
+/// inserters only queue for the same cores.
 pub const CPU_SHARE_LIMIT: f64 = 0.90;
 
 /// The share of the arm's insert time ClickHouse spent holding inserts back, at
@@ -2344,16 +2349,6 @@ const INGEST_SWEEP_MARGIN: f64 = 0.03;
 /// exceed.
 const INGEST_SWEEP_PATIENCE: usize = 2;
 
-/// Share of its cpu cap at which the target's cgroup shows the server, not the
-/// rig, is the limit.
-///
-/// A rung at or above it measured ClickHouse at its cap, so a sweep whose best
-/// rung got there has found the server's ceiling even if the rung still beat the
-/// one below it: more inserters only queue for the same cores. Without it a
-/// target that keeps gaining a few percent at its cap, until the rig cannot
-/// drive the next rung, is refused as a floor.
-const INGEST_SWEEP_SATURATED_SHARE: f64 = 0.95;
-
 /// Milliseconds of quiet between a settled table and the rung timed against it.
 ///
 /// A `TRUNCATE` drops the previous rung's parts asynchronously, and a rung that
@@ -2385,7 +2380,7 @@ const INGEST_SWEEP_SATURATED_SHARE: f64 = 0.95;
 ///   throughput was still climbing when the rig stopped asking. That is not a
 ///   ceiling and [`Sweep::still_climbing`] says so; the caller refuses rather
 ///   than publishing the last sample. The exception is an incumbent measured
-///   with the target at [`INGEST_SWEEP_SATURATED_SHARE`] of its cap: the server
+///   with the target at [`CPU_SHARE_LIMIT`] of its cap: the server
 ///   was the limit there, so its figure is the ceiling.
 #[derive(Debug)]
 struct Sweep {
@@ -2396,7 +2391,7 @@ struct Sweep {
     points: Vec<SweepPoint>,
     /// Index into `points` of the incumbent best.
     best: usize,
-    /// Whether the target was at [`INGEST_SWEEP_SATURATED_SHARE`] of its cap at
+    /// Whether the target was at [`CPU_SHARE_LIMIT`] of its cap at
     /// each rung in `points`.
     saturated: Vec<bool>,
     /// Consecutive rungs since the incumbent was set.
@@ -2585,11 +2580,10 @@ struct ServerCost {
     throttled_us: u64,
 }
 
-/// Whether a rung had the target at [`INGEST_SWEEP_SATURATED_SHARE`] of its cpu
+/// Whether a rung had the target at [`CPU_SHARE_LIMIT`] of its cpu
 /// cap. `false` when the cgroup could not be read or no cap is declared.
 fn at_cap(server: Option<ServerCost>) -> bool {
-    server
-        .is_some_and(|s| s.cap_cores > 0.0 && s.cores >= s.cap_cores * INGEST_SWEEP_SATURATED_SHARE)
+    server.is_some_and(|s| s.cap_cores > 0.0 && s.cores >= s.cap_cores * CPU_SHARE_LIMIT)
 }
 
 impl ServerCost {
@@ -6035,14 +6029,8 @@ mod tests {
             nr_throttled: 0,
             throttled_us: 0,
         };
-        assert!(at_cap(Some(cost(
-            48.0 * INGEST_SWEEP_SATURATED_SHARE,
-            48.0
-        ))));
-        assert!(!at_cap(Some(cost(
-            48.0 * INGEST_SWEEP_SATURATED_SHARE - 0.01,
-            48.0
-        ))));
+        assert!(at_cap(Some(cost(48.0 * CPU_SHARE_LIMIT, 48.0))));
+        assert!(!at_cap(Some(cost(48.0 * CPU_SHARE_LIMIT - 0.01, 48.0))));
         assert!(!at_cap(Some(cost(48.0, 0.0))));
         assert!(!at_cap(None));
     }
