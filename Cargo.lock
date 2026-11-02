@@ -2341,8 +2341,7 @@ dependencies = [
 [[package]]
 name = "spate-avro"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bcd6e5ac6ca58e199032391472e125f7a3411554def86acf5fb71babdda208c"
+source = "git+https://github.com/spate-etl/spate?rev=4e161d49628e90a9e89c4e2e2769d2270f7fcfb9#4e161d49628e90a9e89c4e2e2769d2270f7fcfb9"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -2384,8 +2383,7 @@ dependencies = [
 [[package]]
 name = "spate-clickhouse"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95f0b3babc90d9e2cb2e35f95785e8843936cb956a50c707be081a53473a92ce"
+source = "git+https://github.com/spate-etl/spate?rev=4e161d49628e90a9e89c4e2e2769d2270f7fcfb9#4e161d49628e90a9e89c4e2e2769d2270f7fcfb9"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2411,8 +2409,7 @@ dependencies = [
 [[package]]
 name = "spate-clickhouse-derive"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "853f8468c19554c95a8649f36209d75198af20180736d4cadf4780e94d614485"
+source = "git+https://github.com/spate-etl/spate?rev=4e161d49628e90a9e89c4e2e2769d2270f7fcfb9#4e161d49628e90a9e89c4e2e2769d2270f7fcfb9"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2423,8 +2420,7 @@ dependencies = [
 [[package]]
 name = "spate-core"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "842ffcd914babc096daf7ad4d97db035cfa58ee55d706609b7cc566690b6e176"
+source = "git+https://github.com/spate-etl/spate?rev=4e161d49628e90a9e89c4e2e2769d2270f7fcfb9#4e161d49628e90a9e89c4e2e2769d2270f7fcfb9"
 dependencies = [
  "bytes",
  "bytesize",
@@ -2451,8 +2447,7 @@ dependencies = [
 [[package]]
 name = "spate-kafka"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1566c92eb7b5609c318d36d3005d7a1e9595defe17f1e7d074307e60d2c15520"
+source = "git+https://github.com/spate-etl/spate?rev=4e161d49628e90a9e89c4e2e2769d2270f7fcfb9#4e161d49628e90a9e89c4e2e2769d2270f7fcfb9"
 dependencies = [
  "bytes",
  "bytesize",

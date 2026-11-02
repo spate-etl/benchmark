@@ -19,10 +19,10 @@ repository = "https://github.com/spate-etl/benchmark"
 [workspace.dependencies]
 spate-benchmark-harness = { version = "=0.1.0", path = "harness" }
 
-spate-core = "0.4.0"
-spate-avro = "0.4.0"
-spate-kafka = "0.4.0"
-spate-clickhouse = "0.4.0"
+spate-core = { git = "https://github.com/spate-etl/spate", rev = "4e161d49628e90a9e89c4e2e2769d2270f7fcfb9" }
+spate-avro = { git = "https://github.com/spate-etl/spate", rev = "4e161d49628e90a9e89c4e2e2769d2270f7fcfb9" }
+spate-kafka = { git = "https://github.com/spate-etl/spate", rev = "4e161d49628e90a9e89c4e2e2769d2270f7fcfb9" }
+spate-clickhouse = { git = "https://github.com/spate-etl/spate", rev = "4e161d49628e90a9e89c4e2e2769d2270f7fcfb9" }
 
 apache-avro = "0.22"
 bytes = "1.11.1"

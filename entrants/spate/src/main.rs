@@ -89,11 +89,37 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
         "pipeline: {{ name: comparison, threads: {threads}, io_threads: {io_threads} }}\n\
          checkpoint: {{ interval: 5s, max_pending_batches: 8192 }}\n\
          backpressure: {{ max_inflight_bytes: {budget_mib}MiB }}\n\
-         metrics: {{ exporter: none }}\n\
+         metrics: {{ exporter: prometheus }}\n\
+         admin: {{ listen: 127.0.0.1:9090 }}\n\
          source: {{ kafka: {{}} }}\n\
          sink: {{ clickhouse: {{}} }}\n"
     ))
     .expect("pipeline config")
+}
+
+/// Tuning branch only: polls the admin server's `/metrics` every five seconds
+/// and prints every `spate_*` series to stderr, so the collector's arm log
+/// carries them. Histogram buckets are skipped; `_sum` and `_count` remain.
+fn metrics_tap() {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:9090") else {
+                continue;
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            if std::io::Write::write_all(&mut s, b"GET /metrics HTTP/1.0\r\n\r\n").is_err() {
+                continue;
+            }
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(&mut s, &mut body);
+            for line in body.lines() {
+                if line.starts_with("spate_") && !line.contains("_bucket{") {
+                    eprintln!("metrics {line}");
+                }
+            }
+        }
+    });
 }
 
 fn kafka_source() -> spate_kafka::KafkaSource {
@@ -117,6 +143,20 @@ fn kafka_source() -> spate_kafka::KafkaSource {
         "auto.offset.reset".to_owned(),
         env_str("OFFSET_RESET", "earliest"),
     )]);
+    // Tuning branch only (spate#1651): the source's consumer count, and the
+    // fetch path's sizes raised on one consumer.
+    cfg.consumers = usize::try_from(env_u64("CONSUMERS", 1)).expect("CONSUMERS");
+    if env_str("FETCH", "default") == "raised" {
+        for (k, v) in [
+            ("fetch.max.bytes", "104857600"),
+            ("fetch.message.max.bytes", "8388608"),
+            ("receive.message.max.bytes", "105906176"),
+            ("queued.min.messages", "1000000"),
+        ] {
+            cfg.rdkafka.insert(k.to_owned(), v.to_owned());
+        }
+    }
+    eprintln!("kafka source: consumers={} fetch={}", cfg.consumers, env_str("FETCH", "default"));
     spate_kafka::KafkaSource::new(cfg)
 }
 
@@ -209,6 +249,7 @@ fn run(format: Format) {
         explicit => explicit,
     };
     println!("egress={:?} budget={budget_mib}MiB", Egress::from_env());
+    metrics_tap();
 
     let pipeline =
         Pipeline::from_config(pipeline_config(threads, io_threads, budget_mib)).expect("pipeline");

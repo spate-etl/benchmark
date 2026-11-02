@@ -110,6 +110,32 @@ env      = { FORMAT = "native" }
 knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
 reports  = { wire_format = "native" }
 
+# Tuning branch only (spate#1651): the native arm with 2 and 4 Kafka consumers,
+# and with one consumer and the fetch path's sizes raised.
+[[variants]]
+id       = "native-c2"
+label    = "Spate · Native · 2 consumers"
+approach = "realistic"
+env      = { FORMAT = "native", CONSUMERS = "2" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+[[variants]]
+id       = "native-c4"
+label    = "Spate · Native · 4 consumers"
+approach = "realistic"
+env      = { FORMAT = "native", CONSUMERS = "4" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
+[[variants]]
+id       = "native-fetch"
+label    = "Spate · Native · fetch sizes raised"
+approach = "realistic"
+env      = { FORMAT = "native", FETCH = "raised" }
+knobs    = { threads = 32, shards = 32, inflight = 4, linger_ms = 2000, max_rows = 1048576, compression = "lz4", io_threads = 2 }
+reports  = { wire_format = "native" }
+
 # The arm to read against Flink, which writes the same wire format: ClickHouse's
 # official Flink connector can only write RowBinaryWithNamesAndTypes because the
 # Java client has no Native writer (clickhouse-java#2509). The framework's
