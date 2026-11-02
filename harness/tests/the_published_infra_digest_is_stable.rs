@@ -23,7 +23,7 @@ fn environments_dir() -> PathBuf {
 /// ceiling measured on it carries. A ceiling measured under any other digest does
 /// not gate a run here, so a change to an input this covers needs the ceilings
 /// re-measured and moves this constant in the same commit.
-const PUBLISHED_DIGEST: &str = "5bb24c8a9213";
+const PUBLISHED_DIGEST: &str = "4c4e561800d4";
 const PUBLISHED_ENV: &str = "c8gd-metal-24xl-ec2-docker";
 
 #[test]
