@@ -2238,15 +2238,21 @@ impl From<ServerCost> for Cgroup {
 // The ClickHouse ingest pass
 // ---------------------------------------------------------------------------
 
-/// Batches encoded into one insert block. A thousand batches is 73,500 rows
-/// after the workload's filters, which is the order of block a real arm sends.
-const INSERT_BLOCK_BATCHES: u64 = 1_000;
+/// Batches encoded into one insert block: 1,029,000 rows after the workload's
+/// filters.
+///
+/// Close to ClickHouse's `max_insert_block_size` (1,048,449 rows) and kept under
+/// it, so each POST lands as one part, the largest block the server takes in
+/// one insert. On the synchronous path a smaller block writes more parts per
+/// row and measures less than an arm that batches larger, so the ceiling is
+/// taken at the size no arm's batch exceeds.
+const INSERT_BLOCK_BATCHES: u64 = 14_000;
 /// Distinct blocks pre-encoded before the clock starts.
 ///
 /// Distinct rather than one block re-sent, because a single block would give
 /// every insert the same handful of `LowCardinality` dictionary entries and the
 /// same array shapes, and the target would absorb it faster than it absorbs the
-/// corpus. Eight blocks cover eight thousand batches, which spans every modulus
+/// corpus. Eight blocks cover 112,000 batches, which spans every modulus
 /// the generator's derivations use.
 const INSERT_BLOCK_POOL: u64 = 8;
 /// Seconds one insert may take before the pass gives up on it.
@@ -5491,6 +5497,20 @@ mod tests {
     /// event count — and exactly the count the corpus's own oracle expects. A
     /// block that carried every event would be measuring an insert nobody
     /// performs.
+    /// Every block in the ingest pool fits in one ClickHouse insert block, so
+    /// each POST lands as one part, and the first carries the row count the
+    /// constant's doc states.
+    #[test]
+    fn every_ingest_block_fits_one_clickhouse_insert_block() {
+        const MAX_INSERT_BLOCK_SIZE: u64 = 1_048_449;
+        let rows = |lo: u64, hi: u64| corpus::expected_rows(hi) - corpus::expected_rows(lo);
+        assert_eq!(rows(0, INSERT_BLOCK_BATCHES), 1_029_000);
+        for k in 0..INSERT_BLOCK_POOL {
+            let n = rows(k * INSERT_BLOCK_BATCHES, (k + 1) * INSERT_BLOCK_BATCHES);
+            assert!(n <= MAX_INSERT_BLOCK_SIZE, "block {k} carries {n} rows");
+        }
+    }
+
     #[test]
     fn a_block_carries_exactly_the_rows_the_workload_keeps() {
         for format in FORMATS {
