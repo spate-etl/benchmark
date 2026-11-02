@@ -75,7 +75,7 @@ note "prefilling the run-mode corpus"
 # and higher part limits let the arm run past it, so the sweep measures the
 # source. The file lives in the running container, so a restart keeps it.
 chq() { docker exec spate-bench-clickhouse clickhouse-client --password bench -q "$1"; }
-docker exec spate-bench-clickhouse bash -c "cat > /etc/clickhouse-server/config.d/zz-bench-1651.xml" <<'XML'
+docker exec -i spate-bench-clickhouse bash -c "cat > /etc/clickhouse-server/config.d/zz-bench-1651.xml" <<'XML'
 <clickhouse>
   <background_pool_size>32</background_pool_size>
   <merge_tree>
@@ -86,9 +86,16 @@ docker exec spate-bench-clickhouse bash -c "cat > /etc/clickhouse-server/config.
 XML
 docker restart spate-bench-clickhouse >/dev/null
 for _ in $(seq 1 90); do chq "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
-note "clickhouse pool $(chq "SELECT value FROM system.server_settings WHERE name = 'background_pool_size'") \
-delay $(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_delay_insert'") \
-throw $(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_throw_insert'")"
+lifted="$(chq "SELECT value FROM system.server_settings WHERE name = 'background_pool_size'") \
+$(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_delay_insert'") \
+$(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_throw_insert'")" || lifted="unreadable"
+note "clickhouse pool, delay, throw: $lifted"
+# A sweep on the default sink would repeat the last box, so refuse it.
+if [ "$lifted" != "32 3000 6000" ]; then
+  docker logs --tail 20 spate-bench-clickhouse 2>&1 | sed 's/^/    /'
+  note "the sink settings did not apply; no sweep"
+  exit 1
+fi
 
 note "arm cells: native (1 consumer), native-c2, native-c4, native-c8"
 diag_start consumers
