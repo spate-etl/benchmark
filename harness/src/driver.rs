@@ -582,6 +582,37 @@ pub fn prefill(root: &Path, opts: &RunOptions) -> Result<(), String> {
     Ok(())
 }
 
+/// Tuning only, never published: `BENCH_NULL_SINK=1` swaps the target table
+/// for a `Null` engine copy, so ClickHouse parses each insert and stores
+/// nothing. A materialized view writes one row count per insert block into
+/// [`NULL_SINK_ROWS`], which the drain counts instead, and the correctness
+/// gate cannot run. This measures an arm with the sink's storage removed.
+fn null_sink() -> bool {
+    std::env::var("BENCH_NULL_SINK").is_ok_and(|v| v == "1")
+}
+
+/// The table the `Null` target's view counts rows into.
+const NULL_SINK_ROWS: &str = "sensor_events_rows";
+
+/// Statements that turn the workload table into a `Null` engine copy with a
+/// row-counting view. Idempotent, so a rerun on the same server is safe.
+fn null_sink_sql() -> Vec<String> {
+    let t = corpus::TABLE;
+    vec![
+        format!("DROP VIEW IF EXISTS {NULL_SINK_ROWS}_mv"),
+        format!("DROP TABLE IF EXISTS {NULL_SINK_ROWS}"),
+        format!("DROP TABLE IF EXISTS {t}_null"),
+        format!("CREATE TABLE {t}_null AS {t} ENGINE = Null"),
+        format!("EXCHANGE TABLES {t} AND {t}_null"),
+        format!("DROP TABLE {t}_null"),
+        format!("CREATE TABLE {NULL_SINK_ROWS} (n UInt64) ENGINE = MergeTree ORDER BY tuple()"),
+        format!(
+            "CREATE MATERIALIZED VIEW {NULL_SINK_ROWS}_mv TO {NULL_SINK_ROWS} \
+             AS SELECT count() AS n FROM {t}"
+        ),
+    ]
+}
+
 /// Runs the selected arms and appends one record per repetition.
 ///
 /// One record per repetition **including a refused one**, as long as the arm got
@@ -743,6 +774,22 @@ pub fn run(root: &Path, arms: &[Arm<'_>], opts: &RunOptions) -> Result<(), Strin
     for stmt in corpus::ddl_statements() {
         crate::docker::clickhouse_sql(&ep.ch_host, ep.ch_port, &ep.ch_user, &ep.ch_password, &stmt)
             .map_err(|e| format!("DDL failed: {e}"))?;
+    }
+    if null_sink() {
+        eprintln!(
+            "\nNULL SINK: {} is a Null engine table; tuning only\n",
+            corpus::TABLE
+        );
+        for stmt in null_sink_sql() {
+            crate::docker::clickhouse_sql(
+                &ep.ch_host,
+                ep.ch_port,
+                &ep.ch_user,
+                &ep.ch_password,
+                &stmt,
+            )
+            .map_err(|e| format!("null sink DDL failed: {e}"))?;
+        }
     }
     // Verify the load source BEFORE starting anything. Without this, a missing
     // or short topic is discovered one arm at a time, each failing only at the
@@ -1840,7 +1887,14 @@ fn run_arm(
         ep.ch_port,
         &ep.ch_user,
         &ep.ch_password,
-        &format!("TRUNCATE TABLE {}", corpus::TABLE),
+        &format!(
+            "TRUNCATE TABLE {}",
+            if null_sink() {
+                NULL_SINK_ROWS
+            } else {
+                corpus::TABLE
+            }
+        ),
     )
     .map_err(|e| format!("truncate failed: {e}"))?;
 
@@ -1901,7 +1955,11 @@ fn run_arm(
             ep.ch_port,
             &ep.ch_user,
             &ep.ch_password,
-            &format!("SELECT count() FROM {}", corpus::TABLE),
+            &if null_sink() {
+                format!("SELECT sum(n) FROM {NULL_SINK_ROWS}")
+            } else {
+                format!("SELECT count() FROM {}", corpus::TABLE)
+            },
         )
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -2295,15 +2353,27 @@ fn run_arm(
         opts.batches,
         crate::entrant::parse_memory(&env.spec.infra.clickhouse.memory).unwrap_or(0),
     );
-    let gates = corpus::run_gates(
-        &ep.ch_host,
-        ep.ch_port,
-        &ep.ch_user,
-        &ep.ch_password,
-        gate_batches,
-    )
-    .map_err(|e| with_logs(&e, &logs))?;
-    if let Some(why) = gates.failure() {
+    let gates = if null_sink() {
+        None
+    } else {
+        Some(
+            corpus::run_gates(
+                &ep.ch_host,
+                ep.ch_port,
+                &ep.ch_user,
+                &ep.ch_password,
+                gate_batches,
+            )
+            .map_err(|e| with_logs(&e, &logs))?,
+        )
+    };
+    if gates.is_none() {
+        note.push_str(&format!(
+            "; NULL SINK: no correctness gate, {} rows counted against {expected_rows} expected",
+            settled.rows
+        ));
+    }
+    if let Some(why) = gates.as_ref().and_then(corpus::Gates::failure) {
         // A gate failure on a pipeline that never settled is a different claim
         // from a gate failure on one that did, and only the second of them is
         // evidence about the arm. Without this sentence a saturated sustained run
@@ -2354,7 +2424,9 @@ fn run_arm(
         data_plane,
         rows: rows_f,
         rows_per_s,
-        duplicates: gates.duplicates,
+        // Without the gate, rows counted past the corpus are the duplicates,
+        // provided none was lost.
+        duplicates: gates.map_or(settled.rows.saturating_sub(expected_rows), |g| g.duplicates),
         settle_s,
         status,
         note,

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # bootstrap/spate-1651-consumers only, not for merge: a scripted tuning session
-# for spate#1651. With ClickHouse's insert delay lifted, it measures the Spate
-# native arm at 1, 2, 4 and 8 Kafka consumers, in one interleaved sweep
-# of two reps with the A/A control, the arm's metrics tapped and the host
-# collector running. It uploads everything and returns, so the box terminates
-# as soon as the work is done.
+# for spate#1651. With the target table swapped for a Null engine copy
+# (BENCH_NULL_SINK=1), ClickHouse parses each insert and stores nothing, so the
+# sweep measures the Spate native arm at 1, 2, 4 and 8 Kafka consumers with the
+# sink's storage removed. One interleaved sweep of two reps with the A/A
+# control, the arm's metrics tapped and the host collector running. It uploads
+# everything and returns, so the box terminates as soon as the work is done.
 #
 # Nothing this box does may be published: every record is --trigger tuning,
-# and the arm is pinned to an unreleased spate commit.
+# the arm is pinned to an unreleased spate commit, and no record carries a
+# correctness gate.
 set -euo pipefail
 
 : "${REPO:?}" "${ENV_ID:?}" "${S3_RUN:?}" "${TTL_HOURS:?}"
@@ -70,37 +72,19 @@ note "building the spate arm"
 note "prefilling the run-mode corpus"
 "$BENCH" prefill --env "$ENV_ID" >>"$LOG" 2>&1
 
-# Lift the sink's bound: at two consumers ClickHouse delayed 54-67% of inserts
-# on the active-part count while using 34 of its 48 cores. A larger merge pool
-# and higher part limits let the arm run past it, so the sweep measures the
-# source. The file lives in the running container, so a restart keeps it.
 chq() { docker exec spate-bench-clickhouse clickhouse-client --password bench -q "$1"; }
-docker exec -i spate-bench-clickhouse bash -c "cat > /etc/clickhouse-server/config.d/zz-bench-1651.xml" <<'XML'
-<clickhouse>
-  <background_pool_size>32</background_pool_size>
-  <merge_tree>
-    <parts_to_delay_insert>3000</parts_to_delay_insert>
-    <parts_to_throw_insert>6000</parts_to_throw_insert>
-  </merge_tree>
-</clickhouse>
-XML
-docker restart spate-bench-clickhouse >/dev/null
-for _ in $(seq 1 90); do chq "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
-lifted="$(chq "SELECT value FROM system.server_settings WHERE name = 'background_pool_size'") \
-$(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_delay_insert'") \
-$(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_throw_insert'")" || lifted="unreadable"
-note "clickhouse pool, delay, throw: $lifted"
-# A sweep on the default sink would repeat the last box, so refuse it.
-if [ "$lifted" != "32 3000 6000" ]; then
-  docker logs --tail 20 spate-bench-clickhouse 2>&1 | sed 's/^/    /'
-  note "the sink settings did not apply; no sweep"
-  exit 1
-fi
 
 note "arm cells: native (1 consumer), native-c2, native-c4, native-c8"
 diag_start consumers
-"$BENCH" run spate:native spate:native-c2 spate:native-c4 spate:native-c8 --reps 2 \
+BENCH_NULL_SINK=1 "$BENCH" run spate:native spate:native-c2 spate:native-c4 spate:native-c8 --reps 2 \
   --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "arm run failed; see ladder.log"
 diag_stop
+
+# The sweep is only what it claims if the driver took the null path and the
+# table stayed Null throughout.
+grep -q "NULL SINK: sensor_events is a Null engine table" "$LOG" \
+  && note "driver took the null-sink path" || note "driver did NOT take the null-sink path"
+note "sensor_events engine at the end: $(chq "SELECT engine FROM system.tables WHERE name = 'sensor_events'" || echo unreadable)"
+note "rows counted by the view in the last rep: $(chq "SELECT sum(n) FROM sensor_events_rows" || echo unreadable)"
 
 note "session done; the payload returns and the box terminates"
