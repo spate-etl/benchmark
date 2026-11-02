@@ -156,7 +156,16 @@ fn kafka_source() -> spate_kafka::KafkaSource {
             cfg.rdkafka.insert(k.to_owned(), v.to_owned());
         }
     }
-    eprintln!("kafka source: consumers={} fetch={}", cfg.consumers, env_str("FETCH", "default"));
+    // spate#1659: how long librdkafka backs off a partition whose queue is full.
+    let backoff = env_str("QUEUE_BACKOFF_MS", "default");
+    if backoff != "default" {
+        cfg.rdkafka.insert("fetch.queue.backoff.ms".to_owned(), backoff.clone());
+    }
+    eprintln!(
+        "kafka source: consumers={} fetch={} queue_backoff_ms={backoff}",
+        cfg.consumers,
+        env_str("FETCH", "default")
+    );
     spate_kafka::KafkaSource::new(cfg)
 }
 
