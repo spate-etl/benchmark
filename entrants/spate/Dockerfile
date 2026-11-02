@@ -43,6 +43,9 @@ COPY workload workload
 # Cache mounts make an incremental rebuild seconds rather than minutes (rdkafka
 # compiles librdkafka from vendored C sources). A cache mount is not part of the
 # resulting layer, so the binary must be copied out inside the same RUN.
+# Tuning branch only: frame pointers in Rust and in vendored librdkafka, so a
+# profiler on the host can walk the pipeline threads' stacks.
+ENV RUSTFLAGS="-C force-frame-pointers=yes" CFLAGS="-O2 -fno-omit-frame-pointer"
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \

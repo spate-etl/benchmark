@@ -89,7 +89,7 @@ fn pipeline_config(threads: u64, io_threads: u64, budget_mib: u64) -> PipelineCo
         "pipeline: {{ name: comparison, threads: {threads}, io_threads: {io_threads} }}\n\
          checkpoint: {{ interval: 5s, max_pending_batches: 8192 }}\n\
          backpressure: {{ max_inflight_bytes: {budget_mib}MiB }}\n\
-         metrics: {{ exporter: prometheus }}\n\
+         metrics: {{ exporter: prometheus, per_partition_detail: true }}\n\
          admin: {{ listen: 127.0.0.1:9090 }}\n\
          source: {{ kafka: {{}} }}\n\
          sink: {{ clickhouse: {{}} }}\n"
