@@ -1030,7 +1030,7 @@ struct Measurement {
     rows_per_s: f64,
     /// Duplicate rows the correctness gate counted in its window.
     duplicates: u64,
-    /// Seconds the target needed to have no active parts and no running merges
+    /// Seconds the target needed to have no parts, outdated ones included, and no running merges
     /// after this repetition's truncate, before the window opened.
     settle_s: f64,
     /// `Ok`, or `InfraBound` when the shared infrastructure bound the arm.

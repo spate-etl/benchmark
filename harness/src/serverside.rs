@@ -1178,8 +1178,9 @@ pub const SETTLE_QUIET_MS: u64 = 2_000;
 /// Bounded because the alternative is a pass that hangs, and generous because
 /// the alternative to that is a measurement charged for its predecessor.
 /// Exceeding it is recorded rather than swallowed: a target that cannot clear
-/// its own merge queue inside this is a finding about the target.
-pub const SETTLE_MAX_S: u64 = 120;
+/// its own merge queue inside this is a finding about the target. Long enough
+/// for an arm that writes small inserts to have its outdated parts deleted.
+pub const SETTLE_MAX_S: u64 = 600;
 
 /// Milliseconds between polls while waiting.
 pub const SETTLE_POLL_MS: u64 = 250;
@@ -1222,8 +1223,22 @@ pub fn received_between(before: Option<u64>, after: Option<u64>) -> Option<u64> 
     }
 }
 
-/// Waits until `table` has no active parts and no running merges, and returns
-/// the seconds waited.
+/// The query [`wait_until_settled`] polls: parts of `table` in any state, plus
+/// its running merges.
+#[must_use]
+pub fn settle_sql(table: &str) -> String {
+    format!(
+        "SELECT (SELECT count() FROM system.parts WHERE table = '{table}') \
+         + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
+    )
+}
+
+/// Waits until `table` has no parts, outdated ones included, and no running
+/// merges, and returns the seconds waited.
+///
+/// Outdated parts count because their deletion runs on the server's cores and
+/// disk: a window opened while a predecessor's merged-away parts were still
+/// being removed paid for that removal.
 ///
 /// The wait is on the server's own `system.parts` and `system.merges` rather
 /// than on a clock. A `TRUNCATE` drops parts asynchronously and leaves a merge
@@ -1238,18 +1253,10 @@ pub fn wait_until_settled(host: &str, port: u16, user: &str, password: &str, tab
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_secs(SETTLE_MAX_S);
     while std::time::Instant::now() < deadline {
-        let quiet = crate::docker::try_clickhouse_sql(
-            host,
-            port,
-            user,
-            password,
-            &format!(
-                "SELECT (SELECT count() FROM system.parts WHERE table = '{table}' AND active) \
-                 + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
-            ),
-        )
-        .ok()
-        .and_then(|b| b.trim().parse::<u64>().ok());
+        let quiet =
+            crate::docker::try_clickhouse_sql(host, port, user, password, &settle_sql(table))
+                .ok()
+                .and_then(|b| b.trim().parse::<u64>().ok());
         if quiet.is_none_or(|n| n == 0) {
             break;
         }
@@ -1261,6 +1268,22 @@ pub fn wait_until_settled(host: &str, port: u16, user: &str, password: &str, tab
 
 #[cfg(test)]
 mod tests {
+    /// The settle wait counts outdated parts as well as active ones, so a
+    /// predecessor's merged-away parts still being deleted hold it.
+    #[test]
+    fn the_settle_wait_counts_parts_in_every_state() {
+        let sql = settle_sql("sensor_events");
+        assert!(
+            sql.contains("FROM system.parts WHERE table = 'sensor_events')"),
+            "{sql}"
+        );
+        assert!(!sql.contains("active"), "{sql}");
+        assert!(
+            sql.contains("FROM system.merges WHERE table = 'sensor_events'"),
+            "{sql}"
+        );
+    }
+
     use super::*;
 
     /// Three verbatim rows from the reference ClickHouse (26.3.17.4) — the Spate
