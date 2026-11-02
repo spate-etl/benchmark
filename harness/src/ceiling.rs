@@ -2344,6 +2344,16 @@ const INGEST_SWEEP_MARGIN: f64 = 0.03;
 /// exceed.
 const INGEST_SWEEP_PATIENCE: usize = 2;
 
+/// Share of its cpu cap at which the target's cgroup shows the server, not the
+/// rig, is the limit.
+///
+/// A rung at or above it measured ClickHouse at its cap, so a sweep whose best
+/// rung got there has found the server's ceiling even if the rung still beat the
+/// one below it: more inserters only queue for the same cores. Without it a
+/// target that keeps gaining a few percent at its cap, until the rig cannot
+/// drive the next rung, is refused as a floor.
+const INGEST_SWEEP_SATURATED_SHARE: f64 = 0.95;
+
 /// Milliseconds of quiet between a settled table and the rung timed against it.
 ///
 /// A `TRUNCATE` drops the previous rung's parts asynchronously, and a rung that
@@ -2374,7 +2384,9 @@ const INGEST_SWEEP_PATIENCE: usize = 2;
 /// * If the ladder runs out first and the incumbent best is the last rung tried,
 ///   throughput was still climbing when the rig stopped asking. That is not a
 ///   ceiling and [`Sweep::still_climbing`] says so; the caller refuses rather
-///   than publishing the last sample.
+///   than publishing the last sample. The exception is an incumbent measured
+///   with the target at [`INGEST_SWEEP_SATURATED_SHARE`] of its cap: the server
+///   was the limit there, so its figure is the ceiling.
 #[derive(Debug)]
 struct Sweep {
     step: u64,
@@ -2384,6 +2396,9 @@ struct Sweep {
     points: Vec<SweepPoint>,
     /// Index into `points` of the incumbent best.
     best: usize,
+    /// Whether the target was at [`INGEST_SWEEP_SATURATED_SHARE`] of its cap at
+    /// each rung in `points`.
+    saturated: Vec<bool>,
     /// Consecutive rungs since the incumbent was set.
     misses: usize,
 }
@@ -2398,6 +2413,7 @@ impl Sweep {
             next: Some(from.clamp(1, max)),
             points: Vec::new(),
             best: 0,
+            saturated: Vec::new(),
             misses: 0,
         }
     }
@@ -2407,13 +2423,14 @@ impl Sweep {
         self.next
     }
 
-    /// Records what the target absorbed at `concurrency` and decides whether to
-    /// keep climbing.
-    fn observe(&mut self, concurrency: u64, rows_per_s: u64) {
+    /// Records what the target absorbed at `concurrency`, and whether it was at
+    /// its cpu cap doing so, and decides whether to keep climbing.
+    fn observe(&mut self, concurrency: u64, rows_per_s: u64, saturated: bool) {
         self.points.push(SweepPoint {
             concurrency,
             rows_per_s,
         });
+        self.saturated.push(saturated);
         let improved = self.points.len() == 1
             || rows_per_s as f64
                 > self.points[self.best].rows_per_s as f64 * (1.0 + INGEST_SWEEP_MARGIN);
@@ -2452,8 +2469,13 @@ impl Sweep {
     /// figure is then a floor — the most this rig was allowed to ask for — and
     /// publishing it as a ceiling would gate arms against a number nothing
     /// showed the target could not beat.
+    ///
+    /// False when that best rung had the target at its cap, because the server
+    /// was the limit there whatever the rig could have asked for next.
     fn still_climbing(&self) -> bool {
-        !self.points.is_empty() && self.best + 1 == self.points.len()
+        !self.points.is_empty()
+            && self.best + 1 == self.points.len()
+            && !self.saturated.get(self.best).copied().unwrap_or(false)
     }
 }
 
@@ -2561,6 +2583,13 @@ struct ServerCost {
     nr_throttled: u64,
     /// Microseconds spent throttled by it.
     throttled_us: u64,
+}
+
+/// Whether a rung had the target at [`INGEST_SWEEP_SATURATED_SHARE`] of its cpu
+/// cap. `false` when the cgroup could not be read or no cap is declared.
+fn at_cap(server: Option<ServerCost>) -> bool {
+    server
+        .is_some_and(|s| s.cap_cores > 0.0 && s.cores >= s.cap_cores * INGEST_SWEEP_SATURATED_SHARE)
 }
 
 impl ServerCost {
@@ -2894,7 +2923,7 @@ fn measure_ingest(
             burst.settle_s,
             describe_landed(burst),
         );
-        sweep.observe(concurrency, burst.rows_per_s());
+        sweep.observe(concurrency, burst.rows_per_s(), at_cap(burst.server));
         bursts.push((concurrency, burst));
     }
     let swept_s = swept_from.elapsed().as_secs() + 1;
@@ -4842,7 +4871,7 @@ mod tests {
     fn run_sweep(max: u64, curve: impl Fn(u64) -> u64) -> Sweep {
         let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, max);
         while let Some(c) = sweep.next_rung() {
-            sweep.observe(c, curve(c));
+            sweep.observe(c, curve(c), false);
         }
         sweep
     }
@@ -5994,6 +6023,60 @@ mod tests {
     /// A target that keeps absorbing more has not been shown a ceiling, and the
     /// pass says so instead of publishing the largest number it happened to
     /// reach. This is the whole difference between a ceiling and a floor.
+    /// A rung is at the cap from 95% of it, and never without a cgroup reading
+    /// or a declared cap.
+    #[test]
+    fn a_rung_is_at_the_cap_from_its_saturation_share() {
+        let cost = |cores: f64, cap_cores: f64| ServerCost {
+            cores,
+            cap_cores,
+            user_us: 0,
+            system_us: 0,
+            nr_throttled: 0,
+            throttled_us: 0,
+        };
+        assert!(at_cap(Some(cost(
+            48.0 * INGEST_SWEEP_SATURATED_SHARE,
+            48.0
+        ))));
+        assert!(!at_cap(Some(cost(
+            48.0 * INGEST_SWEEP_SATURATED_SHARE - 0.01,
+            48.0
+        ))));
+        assert!(!at_cap(Some(cost(48.0, 0.0))));
+        assert!(!at_cap(None));
+    }
+
+    /// A sweep still gaining at its last rung is a ceiling, not a floor, when
+    /// that rung had the target at its cpu cap, and is refused when it did not.
+    #[test]
+    fn a_sweep_climbing_at_its_last_rung_is_a_ceiling_only_if_the_target_was_at_its_cap() {
+        let drive = |at_cap: u64| {
+            let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, 128);
+            while let Some(c) = sweep.next_rung() {
+                sweep.observe(c, c * 1_000_000, c >= at_cap);
+            }
+            sweep
+        };
+        let saturated = drive(128);
+        assert_eq!(saturated.best().map(|b| b.concurrency), Some(128));
+        assert!(!saturated.still_climbing());
+
+        let unsaturated = drive(u64::MAX);
+        assert_eq!(unsaturated.best().map(|b| b.concurrency), Some(128));
+        assert!(unsaturated.still_climbing());
+
+        // Saturation at an earlier rung does not excuse a later, unsaturated best.
+        let early = {
+            let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, 128);
+            while let Some(c) = sweep.next_rung() {
+                sweep.observe(c, c * 1_000_000, c == 64);
+            }
+            sweep
+        };
+        assert!(early.still_climbing());
+    }
+
     #[test]
     fn a_sweep_still_climbing_at_its_bound_is_refused_rather_than_reported() {
         let sweep = run_sweep(INGEST_CONCURRENCY_MAX, |c| c * 100_000);
