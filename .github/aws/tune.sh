@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bootstrap/spate-1651-consumers only, not for merge: a scripted tuning session
-# for spate#1651. It measures the Spate native arm at 1, 2 and 4 Kafka consumers,
-# and at 1 consumer with the fetch path's sizes raised, in one interleaved sweep
+# for spate#1651. With ClickHouse's insert delay lifted, it measures the Spate
+# native arm at 1, 2, 4 and 8 Kafka consumers, in one interleaved sweep
 # of two reps with the A/A control, the arm's metrics tapped and the host
 # collector running. It uploads everything and returns, so the box terminates
 # as soon as the work is done.
@@ -70,9 +70,29 @@ note "building the spate arm"
 note "prefilling the run-mode corpus"
 "$BENCH" prefill --env "$ENV_ID" >>"$LOG" 2>&1
 
-note "arm cells: native (1 consumer), native-c2, native-c4, native-fetch"
+# Lift the sink's bound: at two consumers ClickHouse delayed 54-67% of inserts
+# on the active-part count while using 34 of its 48 cores. A larger merge pool
+# and higher part limits let the arm run past it, so the sweep measures the
+# source. The file lives in the running container, so a restart keeps it.
+chq() { docker exec spate-bench-clickhouse clickhouse-client --password bench -q "$1"; }
+docker exec spate-bench-clickhouse bash -c "cat > /etc/clickhouse-server/config.d/zz-bench-1651.xml" <<'XML'
+<clickhouse>
+  <background_pool_size>32</background_pool_size>
+  <merge_tree>
+    <parts_to_delay_insert>3000</parts_to_delay_insert>
+    <parts_to_throw_insert>6000</parts_to_throw_insert>
+  </merge_tree>
+</clickhouse>
+XML
+docker restart spate-bench-clickhouse >/dev/null
+for _ in $(seq 1 90); do chq "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
+note "clickhouse pool $(chq "SELECT value FROM system.server_settings WHERE name = 'background_pool_size'") \
+delay $(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_delay_insert'") \
+throw $(chq "SELECT value FROM system.merge_tree_settings WHERE name = 'parts_to_throw_insert'")"
+
+note "arm cells: native (1 consumer), native-c2, native-c4, native-c8"
 diag_start consumers
-"$BENCH" run spate:native spate:native-c2 spate:native-c4 spate:native-fetch --reps 2 \
+"$BENCH" run spate:native spate:native-c2 spate:native-c4 spate:native-c8 --reps 2 \
   --env "$ENV_ID" --trigger tuning >>"$LOG" 2>&1 || note "arm run failed; see ladder.log"
 diag_stop
 
