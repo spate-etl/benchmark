@@ -117,7 +117,7 @@ allocation and use is visible rather than implied.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(3 CPUs, 8 GiB) and ClickHouse (48 CPUs, 32 GiB) in the committed environment
+(3 CPUs, 8 GiB) and ClickHouse (48 CPUs, 64 GiB) in the committed environment
 profile.
 
 Those numbers are the output of a measured ladder rather than a guess. The

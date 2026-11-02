@@ -41,11 +41,19 @@ well-behaved.
 # cores. The arm's rate is the same at 32 and 48, and the merge pool (16
 # threads, the shipped default) runs full under both.
 #
+# ClickHouse memory is sized for the ingest ceiling pass, which posts
+# 1,029,000-row blocks and needs every format to reach the cpu cap on a rung it
+# can drive. Each format gets there by 64 concurrent inserts. One such insert
+# peaks at 165 MiB (Native), 168 MiB (RowBinary), 312 MiB (ArrowStream) and
+# 364 MiB (JSONEachRow) on 26.8.36.3. At 32g, 64 ArrowStream inserts reached
+# the server's limit (0.9 of the cap, 28.8 GiB resident against 17.8 GiB
+# tracked) and were refused. 64g sets the limit at 57.6 GiB.
+#
 # CPU: 3 broker + 48 clickhouse + 32 arm envelope = 83 of 96, leaving 13
-# for the driver, the sampler and the host. Memory: 8g + 32g + 96g + 2g of
-# Flink control plane = 138 GiB of 188, leaving 50 for the page cache and
-# the driver. The largest measured arm peak is 56 GiB (vector) against the
-# 96 GiB envelope.
+# for the driver, the sampler and the host. Memory: 8g + 64g + 96g + 2g of
+# Flink control plane = 170 GiB of 188 in caps, leaving 18 for the page cache
+# and the driver. The arms and the ceiling pass do not run at once. The largest
+# measured arm peak is 56 GiB (vector) against the 96 GiB envelope.
 #
 # Changing these caps, the partition count or the storage kind moves
 # `infra_digest`, and `Ceilings::gate` drops every ceiling not measured under
@@ -72,7 +80,7 @@ cluster  = { fetch_max_read_concurrency = "4" }
 [infra.clickhouse]
 image  = "clickhouse/clickhouse-server:26.8.36.3@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7"
 cpus   = "48"
-memory = "32g"
+memory = "64g"
 
 # `kind` is in `infra_digest`; the paths are not. A path that is not its own
 # mount fails the run before any container starts.
