@@ -77,7 +77,7 @@ run while ClickHouse was saturated, is infra-bound and cannot be published as a
 system comparison** — past either we are measuring the infrastructure, not the
 system. ClickHouse's saturation is read from its own cgroup and query log over
 the arm's window, with the ingest ceiling as the fallback when those counters
-are missing; [the resource envelope](../methodology/envelope.md) states the
+are missing; [the resource envelope](./contract/envelope.md) states the
 tests.
 
 Such a run is recorded with a failed status rather than discarded, so "we ran it
