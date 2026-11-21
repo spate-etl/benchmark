@@ -29,9 +29,9 @@ apache-avro = { workspace = true }
 # are the denominator of a committed ceiling — a silent minor-bump that moved
 # the IPC layout would change what a "reproduced" pass sends; `--locked` is what
 # holds the transitive arrow crates to the lockfile's versions.
-arrow-array = "=59.3.0"
-arrow-ipc = "=59.3.0"
-arrow-schema = "=59.3.0"
+arrow-array = "=60.0.0"
+arrow-ipc = "=60.0.0"
+arrow-schema = "=60.0.0"
 bytes = { workspace = true }
 # ClickHouse's compressed-frame encoding for a ceiling taken with a compressed
 # body (`ceiling --compression`), and nothing else. The spate arm depends on
@@ -40,7 +40,7 @@ bytes = { workspace = true }
 # the arm's ClickHouse client already enables are named, so its build is the
 # same with this crate as without it.
 cityhash-rs = "1.0.1"
-lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -48,7 +48,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true, features = ["parse"] }
 uuid = { workspace = true }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 
 [build-dependencies]
 sha2 = { workspace = true }

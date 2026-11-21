@@ -117,18 +117,19 @@ allocation and use is visible rather than implied.
 
 Infrastructure sits **outside** that budget and is identical for every arm, and is
 declared per environment rather than passed on the command line: Redpanda
-(3 CPUs, 8 GiB) and ClickHouse (32 CPUs, 32 GiB) in the committed environment
+(3 CPUs, 8 GiB) and ClickHouse (48 CPUs, 64 GiB) in the committed environment
 profile.
 
 Those numbers are the output of a measured ladder rather than a guess. The
 consume ceiling is flat from 8 to 32 partitions and from a 3-core broker cap to
 an 8-core one (the broker never uses 2 full cores while serving it), so the
-broker keeps the smallest cap that does not constrain it. ClickHouse ingest
-stops scaling at about 28 cores — RowBinary reaches 6.0M rows/s at a throttled
-16-core cap, 11.0M at 32, and the same 11.0M at 48 and 64 with the extra cores
-idle — so it gets 32, the smallest cap at that plateau. Every core past the
-plateau buys background merges rather than ceiling, which is contention inside
-the measurement, not headroom. The host bounds the total: 3 + 32 + 32 leaves 29
+broker keeps the smallest cap that does not constrain it. ClickHouse gets 48
+cores because 32 is the binding cap at the arms' rates on the synchronous insert
+path: the Spate native arm at about 35M rows/s holds a 32-core server at about 31
+cores, throttled 3.8–4.6 s per second, and leaves a 48-core server unthrottled at
+about 32 cores. The arm's rate is the same under both caps, so the extra cores
+remove CPU contention from the server during the window and add no throughput.
+The host bounds the total: 3 + 48 + 32 leaves 13
 of 96 cores for the driver, the sampler and the operating system.
 
 One consequence of a 32-partition topic worth stating normatively: a consumer
@@ -146,15 +147,46 @@ it is published on `localhost:18081`; containers reach it at
 `http://spate-bench-redpanda:8081`.
 
 Before any arm is published, a ceiling pass measures what ClickHouse and the
-broker can actually absorb at those caps. **An arm exceeding 70% of either ceiling
-is infra-bound and cannot be published as a system comparison** — at that point we
-are measuring ClickHouse, not the system. If arms hit the ceiling, an envelope
-moves until they are engine-bound.
+broker can actually absorb at those caps. Two rules then decide whether a number
+describes the system or the rig, and a run that breaks either is infra-bound and
+cannot be published as a system comparison.
+
+**An arm exceeding 70% of the broker's consume ceiling is infra-bound.** At that
+point we are measuring the broker, not the system.
+
+**An arm is infra-bound when ClickHouse was saturated over its measurement
+window.** The harness samples ClickHouse's cgroup over the arm's own window and
+reads the arm's inserts back out of `system.query_log`, and any one of three
+tests marks the run server-bound:
+
+- ClickHouse was throttled for at least 1% of its cap's time over the window;
+- it used at least 90% of its CPU cap over the window;
+- it held the arm's inserts back (`DelayedInsertsMilliseconds`) for at least 5%
+  of their insert time (`query_duration_ms`).
+
+The lines come from the reference host with ClickHouse 26.8, under the Spate
+native arm at about 35M rows/s. At a 32-core cap ClickHouse used about 31 cores
+and was throttled for 3.8–4.6 s of every second, about 13% of its cap's time. At
+48 cores it used about 32 and was throttled for at most 7.5 ms a second, about
+0.02%. Insert delays peaked at 1.7% of insert time with the stock merge pool and
+were zero with a larger one, at the same arm rate. So 5% separates a server that
+slows the arm from one that only delays a few of its inserts, and 1% of throttled
+time sits far from both readings of the cgroup.
+
+When the window's ClickHouse counters are missing, a test that did fire still
+decides, and otherwise the arm is held to 70% of the ClickHouse ingest ceiling
+for its wire format. Every record says which rule decided
+(`run.infra.clickhouse_gate`: `measured_saturation` or `ceiling_share`), carries
+a flag for each test that fired (`clickhouse_throttled`,
+`clickhouse_cpu_saturated`, `clickhouse_inserts_delayed`), and publishes the
+figures the tests read: `ch_cores_used`, `ch_throttled_share` and
+`ch_delayed_insert_share`. If arms hit either limit, an envelope moves until they
+are engine-bound.
 
 **Which envelope moves is a diagnosis, not a preference.** Shrinking the arms is
 right when the arms are too big for the rig around them. When the infrastructure
 is the thing at its cap, shrinking every arm makes the comparison smaller for all
-of them and leaves the fault in place. Read the cgroup counters on both sides
-first, and move whichever is at its cap. Such a run is recorded with
-`status: infra_bound` rather than discarded, so "we ran it and it blew the limit"
-is distinguishable from "we never ran it".
+of them and leaves the fault in place. The record carries ClickHouse's counters
+beside the arm's own, so read both, and move whichever is at its cap. Such a run
+is recorded with `status: infra_bound` rather than discarded, so "we ran it and
+it blew the limit" is distinguishable from "we never ran it".

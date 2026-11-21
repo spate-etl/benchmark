@@ -3,10 +3,13 @@
 //!
 //! `methodology/` says that before any arm is published, a ceiling pass
 //! measures what ClickHouse and the broker can actually absorb at their declared
-//! caps, and that **an arm exceeding 70% of either ceiling is infra-bound and
-//! cannot be published as a system comparison**. That rule is the entire defence
-//! of the claim "we are not measuring ClickHouse". This module is where it
-//! becomes true rather than asserted.
+//! caps. **An arm exceeding 70% of the broker's consume ceiling is infra-bound
+//! and cannot be published as a system comparison.** ClickHouse is held to its
+//! measured saturation over the arm's window instead, and its ingest ceiling
+//! takes the same 70% rule only when the window's counters are missing; see
+//! [`Headroom::verdict`]. Those rules are the defence of the claim "we are not
+//! measuring the infrastructure". This module is where they become true rather
+//! than asserted.
 //!
 //! # The defect this module closes
 //!
@@ -281,7 +284,7 @@
 //! and the null pattern — and a measurement whose rows the oracle rejects is
 //! refused rather than recorded. Before that,
 //! `harness/tests/native_encoder_matches_clickhouse.rs` runs the same chain
-//! against a fresh `clickhouse/clickhouse-server:26.3` under the committed
+//! against a fresh `clickhouse/clickhouse-server:26.8.36.3` under the committed
 //! DDL, with RowBinary as a control so a failure there indicts the test rig
 //! rather than the encoder. That test needs a Docker daemon and is
 //! `#[ignore]`d; it is the pre-merge proof that a format may be claimed at
@@ -319,11 +322,39 @@ use crate::infra::Endpoints;
 ///
 /// Above this we are measuring the shared infrastructure rather than the system,
 /// and the run is recorded with `status: infra_bound` rather than published.
+/// It always applies to the broker's consume ceiling. It applies to the
+/// ClickHouse ingest ceiling only when the window's ClickHouse counters are
+/// missing; see [`ServerLoad`].
 ///
 /// It lives here rather than beside the environment profile because it is a
 /// property of the ceilings, not of the hardware; `crate::environment`
 /// re-exports it so the name every existing call site uses still resolves.
 pub const HEADROOM_LIMIT: f64 = 0.70;
+
+/// The share of ClickHouse's cap time spent throttled at or above which it
+/// bound the arm.
+///
+/// On the reference host a 32-core ClickHouse under the Spate native arm was
+/// throttled for about 13% of its cap time, and a 48-core one under the same
+/// arm rate for about 0.02%. One percent sits well clear of both.
+pub const THROTTLED_SHARE_LIMIT: f64 = 0.01;
+
+/// The share of ClickHouse's cap used at or above which it bound the arm.
+///
+/// The ingest sweep reads the same line: a rung at or above it measured the
+/// server at its cap, so a sweep whose best rung got there has found the
+/// server's ceiling even if that rung still beat the one below it. More
+/// inserters only queue for the same cores.
+pub const CPU_SHARE_LIMIT: f64 = 0.90;
+
+/// The share of the arm's insert time ClickHouse spent holding inserts back, at
+/// or above which it bound the arm.
+///
+/// The server delays an insert when the target has too many active parts. On
+/// the reference host the delay peaked at 1.7% of insert time with the stock
+/// merge pool and was zero with a larger pool, at the same arm rate, so a
+/// share below this delays a few inserts without slowing the arm.
+pub const DELAYED_INSERT_SHARE_LIMIT: f64 = 0.05;
 
 /// How far a ceiling's message size may differ from the corpus's before the
 /// harness refuses to gate against it.
@@ -1051,6 +1082,149 @@ pub struct Share {
     pub ceiling: u64,
 }
 
+/// What the shared ClickHouse server did over an arm's measurement window.
+///
+/// Each figure is `None` when it could not be measured, and an absent figure is
+/// never read as an idle server.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ServerLoad {
+    /// Mean cores ClickHouse's cgroup used over the window.
+    pub cores_used: Option<f64>,
+    /// `cores_used` over ClickHouse's cpu cap.
+    pub cpu_share: Option<f64>,
+    /// Time ClickHouse's cgroup spent throttled, over the window times its cap.
+    pub throttled_share: Option<f64>,
+    /// Time ClickHouse held the arm's attributed inserts back, over those
+    /// inserts' own duration.
+    pub delayed_insert_share: Option<f64>,
+}
+
+impl ServerLoad {
+    /// The load read from ClickHouse's cgroup over the window and from the
+    /// arm's attributed inserts.
+    ///
+    /// `cgroup` is ClickHouse's own cost over the arm's window and `cap_cores`
+    /// its cpu cap from the environment profile. A cap that is not positive
+    /// leaves both cgroup shares unmeasured.
+    #[must_use]
+    pub fn new(
+        cgroup: Option<&crate::sampler::SutCost>,
+        cap_cores: f64,
+        delayed_insert_share: Option<f64>,
+    ) -> Self {
+        let capped = cgroup.filter(|c| cap_cores > 0.0 && c.window_s > 0.0);
+        Self {
+            cores_used: cgroup.map(|c| c.cores_used),
+            cpu_share: capped.map(|c| c.cores_used / cap_cores),
+            throttled_share: capped.map(|c| c.throttled_us / (c.window_s * 1e6 * cap_cores)),
+            delayed_insert_share,
+        }
+    }
+
+    /// The flag of every saturation test that fired.
+    fn fired(&self) -> Vec<crate::report::Flag> {
+        use crate::report::Flag;
+        let at_or_above = |v: Option<f64>, limit: f64| v.is_some_and(|v| v >= limit);
+        let mut fired = Vec::new();
+        if at_or_above(self.throttled_share, THROTTLED_SHARE_LIMIT) {
+            fired.push(Flag::ClickHouseThrottled);
+        }
+        if at_or_above(self.cpu_share, CPU_SHARE_LIMIT) {
+            fired.push(Flag::ClickHouseCpuSaturated);
+        }
+        if at_or_above(self.delayed_insert_share, DELAYED_INSERT_SHARE_LIMIT) {
+            fired.push(Flag::ClickHouseInsertsDelayed);
+        }
+        fired
+    }
+
+    /// Whether every saturation test had its figure.
+    fn complete(&self) -> bool {
+        self.cpu_share.is_some()
+            && self.throttled_share.is_some()
+            && self.delayed_insert_share.is_some()
+    }
+
+    /// One line of the measured figures, for a record's note.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let pct = |v: Option<f64>| {
+            v.map_or_else(|| "unmeasured".to_owned(), |v| format!("{:.2}%", v * 100.0))
+        };
+        format!(
+            "ClickHouse {} cores ({} of cap), throttled {}, inserts delayed {}",
+            self.cores_used
+                .map_or_else(|| "unmeasured".to_owned(), |c| format!("{c:.1}")),
+            pct(self.cpu_share),
+            pct(self.throttled_share),
+            pct(self.delayed_insert_share),
+        )
+    }
+}
+
+/// Whether the shared infrastructure bound an arm, and what decided it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// The rule that decided whether ClickHouse bound the arm.
+    pub rule: crate::report::ClickHouseGate,
+    /// The flag of each saturation test that fired. Empty when none did, and
+    /// always empty under [`crate::report::ClickHouseGate::CeilingShare`].
+    pub fired: Vec<crate::report::Flag>,
+    /// Whether ClickHouse bound the arm, by `rule`.
+    pub server_bound: bool,
+    /// Whether the arm exceeded the headroom limit of the broker's consume
+    /// ceiling.
+    pub broker_bound: bool,
+}
+
+impl Verdict {
+    /// Whether the record is `infra_bound`.
+    #[must_use]
+    pub fn infra_bound(&self) -> bool {
+        self.server_bound || self.broker_bound
+    }
+
+    /// Why the record is `infra_bound`, one clause per cause. Empty when it is
+    /// not.
+    #[must_use]
+    pub fn reasons(&self) -> Vec<String> {
+        use crate::report::Flag;
+        let mut out: Vec<String> = self
+            .fired
+            .iter()
+            .filter_map(|f| match f {
+                Flag::ClickHouseThrottled => Some(format!(
+                    "ClickHouse was throttled for at least {:.0}% of its cap time",
+                    THROTTLED_SHARE_LIMIT * 100.0
+                )),
+                Flag::ClickHouseCpuSaturated => Some(format!(
+                    "ClickHouse used at least {:.0}% of its cpu cap",
+                    CPU_SHARE_LIMIT * 100.0
+                )),
+                Flag::ClickHouseInsertsDelayed => Some(format!(
+                    "ClickHouse delayed the arm's inserts for at least {:.0}% of their time",
+                    DELAYED_INSERT_SHARE_LIMIT * 100.0
+                )),
+                _ => None,
+            })
+            .collect();
+        if self.server_bound && self.rule == crate::report::ClickHouseGate::CeilingShare {
+            out.push(format!(
+                "above {:.0}% of the ClickHouse ingest ceiling, with no ClickHouse counters \
+                 for the window",
+                HEADROOM_LIMIT * 100.0
+            ));
+        }
+        if self.broker_bound {
+            out.push(format!(
+                "above {:.0}% of the broker consume ceiling",
+                HEADROOM_LIMIT * 100.0
+            ));
+        }
+        out
+    }
+}
+
 /// Every ceiling an arm was checked against, and every one it could not be.
 #[derive(Debug, Clone)]
 pub struct Headroom {
@@ -1104,7 +1278,7 @@ impl Ceiling {
                 }),
                 _ => unproven.push(format!(
                     "no ClickHouse ingest ceiling has been measured for wire format {:?}, so this \
-                 arm is not gated against the target. It is deliberately NOT \
+                 arm is not held to an ingest ceiling. It is deliberately NOT \
                  gated against another format's figure: the insert format materially changes \
                  server-side work, and substituting one for another is the same unmeasured \
                  conversion that produced the message-size defect. Measure it with \
@@ -1154,14 +1328,45 @@ impl Headroom {
             .max_by(|a, b| a.share.total_cmp(&b.share))
     }
 
-    /// Whether the arm exceeded the headroom limit against any ceiling.
+    /// Whether the shared infrastructure bound the arm, given what ClickHouse
+    /// did over its window.
     ///
-    /// "Any", not "the consume ceiling", because the methodology says *either*.
-    /// Reading only one of the two is how an arm bound by ClickHouse got
-    /// published as a system comparison.
+    /// The broker is held to its consume ceiling. ClickHouse is held to
+    /// measured saturation: any test in `load` that fires makes the arm
+    /// server-bound, and a server none of them fires on clears it only when
+    /// every test had its figure. Otherwise the ingest ceiling's share decides.
+    #[must_use]
+    pub fn verdict(&self, load: &ServerLoad) -> Verdict {
+        use crate::report::ClickHouseGate;
+        let over = |kind: Against| {
+            self.shares
+                .iter()
+                .any(|s| s.kind == kind && s.share > HEADROOM_LIMIT)
+        };
+        let fired = load.fired();
+        let (rule, server_bound) = if !fired.is_empty() {
+            (ClickHouseGate::MeasuredSaturation, true)
+        } else if load.complete() {
+            (ClickHouseGate::MeasuredSaturation, false)
+        } else {
+            (
+                ClickHouseGate::CeilingShare,
+                over(Against::ClickHouseIngest),
+            )
+        };
+        Verdict {
+            rule,
+            fired,
+            server_bound,
+            broker_bound: over(Against::BrokerConsume),
+        }
+    }
+
+    /// Whether the arm is infra-bound with no ClickHouse counters to read, so
+    /// by the share of every ceiling it was checked against.
     #[must_use]
     pub fn infra_bound(&self) -> bool {
-        self.binding().is_some_and(|s| s.share > HEADROOM_LIMIT)
+        self.verdict(&ServerLoad::default()).infra_bound()
     }
 
     /// Whether every ceiling the methodology names was actually checked.
@@ -1283,8 +1488,8 @@ fn mb_to_bytes(mb_per_s: f64) -> u64 {
 /// new `Format` variant may land in this enum at all — not the only time the
 /// proof runs. The encoders exist first so the next ceiling pass can measure
 /// the formats the two new benchmark arms will report; until a format's
-/// ceiling is committed, an arm declaring it is not gated against ClickHouse
-/// at all — the honest consequence stated in the module docs and enforced in
+/// ceiling is committed, an arm declaring it is held to no ingest ceiling — the
+/// honest consequence stated in the module docs and enforced in
 /// [`Ceiling::headroom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -2038,15 +2243,21 @@ impl From<ServerCost> for Cgroup {
 // The ClickHouse ingest pass
 // ---------------------------------------------------------------------------
 
-/// Batches encoded into one insert block. A thousand batches is 73,500 rows
-/// after the workload's filters, which is the order of block a real arm sends.
-const INSERT_BLOCK_BATCHES: u64 = 1_000;
+/// Batches encoded into one insert block: 1,029,000 rows after the workload's
+/// filters.
+///
+/// Close to ClickHouse's `max_insert_block_size` (1,048,449 rows) and kept under
+/// it, so each POST lands as one part, the largest block the server takes in
+/// one insert. On the synchronous path a smaller block writes more parts per
+/// row and measures less than an arm that batches larger, so the ceiling is
+/// taken at the size no arm's batch exceeds.
+const INSERT_BLOCK_BATCHES: u64 = 14_000;
 /// Distinct blocks pre-encoded before the clock starts.
 ///
 /// Distinct rather than one block re-sent, because a single block would give
 /// every insert the same handful of `LowCardinality` dictionary entries and the
 /// same array shapes, and the target would absorb it faster than it absorbs the
-/// corpus. Eight blocks cover eight thousand batches, which spans every modulus
+/// corpus. Eight blocks cover 112,000 batches, which spans every modulus
 /// the generator's derivations use.
 const INSERT_BLOCK_POOL: u64 = 8;
 /// Seconds one insert may take before the pass gives up on it.
@@ -2168,7 +2379,9 @@ const INGEST_SWEEP_PATIENCE: usize = 2;
 /// * If the ladder runs out first and the incumbent best is the last rung tried,
 ///   throughput was still climbing when the rig stopped asking. That is not a
 ///   ceiling and [`Sweep::still_climbing`] says so; the caller refuses rather
-///   than publishing the last sample.
+///   than publishing the last sample. The exception is an incumbent measured
+///   with the target at [`CPU_SHARE_LIMIT`] of its cap: the server
+///   was the limit there, so its figure is the ceiling.
 #[derive(Debug)]
 struct Sweep {
     step: u64,
@@ -2178,6 +2391,9 @@ struct Sweep {
     points: Vec<SweepPoint>,
     /// Index into `points` of the incumbent best.
     best: usize,
+    /// Whether the target was at [`CPU_SHARE_LIMIT`] of its cap at
+    /// each rung in `points`.
+    saturated: Vec<bool>,
     /// Consecutive rungs since the incumbent was set.
     misses: usize,
 }
@@ -2192,6 +2408,7 @@ impl Sweep {
             next: Some(from.clamp(1, max)),
             points: Vec::new(),
             best: 0,
+            saturated: Vec::new(),
             misses: 0,
         }
     }
@@ -2201,13 +2418,14 @@ impl Sweep {
         self.next
     }
 
-    /// Records what the target absorbed at `concurrency` and decides whether to
-    /// keep climbing.
-    fn observe(&mut self, concurrency: u64, rows_per_s: u64) {
+    /// Records what the target absorbed at `concurrency`, and whether it was at
+    /// its cpu cap doing so, and decides whether to keep climbing.
+    fn observe(&mut self, concurrency: u64, rows_per_s: u64, saturated: bool) {
         self.points.push(SweepPoint {
             concurrency,
             rows_per_s,
         });
+        self.saturated.push(saturated);
         let improved = self.points.len() == 1
             || rows_per_s as f64
                 > self.points[self.best].rows_per_s as f64 * (1.0 + INGEST_SWEEP_MARGIN);
@@ -2246,8 +2464,13 @@ impl Sweep {
     /// figure is then a floor — the most this rig was allowed to ask for — and
     /// publishing it as a ceiling would gate arms against a number nothing
     /// showed the target could not beat.
+    ///
+    /// False when that best rung had the target at its cap, because the server
+    /// was the limit there whatever the rig could have asked for next.
     fn still_climbing(&self) -> bool {
-        !self.points.is_empty() && self.best + 1 == self.points.len()
+        !self.points.is_empty()
+            && self.best + 1 == self.points.len()
+            && !self.saturated.get(self.best).copied().unwrap_or(false)
     }
 }
 
@@ -2355,6 +2578,12 @@ struct ServerCost {
     nr_throttled: u64,
     /// Microseconds spent throttled by it.
     throttled_us: u64,
+}
+
+/// Whether a rung had the target at [`CPU_SHARE_LIMIT`] of its cpu
+/// cap. `false` when the cgroup could not be read or no cap is declared.
+fn at_cap(server: Option<ServerCost>) -> bool {
+    server.is_some_and(|s| s.cap_cores > 0.0 && s.cores >= s.cap_cores * CPU_SHARE_LIMIT)
 }
 
 impl ServerCost {
@@ -2616,14 +2845,7 @@ fn measure_ingest(
 
     // Started once for the whole ladder, so the pool crosses the pipe once and
     // every rung POSTs bytes that are not merely equal but the same.
-    // A diagnostic pass is compared with what an arm does, so its POSTs take
-    // the arms' synchronous insert path: the server's default sends them down
-    // the async path, which adds a flush wait to every POST.
-    let settings: &[(&str, &str)] = match opts.compression {
-        None => &[],
-        Some(crate::frames::Codec::None) => &[("async_insert", "0")],
-        Some(_) => &[("async_insert", "0"), ("decompress", "1")],
-    };
+    let settings = ingest_settings(opts.compression);
     let mut inserter = crate::inserter::Inserter::start(ep, &sql, &pool, settings)?;
 
     let mut sweep = Sweep::new(
@@ -2695,7 +2917,7 @@ fn measure_ingest(
             burst.settle_s,
             describe_landed(burst),
         );
-        sweep.observe(concurrency, burst.rows_per_s());
+        sweep.observe(concurrency, burst.rows_per_s(), at_cap(burst.server));
         bursts.push((concurrency, burst));
     }
     let swept_s = swept_from.elapsed().as_secs() + 1;
@@ -2983,6 +3205,23 @@ fn landed_rows(ep: &Endpoints, table: &str) -> Option<u64> {
     )
     .ok()?;
     body.trim().parse().ok()
+}
+
+/// The settings every ingest POST carries, for a pass sent with `compression`
+/// or without it.
+///
+/// `async_insert=0` on every pass, because every arm pins it and the server's
+/// default sends an unpinned POST down the async path, which waits for a buffer
+/// flush and merges concurrent POSTs into fewer parts. A ceiling taken on that
+/// path describes an insert no arm performs. A compressed pool's bodies are
+/// ClickHouse frames, which the server reads only with `decompress=1`.
+fn ingest_settings(
+    compression: Option<crate::frames::Codec>,
+) -> &'static [(&'static str, &'static str)] {
+    match compression {
+        None | Some(crate::frames::Codec::None) => &[("async_insert", "0")],
+        Some(_) => &[("async_insert", "0"), ("decompress", "1")],
+    }
 }
 
 /// The target's cgroup CPU across one rung, given the reading taken before it.
@@ -4626,7 +4865,7 @@ mod tests {
     fn run_sweep(max: u64, curve: impl Fn(u64) -> u64) -> Sweep {
         let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, max);
         while let Some(c) = sweep.next_rung() {
-            sweep.observe(c, curve(c));
+            sweep.observe(c, curve(c), false);
         }
         sweep
     }
@@ -4719,6 +4958,31 @@ mod tests {
             "{:?}",
             c.measured_under_other_envelopes("new")
         );
+    }
+
+    /// The committed pass and every diagnostic pass take the arms' synchronous
+    /// insert path, and only a pool of compressed frames asks the server to
+    /// decompress.
+    #[test]
+    fn every_ingest_pass_sends_async_insert_off() {
+        use crate::frames::Codec;
+        for compression in [
+            None,
+            Some(Codec::None),
+            Some(Codec::Lz4),
+            Some(Codec::Zstd(3)),
+        ] {
+            let settings = ingest_settings(compression);
+            assert!(
+                settings.contains(&("async_insert", "0")),
+                "{compression:?} sends {settings:?}"
+            );
+            assert_eq!(
+                settings.contains(&("decompress", "1")),
+                matches!(compression, Some(Codec::Lz4 | Codec::Zstd(_))),
+                "{compression:?} sends {settings:?}"
+            );
+        }
     }
 
     #[test]
@@ -4945,6 +5209,169 @@ mod tests {
         );
     }
 
+    /// An arm at `share` of a 5M rows/s ClickHouse ingest ceiling and 5% of
+    /// the consume ceiling.
+    fn headroom_at(share: f64) -> Headroom {
+        let current = corpus_message_bytes();
+        Ceilings {
+            consume: Some(consume_at(current, 1_000_000, "envelope")),
+            clickhouse: vec![ingest_of("native", 5_000_000, "envelope")],
+        }
+        .gate(current, "envelope")
+        .headroom(Achieved {
+            msgs_per_s: 50_000.0,
+            rows_per_s: share * 5_000_000.0,
+            wire_format: "native",
+            server_side_transform: false,
+        })
+    }
+
+    /// A ClickHouse cgroup over a 100-second window at a 48-core cap.
+    fn cgroup(cores_used: f64, throttled_share: f64) -> crate::sampler::SutCost {
+        let window_s = 100.0;
+        crate::sampler::SutCost {
+            window_s,
+            cpu_us: cores_used * window_s * 1e6,
+            user_us: 0.0,
+            system_us: 0.0,
+            cores_used,
+            throttled_us: throttled_share * window_s * 1e6 * 48.0,
+            nr_throttled: 0.0,
+            peak_anon_bytes: 0.0,
+            peak_shmem_bytes: 0.0,
+            peak_charged_bytes: 0.0,
+            peak_current_bytes: 0.0,
+            samples: 1001,
+            unreadable: 0,
+        }
+    }
+
+    fn load(cores_used: f64, throttled_share: f64, delayed: Option<f64>) -> ServerLoad {
+        ServerLoad::new(Some(&cgroup(cores_used, throttled_share)), 48.0, delayed)
+    }
+
+    /// The cgroup figures are shares of the cap's time over the window.
+    #[test]
+    fn the_server_load_divides_by_the_window_and_the_cap() {
+        let l = load(24.0, 0.13, Some(0.017));
+        assert_eq!(l.cores_used, Some(24.0));
+        assert!((l.cpu_share.expect("measured") - 0.5).abs() < 1e-12);
+        assert!((l.throttled_share.expect("measured") - 0.13).abs() < 1e-12);
+        assert_eq!(l.delayed_insert_share, Some(0.017));
+
+        // No cap, no share: a cap of zero would divide into an infinity.
+        let uncapped = ServerLoad::new(Some(&cgroup(24.0, 0.13)), 0.0, None);
+        assert_eq!(uncapped.cores_used, Some(24.0));
+        assert_eq!((uncapped.cpu_share, uncapped.throttled_share), (None, None));
+    }
+
+    /// Each test fires at its line and not just below it, whatever the arm's
+    /// share of the ceiling, and an arm on a server none of them fires on is
+    /// engine-bound at any share.
+    #[test]
+    fn each_saturation_test_fires_at_its_line_and_not_below_it() {
+        use crate::report::{ClickHouseGate, Flag};
+        let quiet = (10.0, 0.0, Some(0.0));
+        let cases = [
+            (
+                Flag::ClickHouseThrottled,
+                (10.0, THROTTLED_SHARE_LIMIT, Some(0.0)),
+                (10.0, THROTTLED_SHARE_LIMIT - 1e-6, Some(0.0)),
+            ),
+            (
+                Flag::ClickHouseCpuSaturated,
+                (48.0 * CPU_SHARE_LIMIT, 0.0, Some(0.0)),
+                (48.0 * CPU_SHARE_LIMIT - 1e-6, 0.0, Some(0.0)),
+            ),
+            (
+                Flag::ClickHouseInsertsDelayed,
+                (10.0, 0.0, Some(DELAYED_INSERT_SHARE_LIMIT)),
+                (10.0, 0.0, Some(DELAYED_INSERT_SHARE_LIMIT - 1e-6)),
+            ),
+        ];
+        for (flag, at, below) in cases {
+            for share in [0.10, 0.95] {
+                let headroom = headroom_at(share);
+
+                let v = headroom.verdict(&load(at.0, at.1, at.2));
+                assert_eq!(v.rule, ClickHouseGate::MeasuredSaturation, "{flag:?}");
+                assert_eq!(v.fired, vec![flag], "{flag:?} at its line");
+                assert!(v.server_bound && v.infra_bound(), "{flag:?} at {share}");
+
+                let v = headroom.verdict(&load(below.0, below.1, below.2));
+                assert_eq!(v.rule, ClickHouseGate::MeasuredSaturation, "{flag:?}");
+                assert!(v.fired.is_empty(), "{flag:?} below its line: {v:?}");
+                assert!(!v.infra_bound(), "{flag:?} below its line at {share}");
+            }
+        }
+        assert!(
+            !headroom_at(0.95)
+                .verdict(&load(quiet.0, quiet.1, quiet.2))
+                .infra_bound()
+        );
+    }
+
+    /// Missing counters hand the decision to the ingest ceiling's 70% line,
+    /// and the verdict says so.
+    #[test]
+    fn missing_counters_fall_back_to_the_ceiling_share() {
+        use crate::report::ClickHouseGate;
+        for missing in [
+            ServerLoad::default(),
+            ServerLoad::new(None, 48.0, Some(0.0)),
+            ServerLoad::new(Some(&cgroup(10.0, 0.0)), 48.0, None),
+        ] {
+            let over = headroom_at(HEADROOM_LIMIT + 0.01).verdict(&missing);
+            assert_eq!(over.rule, ClickHouseGate::CeilingShare, "{missing:?}");
+            assert!(over.fired.is_empty());
+            assert!(over.server_bound && over.infra_bound(), "{missing:?}");
+            assert!(
+                over.reasons()[0].contains("ClickHouse ingest ceiling"),
+                "{:?}",
+                over.reasons()
+            );
+
+            let under = headroom_at(HEADROOM_LIMIT - 0.01).verdict(&missing);
+            assert_eq!(under.rule, ClickHouseGate::CeilingShare, "{missing:?}");
+            assert!(!under.infra_bound(), "{missing:?}");
+        }
+    }
+
+    /// A test that fires decides even when another test's figure is missing,
+    /// because one saturated resource is enough.
+    #[test]
+    fn a_test_that_fires_decides_without_the_others() {
+        use crate::report::{ClickHouseGate, Flag};
+        let throttled_only = ServerLoad::new(Some(&cgroup(10.0, 0.13)), 48.0, None);
+        let v = headroom_at(0.10).verdict(&throttled_only);
+        assert_eq!(v.rule, ClickHouseGate::MeasuredSaturation);
+        assert_eq!(v.fired, vec![Flag::ClickHouseThrottled]);
+        assert!(v.infra_bound());
+    }
+
+    /// The broker keeps its consume-ceiling line whatever ClickHouse did.
+    #[test]
+    fn the_broker_is_held_to_its_consume_ceiling_under_either_rule() {
+        let current = corpus_message_bytes();
+        let headroom = Ceilings {
+            consume: Some(consume_at(current, 1_000_000, "envelope")),
+            clickhouse: vec![ingest_of("native", 5_000_000, "envelope")],
+        }
+        .gate(current, "envelope")
+        .headroom(Achieved {
+            msgs_per_s: 900_000.0,
+            rows_per_s: 500_000.0,
+            wire_format: "native",
+            server_side_transform: false,
+        });
+        let v = headroom.verdict(&load(10.0, 0.0, Some(0.0)));
+        assert!(
+            !v.server_bound && v.broker_bound && v.infra_bound(),
+            "{v:?}"
+        );
+        assert!(v.reasons()[0].contains("broker consume ceiling"));
+    }
+
     /// Rule 5 says the insert format materially changes server-side work, so an
     /// arm is never gated against a format it does not write. `protobuf` is a
     /// live instance: a format arms could declare and this rig does not encode.
@@ -5093,6 +5520,20 @@ mod tests {
     /// event count — and exactly the count the corpus's own oracle expects. A
     /// block that carried every event would be measuring an insert nobody
     /// performs.
+    /// Every block in the ingest pool fits in one ClickHouse insert block, so
+    /// each POST lands as one part, and the first carries the row count the
+    /// constant's doc states.
+    #[test]
+    fn every_ingest_block_fits_one_clickhouse_insert_block() {
+        const MAX_INSERT_BLOCK_SIZE: u64 = 1_048_449;
+        let rows = |lo: u64, hi: u64| corpus::expected_rows(hi) - corpus::expected_rows(lo);
+        assert_eq!(rows(0, INSERT_BLOCK_BATCHES), 1_029_000);
+        for k in 0..INSERT_BLOCK_POOL {
+            let n = rows(k * INSERT_BLOCK_BATCHES, (k + 1) * INSERT_BLOCK_BATCHES);
+            assert!(n <= MAX_INSERT_BLOCK_SIZE, "block {k} carries {n} rows");
+        }
+    }
+
     #[test]
     fn a_block_carries_exactly_the_rows_the_workload_keeps() {
         for format in FORMATS {
@@ -5576,6 +6017,54 @@ mod tests {
     /// A target that keeps absorbing more has not been shown a ceiling, and the
     /// pass says so instead of publishing the largest number it happened to
     /// reach. This is the whole difference between a ceiling and a floor.
+    /// A rung is at the cap from 95% of it, and never without a cgroup reading
+    /// or a declared cap.
+    #[test]
+    fn a_rung_is_at_the_cap_from_its_saturation_share() {
+        let cost = |cores: f64, cap_cores: f64| ServerCost {
+            cores,
+            cap_cores,
+            user_us: 0,
+            system_us: 0,
+            nr_throttled: 0,
+            throttled_us: 0,
+        };
+        assert!(at_cap(Some(cost(48.0 * CPU_SHARE_LIMIT, 48.0))));
+        assert!(!at_cap(Some(cost(48.0 * CPU_SHARE_LIMIT - 0.01, 48.0))));
+        assert!(!at_cap(Some(cost(48.0, 0.0))));
+        assert!(!at_cap(None));
+    }
+
+    /// A sweep still gaining at its last rung is a ceiling, not a floor, when
+    /// that rung had the target at its cpu cap, and is refused when it did not.
+    #[test]
+    fn a_sweep_climbing_at_its_last_rung_is_a_ceiling_only_if_the_target_was_at_its_cap() {
+        let drive = |at_cap: u64| {
+            let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, 128);
+            while let Some(c) = sweep.next_rung() {
+                sweep.observe(c, c * 1_000_000, c >= at_cap);
+            }
+            sweep
+        };
+        let saturated = drive(128);
+        assert_eq!(saturated.best().map(|b| b.concurrency), Some(128));
+        assert!(!saturated.still_climbing());
+
+        let unsaturated = drive(u64::MAX);
+        assert_eq!(unsaturated.best().map(|b| b.concurrency), Some(128));
+        assert!(unsaturated.still_climbing());
+
+        // Saturation at an earlier rung does not excuse a later, unsaturated best.
+        let early = {
+            let mut sweep = Sweep::new(INGEST_CONCURRENCY_FROM, INGEST_CONCURRENCY_STEP, 128);
+            while let Some(c) = sweep.next_rung() {
+                sweep.observe(c, c * 1_000_000, c == 64);
+            }
+            sweep
+        };
+        assert!(early.still_climbing());
+    }
+
     #[test]
     fn a_sweep_still_climbing_at_its_bound_is_refused_rather_than_reported() {
         let sweep = run_sweep(INGEST_CONCURRENCY_MAX, |c| c * 100_000);

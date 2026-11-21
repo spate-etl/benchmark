@@ -70,7 +70,19 @@ ORDER BY (sensor, batch_ts, batch_id, event_seq)
 -- It is not visible in `entrants/spate/`: the setting is applied by the
 -- framework under test, not by the arm's own source. A review that grepped the
 -- entrant directory concluded no arm sent tokens and was wrong.
-SETTINGS non_replicated_deduplication_window = 1000;
+--
+-- The three cleanup settings make a merged-away part leave the disk within
+-- seconds rather than after `old_parts_lifetime`'s shipped 480 s, with the
+-- cleanup thread polling every second (shipped: 30 s, backing off to 300 s).
+-- An arm's own merged-away parts are then deleted inside its own repetition,
+-- and the harness's settle wait covers them, so no arm's window runs while a
+-- predecessor's parts are being deleted. An arm writing small inserts leaves
+-- hundreds of thousands of them, and their deletion otherwise overlaps the next
+-- arm's window, where the server held that arm's inserts back.
+SETTINGS non_replicated_deduplication_window = 1000,
+         old_parts_lifetime = 10,
+         cleanup_delay_period = 1,
+         max_cleanup_delay_period = 5;
 
 -- ---------------------------------------------------------------------------
 -- The gates the driver runs after every arm, before it emits anything.

@@ -142,6 +142,6 @@ fn the_dataset_version_matches_the_committed_workload() {
     // not in the prose.
     assert_eq!(
         spate_benchmark_harness::report::DATASET_VERSION,
-        "d2-60d7e5bb2a82"
+        "d2-2ba9a27e5e89"
     );
 }

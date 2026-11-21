@@ -21,7 +21,7 @@ under "Not yet measured" comes from `[planned].blockers` in that system's
 | **Apache Flink 2.2.1** | JVM | RowBinaryWithNamesAndTypes, via the official ClickHouse connector |
 | **Vector 0.57.0** | native (Rust) | ArrowStream and JSONEachRow wire formats |
 | **Kafka Connect 4.3.1 + `clickhouse-kafka-connect` v1.4.0** | JVM | RowBinary into a Null-engine landing table, flattened by a ClickHouse materialized view — Connect has no fan-out operator, so the transform's CPU moves to the server and the arm leans on ClickHouse's own profiling, declared in `[[deviations]]` |
-| **ClickHouse 26.3 Kafka table engine** | native (C++) | Native — a dedicated ClickHouse *is* the whole data-plane envelope (its own ingest tier), forwarding synchronously through a Distributed table to the shared ClickHouse; one hop like every arm, declared in its deviations |
+| **ClickHouse 26.8 Kafka table engine** | native (C++) | Native — a dedicated ClickHouse *is* the whole data-plane envelope (its own ingest tier), forwarding synchronously through a Distributed table to the shared ClickHouse; one hop like every arm, declared in its deviations |
 
 The Kafka Connect arm's former licence gate is **closed**: it runs on the ASF's
 own `apache/kafka` image with an Apache-2.0 connector and a POM-verified

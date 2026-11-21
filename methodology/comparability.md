@@ -95,9 +95,15 @@ serving writes and reads at once and a generator competing for cores, which is
 the whole argument drain exists for. Latency is single-mode by construction.
 
 Softer provenance — a ClickHouse patch release, a compiler version, a broker
-version — is recorded on every record and rendered as a footnote. Refusing to
-compare across a ClickHouse patch would make the suite unusable; refusing across a
-protocol change is the entire point.
+version — is recorded on every record. Refusing to compare across a ClickHouse
+patch would make the suite unusable; refusing across a protocol change is the
+entire point.
+
+A ClickHouse feature release can change server defaults that move what an insert
+costs the server, so a move across feature releases is published as a full sweep
+of every active arm, under an `infra_digest` that no record from the previous
+server carries. Records from the two servers then never share a comparability
+group.
 
 ### The source system
 
@@ -125,8 +131,8 @@ framing is a pointer into a registry, and a broker that ships no registry carrie
 the bare datum instead — the same decode over the same bytes, declared by the arm
 under rule 4.
 
-The consequence a reader has to know is that the 70% headroom rule needs one
-consume ceiling **per broker**. A ceiling measured against one broker says
+The consequence a reader has to know is that the 70% consume-ceiling rule needs
+one consume ceiling **per broker**. A ceiling measured against one broker says
 nothing about another, `Ceilings::gate` refuses it rather than scaling it, and
 until one exists the arm publishes with its headroom unproven.
 
@@ -139,6 +145,7 @@ asserts it stays in step with the constant in `harness/src/report.rs`.
 
 | Version | Date | Change |
 |---|---|---|
+| 3 | 2026-11-01 | ClickHouse is held to its measured saturation over each arm's window: a record is `infra_bound` when ClickHouse's cgroup was throttled for at least 1% of its cap's time, used at least 90% of its cap, or held the arm's inserts back for at least 5% of their insert time, with the 70% ingest-ceiling share deciding only when those counters are missing. The broker keeps its 70% consume-ceiling line. Every record says which rule decided and carries the figures the tests read. Ingest ceilings are measured with `async_insert=0` on every POST, the synchronous path every arm inserts on, in blocks of 1,029,000 rows, under ClickHouse's `max_insert_block_size` and at least as large as any arm's batch, and a sweep's figure stands as the ceiling once ClickHouse is at 90% of its cpu cap, the line the gate calls saturated. A repetition's settle wait also covers outdated parts, and the target table deletes a merged-away part within seconds (`old_parts_lifetime = 10`), so no window runs while a predecessor's parts are being deleted. |
 | 2 | 2026-08-24 | Every repetition waits for the target to report no active parts and no running merges before its window opens, so a repetition pays for its own merges rather than its predecessor's. Sampler at 10 Hz, drain polled at 250 ms, and a 120-second floor on the measurement window with `window_resolution` and `short_window` on every record. Every sweep measures its own first arm a second time under a second label and publishes the difference as a `verdict` record. The correctness gate examines a share of the corpus bounded by ClickHouse's memory rather than a fixed count. The arm envelope a number was measured under is on the record. `infra_digest` covers the storage layout. |
 | 1 | 2026-07-29 | Initial protocol. One measurement window — throughput, mean cores and CPU-per-row divide by the sampler's own window. Headroom gated against both ceilings, with a ceiling measured at the wrong message size or under a different infrastructure envelope refused rather than extrapolated. Gate set covers row count and every derived column. Sustained mode and latency. Peak memory is what an arm held at one instant across its containers. Server-side cost, GC pauses and JVM heap measured. |
 

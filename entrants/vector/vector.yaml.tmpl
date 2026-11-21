@@ -99,7 +99,7 @@ sinks:
       password: bench
     query_settings:
       async_insert_settings:
-        # ClickHouse 26.3 defaults this on, under which the server acks before
+        # ClickHouse 26.8 defaults this on, under which the server acks before
         # the data is written — an ack the acknowledgement chain would trust.
         enabled: false
     batch:

@@ -51,7 +51,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// numbers?" is a judgement; a content hash would answer yes to every typo fix
 /// and shatter every comparability group in the archive. `methodology/`
 /// carries a row per version and CI asserts the two stay in step.
-pub const HARNESS_VERSION: u32 = 2;
+pub const HARNESS_VERSION: u32 = 3;
 
 /// Version of the **corpus**: the Avro schema, the ClickHouse DDL, and the
 /// generator constants.
@@ -84,8 +84,9 @@ pub enum Kind {
 pub enum Status {
     /// Ran to completion and passed every gate. Publishable.
     Ok,
-    /// Exceeded the infrastructure headroom limit. The number describes
-    /// ClickHouse or the broker, not the system under test.
+    /// The shared infrastructure bound the arm: ClickHouse was saturated over
+    /// the window, or the arm exceeded the headroom limit of a ceiling. The
+    /// number describes ClickHouse or the broker, not the system under test.
     InfraBound,
     /// The system cannot express this variant at all — no fan-out operator, no
     /// Native writer. Carries no metrics, and exists so the site can render an
@@ -204,7 +205,7 @@ pub enum Flag {
     /// ceiling arrived. That ceiling is measured **per insert
     /// format**, because Native, RowBinary and `JSONEachRow` are not the same
     /// amount of server-side work; an arm whose format has no measured figure is
-    /// therefore deliberately not gated against the target at all rather than
+    /// therefore deliberately held to no ingest ceiling at all rather than
     /// gated against another format's number. See `crate::ceiling`.
     ///
     /// The flag exists so that "we did not gate this arm" can never be read as
@@ -259,6 +260,19 @@ pub enum Flag {
     /// against its twin's, and the difference is the spread the rig produces
     /// when nothing changes.
     AaControl,
+    /// ClickHouse's cgroup was throttled for at least
+    /// `ceiling::THROTTLED_SHARE_LIMIT` of its cap's time over the window.
+    #[serde(rename = "clickhouse_throttled")]
+    ClickHouseThrottled,
+    /// ClickHouse's cgroup used at least `ceiling::CPU_SHARE_LIMIT` of its cap
+    /// over the window.
+    #[serde(rename = "clickhouse_cpu_saturated")]
+    ClickHouseCpuSaturated,
+    /// ClickHouse held the arm's inserts back for at least
+    /// `ceiling::DELAYED_INSERT_SHARE_LIMIT` of their insert time, because the
+    /// target had too many active parts.
+    #[serde(rename = "clickhouse_inserts_delayed")]
+    ClickHouseInsertsDelayed,
     /// The measurement window fell below the floor the protocol declares.
     ///
     /// A drain's window is `corpus / throughput`, so it shrinks as arms get
@@ -485,13 +499,43 @@ pub struct Infra {
     /// before any arm is known, and `driver::measure` fills it in on each
     /// record, where the arm's declared `wire_format` is.
     ///
-    /// `0` is "not gated against the target" — a visible gap rather than a
+    /// `0` is "held to no ingest ceiling" — a visible gap rather than a
     /// cleared gate, and the same condition that raises
     /// [`Flag::HeadroomUnproven`].
     ///
     /// Additive on the same terms as [`Self::ceiling_bytes_per_s`].
     #[serde(default)]
     pub ceiling_rows_per_s: u64,
+    /// Which rule decided whether ClickHouse bound this arm. Per arm, and
+    /// filled in by `driver::measure` for the same reason as
+    /// [`Self::ceiling_rows_per_s`]. `None` on a record that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clickhouse_gate: Option<ClickHouseGate>,
+}
+
+/// The rule that decided whether the shared ClickHouse server bound an arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickHouseGate {
+    /// ClickHouse's cgroup counters and the arm's attributed inserts over the
+    /// window. A record it marks server-bound carries the flag of each test
+    /// that fired.
+    MeasuredSaturation,
+    /// The arm's share of the ClickHouse ingest ceiling for its wire format,
+    /// against `ceiling::HEADROOM_LIMIT`, because the window's counters were
+    /// missing.
+    CeilingShare,
+}
+
+impl ClickHouseGate {
+    /// The name the record serialises, for a note.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MeasuredSaturation => "measured_saturation",
+            Self::CeilingShare => "ceiling_share",
+        }
+    }
 }
 
 /// Provenance for a run: when, where, under what protocol, on what data.
@@ -753,6 +797,7 @@ mod tests {
             ceiling_msgs_per_s: 305_554,
             ceiling_bytes_per_s: 256_700_000,
             ceiling_rows_per_s: 3_100_000,
+            clickhouse_gate: Some(ClickHouseGate::MeasuredSaturation),
         }
     }
 
@@ -849,11 +894,15 @@ mod tests {
         infra
             .remove("ceiling_rows_per_s")
             .expect("the field was written");
+        infra
+            .remove("clickhouse_gate")
+            .expect("the field was written");
         let older = serde_json::to_string(&v).expect("re-serialize");
 
         let back: Report = serde_json::from_str(&older).expect("an older record deserialises");
         assert_eq!(back.run.infra.ceiling_bytes_per_s, 0);
         assert_eq!(back.run.infra.ceiling_rows_per_s, 0);
+        assert_eq!(back.run.infra.clickhouse_gate, None);
         // The figure that was always there is untouched, so an old record is
         // still gated-against-something rather than gated-against-nothing.
         assert_eq!(back.run.infra.ceiling_msgs_per_s, 305_554);
@@ -940,6 +989,25 @@ mod tests {
 
         let back: Trigger = serde_json::from_str(&tuning).expect("deserialize");
         assert_eq!(back, Trigger::Tuning);
+    }
+
+    /// The saturation flags and the gate rule serialise as one word for
+    /// ClickHouse, the spelling the methodology and the metric keys use.
+    #[test]
+    fn the_clickhouse_gate_serialises_under_the_documented_names() {
+        for (flag, name) in [
+            (Flag::ClickHouseThrottled, "clickhouse_throttled"),
+            (Flag::ClickHouseCpuSaturated, "clickhouse_cpu_saturated"),
+            (Flag::ClickHouseInsertsDelayed, "clickhouse_inserts_delayed"),
+        ] {
+            assert_eq!(serde_json::to_value(flag).expect("serialize"), name);
+        }
+        for gate in [
+            ClickHouseGate::MeasuredSaturation,
+            ClickHouseGate::CeilingShare,
+        ] {
+            assert_eq!(serde_json::to_value(gate).expect("serialize"), gate.name());
+        }
     }
 
     #[test]

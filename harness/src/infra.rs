@@ -238,6 +238,8 @@ pub fn bring_up(env: &Environment, reuse: bool) -> Result<(Endpoints, Infra, Vec
         // fills it in on each record, where the arm's declared `wire_format` is
         // known. See `report::Infra::ceiling_rows_per_s`.
         ceiling_rows_per_s: 0,
+        // Per arm, like the ceiling above.
+        clickhouse_gate: None,
     };
 
     Ok((endpoints, infra, flags))

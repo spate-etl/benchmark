@@ -76,7 +76,7 @@
 //!    error: an arm writing 25k-row batches creates far more parts than one
 //!    writing 262k-row batches, and the difference in merge cost lands nowhere
 //!    in this number. Published records must say so.
-//! 3. **Asynchronous inserts are not attributable.** ClickHouse 26.3 ships
+//! 3. **Asynchronous inserts are not attributable.** ClickHouse 26.8 ships
 //!    `async_insert = 1` as the compiled default (`changed = 0` on the live
 //!    reference server). Under it the client's query returns once the data is
 //!    buffered, so the query's own `ProfileEvents` carry the parse cost and not
@@ -197,7 +197,7 @@ use crate::sampler::Samples;
 /// text form cannot contain a comma or a tab and [`parse_profile_events`] can
 /// split on both without a quoting rule. Widening this list to a counter whose
 /// value is a string would silently break that.
-const COUNTERS: [&str; 9] = [
+const COUNTERS: [&str; 10] = [
     "UserTimeMicroseconds",
     "SystemTimeMicroseconds",
     "RealTimeMicroseconds",
@@ -207,6 +207,7 @@ const COUNTERS: [&str; 9] = [
     "InsertedBytes",
     "AsyncInsertQuery",
     "AsyncInsertRows",
+    "DelayedInsertsMilliseconds",
 ];
 
 /// Fully qualifies a table the way `system.query_log` writes it.
@@ -419,7 +420,7 @@ impl fmt::Display for ServerSideError {
                  path ({wrote_nothing} finished having written no rows). An async insert's \
                  ProfileEvents cover parsing and buffering only — the write is charged to \
                  a background flush with no query_log row — so the sum would under-report \
-                 this arm against one whose client sets async_insert=0. ClickHouse 26.3 \
+                 this arm against one whose client sets async_insert=0. ClickHouse 26.8 \
                  defaults it ON: pin async_insert=0 in the arm's client settings"
             ),
         }
@@ -499,6 +500,9 @@ pub struct ProfileCounters {
     pub async_insert_query: Option<u64>,
     /// `AsyncInsertRows` — rows this insert handed to the async buffer.
     pub async_insert_rows: Option<u64>,
+    /// `DelayedInsertsMilliseconds` — time the server held this insert back
+    /// because the target had too many active parts.
+    pub delayed_inserts_ms: Option<u64>,
 }
 
 impl ProfileCounters {
@@ -581,6 +585,13 @@ pub struct ServerSideCost {
     /// Completed inserts that reported no CPU counters at all. Carried rather
     /// than dropped, so a record can say its figure rests on a subset.
     pub queries_without_cpu: usize,
+    /// `query_duration_ms`, summed over the completed inserts.
+    pub insert_duration_ms: u64,
+    /// `DelayedInsertsMilliseconds`, summed over the completed inserts.
+    ///
+    /// A sum and never `None`: `ProfileEvents` omits a counter an insert never
+    /// incremented, so an insert without the entry was not delayed.
+    pub delayed_inserts_ms: u64,
 }
 
 impl ServerSideCost {
@@ -628,6 +639,18 @@ impl ServerSideCost {
             });
         }
         Ok(self.cpu_us / rows)
+    }
+
+    /// The share of the completed inserts' time the server spent holding them
+    /// back, or `None` when they took no measurable time at all.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "millisecond sums stay far below f64's exact range"
+    )]
+    pub fn delayed_insert_share(&self) -> Option<f64> {
+        (self.insert_duration_ms > 0)
+            .then(|| self.delayed_inserts_ms as f64 / self.insert_duration_ms as f64)
     }
 
     /// Mean rows per completed insert — the arm's effective batch size, as the
@@ -820,6 +843,7 @@ pub fn parse_profile_events(field: &str) -> Result<ProfileCounters, ServerSideEr
             "InsertedBytes" => out.inserted_bytes = Some(value),
             "AsyncInsertQuery" => out.async_insert_query = Some(value),
             "AsyncInsertRows" => out.async_insert_rows = Some(value),
+            "DelayedInsertsMilliseconds" => out.delayed_inserts_ms = Some(value),
             _ => {}
         }
     }
@@ -965,6 +989,8 @@ pub fn summarise(
         os_cpu_virtual_us: micros(total(|e| e.os_cpu_virtual_us)),
         os_cpu_wait_us: micros(total(|e| e.os_cpu_wait_us)),
         queries_without_cpu,
+        insert_duration_ms: finished.iter().map(|r| r.duration_ms).sum(),
+        delayed_inserts_ms: total(|e| e.delayed_inserts_ms).unwrap_or(0),
     })
 }
 
@@ -1152,8 +1178,9 @@ pub const SETTLE_QUIET_MS: u64 = 2_000;
 /// Bounded because the alternative is a pass that hangs, and generous because
 /// the alternative to that is a measurement charged for its predecessor.
 /// Exceeding it is recorded rather than swallowed: a target that cannot clear
-/// its own merge queue inside this is a finding about the target.
-pub const SETTLE_MAX_S: u64 = 120;
+/// its own merge queue inside this is a finding about the target. Long enough
+/// for an arm that writes small inserts to have its outdated parts deleted.
+pub const SETTLE_MAX_S: u64 = 600;
 
 /// Milliseconds between polls while waiting.
 pub const SETTLE_POLL_MS: u64 = 250;
@@ -1196,8 +1223,22 @@ pub fn received_between(before: Option<u64>, after: Option<u64>) -> Option<u64> 
     }
 }
 
-/// Waits until `table` has no active parts and no running merges, and returns
-/// the seconds waited.
+/// The query [`wait_until_settled`] polls: parts of `table` in any state, plus
+/// its running merges.
+#[must_use]
+pub fn settle_sql(table: &str) -> String {
+    format!(
+        "SELECT (SELECT count() FROM system.parts WHERE table = '{table}') \
+         + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
+    )
+}
+
+/// Waits until `table` has no parts, outdated ones included, and no running
+/// merges, and returns the seconds waited.
+///
+/// Outdated parts count because their deletion runs on the server's cores and
+/// disk: a window opened while a predecessor's merged-away parts were still
+/// being removed paid for that removal.
 ///
 /// The wait is on the server's own `system.parts` and `system.merges` rather
 /// than on a clock. A `TRUNCATE` drops parts asynchronously and leaves a merge
@@ -1212,18 +1253,10 @@ pub fn wait_until_settled(host: &str, port: u16, user: &str, password: &str, tab
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_secs(SETTLE_MAX_S);
     while std::time::Instant::now() < deadline {
-        let quiet = crate::docker::try_clickhouse_sql(
-            host,
-            port,
-            user,
-            password,
-            &format!(
-                "SELECT (SELECT count() FROM system.parts WHERE table = '{table}' AND active) \
-                 + (SELECT count() FROM system.merges WHERE table = '{table}') FORMAT TSV"
-            ),
-        )
-        .ok()
-        .and_then(|b| b.trim().parse::<u64>().ok());
+        let quiet =
+            crate::docker::try_clickhouse_sql(host, port, user, password, &settle_sql(table))
+                .ok()
+                .and_then(|b| b.trim().parse::<u64>().ok());
         if quiet.is_none_or(|n| n == 0) {
             break;
         }
@@ -1235,6 +1268,22 @@ pub fn wait_until_settled(host: &str, port: u16, user: &str, password: &str, tab
 
 #[cfg(test)]
 mod tests {
+    /// The settle wait counts outdated parts as well as active ones, so a
+    /// predecessor's merged-away parts still being deleted hold it.
+    #[test]
+    fn the_settle_wait_counts_parts_in_every_state() {
+        let sql = settle_sql("sensor_events");
+        assert!(
+            sql.contains("FROM system.parts WHERE table = 'sensor_events')"),
+            "{sql}"
+        );
+        assert!(!sql.contains("active"), "{sql}");
+        assert!(
+            sql.contains("FROM system.merges WHERE table = 'sensor_events'"),
+            "{sql}"
+        );
+    }
+
     use super::*;
 
     /// Three verbatim rows from the reference ClickHouse (26.3.17.4) — the Spate
@@ -1347,6 +1396,26 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
         assert_eq!(rows[0].events.async_insert_query, None);
     }
 
+    /// The delayed share divides the server's hold-back time by the inserts'
+    /// own duration, and an insert with no `DelayedInsertsMilliseconds` entry
+    /// counts as not delayed rather than as unknown.
+    #[test]
+    fn the_delayed_share_is_hold_back_time_over_insert_time() {
+        let none = summarised(REAL_INSERTS).expect("three real inserts summarise");
+        assert_eq!(none.insert_duration_ms, 437 + 427 + 435);
+        assert_eq!(none.delayed_inserts_ms, 0);
+        assert_eq!(none.delayed_insert_share(), Some(0.0));
+
+        let body = "\
+QueryFinish\t1000\t400\t{'UserTimeMicroseconds':10,'DelayedInsertsMilliseconds':100}
+QueryFinish\t1000\t600\t{'UserTimeMicroseconds':10}
+";
+        let cost = summarised(body).expect("two inserts summarise");
+        assert_eq!(cost.delayed_inserts_ms, 100);
+        let share = cost.delayed_insert_share().expect("the inserts took time");
+        assert!((share - 0.1).abs() < 1e-12, "{share}");
+    }
+
     /// The counter choice, on the numbers that forced it. `RealTimeMicroseconds`
     /// is thread wall-clock and on this row is CPU plus the time the server's
     /// threads spent runnable but off-CPU under a 5-CPU cap — so a per-row figure
@@ -1456,7 +1525,7 @@ QueryFinish\t262275\t435\t{'InsertedRows':262275,'InsertedBytes':16921676,'RealT
         assert!((cost.cpu_us - expected).abs() < 1e-9, "{}", cost.cpu_us);
     }
 
-    /// ClickHouse 26.3 defaults `async_insert` on. An insert that takes that path
+    /// ClickHouse 26.8 defaults `async_insert` on. An insert that takes that path
     /// reports the cost of parsing and buffering, never the cost of the write,
     /// and the shortfall depends on which client library an arm happens to use —
     /// so it would distort the comparison and not merely the absolute figure.
